@@ -188,6 +188,7 @@ internal static unsafe class IrohEngine
         }
 
         SecretKey* key = null;
+        bool keyOwnedByConfig = false;
         if (secretKey is not null)
         {
             key = iroh.secret_key_default();
@@ -197,14 +198,18 @@ internal static unsafe class IrohEngine
                 if (iroh.secret_key_from_base32(k, &key) == KeyResult.KEY_RESULT_OK)
                 {
                     iroh.endpoint_config_add_secret_key(&config, key);
+                    keyOwnedByConfig = true;
                 }
             }
         }
 
         Endpoint* ep = iroh.endpoint_default();
         EndpointResult r = iroh.endpoint_bind(&config, null, null, &ep);
-        if (key != null)
+        if (key != null && !keyOwnedByConfig)
         {
+            // Only free the key when the parse failed and it never moved into the config;
+            // endpoint_config_add_secret_key takes the box BY VALUE, so on success the config
+            // owns it and endpoint_config_free below releases it (freeing here would double-free).
             iroh.secret_key_free(key);
         }
 
