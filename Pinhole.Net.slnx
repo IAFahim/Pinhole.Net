@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/Pinhole/Pinhole.csproj" />
+  <Project Path="src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" />
+  <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />
+</Solution>
