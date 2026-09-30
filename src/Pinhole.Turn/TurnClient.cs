@@ -16,6 +16,7 @@ public sealed class TurnClient : IAsyncDisposable
     private const ushort MethodDataIndication = 0x0017;
     private const ushort MethodCreatePermission = 0x0008;
     private const ushort ClassError = 0x0110;
+    private const int StaleNonceCode = 438;
 
     private const ushort AttrMappedAddress = 0x0001;
     private const ushort AttrUsername = 0x0006;
@@ -31,17 +32,20 @@ public sealed class TurnClient : IAsyncDisposable
     private const ushort AttrXorMappedAddress = 0x0020;
 
     private static readonly TimeSpan TransactTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan PermissionRefreshEvery = TimeSpan.FromSeconds(240);
 
     private readonly Socket _udp;
     private readonly string _username;
     private readonly string _credential;
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<byte[]>> _pending = new();
-    private readonly HashSet<IPAddress> _permitted = new();
+    private readonly Dictionary<IPAddress, DateTimeOffset> _permitted = new();
     private readonly CancellationTokenSource _shutdown = new();
     private byte[] _integrityKey = Array.Empty<byte>();
     private string? _realm;
     private string? _nonce;
     private int _lifetime = 600;
+    private DateTimeOffset _lastAllocate = DateTimeOffset.UtcNow;
+    private int _refreshFailures;
     private int _disposed;
 
     private TurnClient(IPEndPoint server, string username, string credential)
@@ -49,6 +53,12 @@ public sealed class TurnClient : IAsyncDisposable
         _username = username;
         _credential = credential;
         _udp = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        if (OperatingSystem.IsWindows())
+        {
+            const int sioUdpConnreset = -1744830452;
+            _udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
+        }
+
         _udp.Bind(new IPEndPoint(server.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0));
         _udp.Connect(server);
         Thread recv = new(RecvLoop) { IsBackground = true, Name = "turn-recv" };
@@ -56,6 +66,8 @@ public sealed class TurnClient : IAsyncDisposable
     }
 
     public IPEndPoint? RelayedAddress { get; private set; }
+
+    public bool IsAlive => Volatile.Read(ref _disposed) == 0;
 
     public event Action<IPEndPoint, byte[]>? Received;
 
@@ -65,6 +77,7 @@ public sealed class TurnClient : IAsyncDisposable
         try
         {
             await client.Allocate(ct).ConfigureAwait(false);
+            client._lastAllocate = DateTimeOffset.UtcNow;
             _ = client.RefreshLoop();
             return client;
         }
@@ -77,15 +90,16 @@ public sealed class TurnClient : IAsyncDisposable
 
     public async Task CreatePermissionAsync(IPAddress peerIp, CancellationToken ct = default)
     {
-        byte[] txid = NewTxid();
-        byte[] peer = XorAddress(peerIp, 0, txid);
-        byte[] msg = Request(MethodCreatePermission, txid,
-            [Attr(AttrXorPeerAddress, peer), Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
-        byte[] resp = await Transact(msg, txid, ct).ConfigureAwait(false);
+        byte[] resp = await Transact(() =>
+        {
+            byte[] txid = NewTxid();
+            return Request(MethodCreatePermission, txid,
+                [Attr(AttrXorPeerAddress, XorAddress(peerIp, 0, txid)), Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
+        }, ct).ConfigureAwait(false);
         ThrowIfError(resp);
         lock (_permitted)
         {
-            _permitted.Add(peerIp);
+            _permitted[peerIp] = DateTimeOffset.UtcNow;
         }
     }
 
@@ -94,7 +108,8 @@ public sealed class TurnClient : IAsyncDisposable
         bool needsPermit;
         lock (_permitted)
         {
-            needsPermit = _permitted.Add(peer.Address);
+            needsPermit = !_permitted.TryGetValue(peer.Address, out DateTimeOffset seen)
+                || DateTimeOffset.UtcNow - seen >= PermissionRefreshEvery;
         }
 
         if (needsPermit)
@@ -105,7 +120,7 @@ public sealed class TurnClient : IAsyncDisposable
         byte[] txid = NewTxid();
         byte[] msg = Message(MethodSendIndication, txid,
             Concat(Attr(AttrXorPeerAddress, XorAddress(peer.Address, peer.Port, txid)), Attr(AttrData, payload.Span)));
-        _udp.Send(msg);
+        SendIndication(msg);
     }
 
     public void Send(ReadOnlySpan<byte> payload, IPEndPoint peer)
@@ -113,14 +128,26 @@ public sealed class TurnClient : IAsyncDisposable
         byte[] txid = NewTxid();
         byte[] msg = Message(MethodSendIndication, txid,
             Concat(Attr(AttrXorPeerAddress, XorAddress(peer.Address, peer.Port, txid)), Attr(AttrData, payload)));
-        _udp.Send(msg);
+        SendIndication(msg);
+    }
+
+    private void SendIndication(byte[] msg)
+    {
+        try
+        {
+            _udp.Send(msg);
+        }
+        catch (SocketException)
+        {
+            // Indications are unacknowledged; a transient ICMP-reported error must not
+            // kill the caller's send pump. The next indication goes out as usual.
+        }
     }
 
     private async Task Allocate(CancellationToken ct)
     {
-        byte[] txid = NewTxid();
-        byte[] first = Message(MethodAllocate, txid, Attr(AttrRequestedTransport, [17, 0, 0, 0]));
-        byte[] resp = await Transact(first, txid, ct).ConfigureAwait(false);
+        byte[] first = Message(MethodAllocate, NewTxid(), Attr(AttrRequestedTransport, [17, 0, 0, 0]));
+        byte[] resp = await SendAndAwait(first, ct).ConfigureAwait(false);
         foreach ((ushort type, byte[] value) in Attributes(resp))
         {
             if (type == AttrRealm)
@@ -135,10 +162,12 @@ public sealed class TurnClient : IAsyncDisposable
 
         _integrityKey = MD5.HashData(Utf8($"{_username}:{_realm}:{_credential}"));
 
-        txid = NewTxid();
-        byte[] authed = Request(MethodAllocate, txid,
-            [Attr(AttrRequestedTransport, [17, 0, 0, 0]), Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
-        resp = await Transact(authed, txid, ct).ConfigureAwait(false);
+        resp = await Transact(() =>
+        {
+            byte[] txid = NewTxid();
+            return Request(MethodAllocate, txid,
+                [Attr(AttrRequestedTransport, [17, 0, 0, 0]), Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
+        }, ct).ConfigureAwait(false);
         ThrowIfError(resp);
         foreach ((ushort type, byte[] value) in Attributes(resp))
         {
@@ -160,16 +189,23 @@ public sealed class TurnClient : IAsyncDisposable
 
     private async Task RefreshLoop()
     {
-        TimeSpan every = TimeSpan.FromSeconds(_lifetime * 2 / 3);
         while (!_shutdown.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(every, _shutdown.Token).ConfigureAwait(false);
-                byte[] txid = NewTxid();
-                byte[] msg = Request(MethodRefresh, txid,
-                    [Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
-                await Transact(msg, txid, _shutdown.Token).ConfigureAwait(false);
+                int tickSeconds = Math.Clamp(_lifetime / 3, 5, 30);
+                await Task.Delay(TimeSpan.FromSeconds(tickSeconds), _shutdown.Token).ConfigureAwait(false);
+
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                // Due with two spare ticks before expiry, so one misaligned tick can
+                // never let the allocation lapse.
+                TimeSpan refreshDue = TimeSpan.FromSeconds(Math.Max(1, _lifetime - 2 * tickSeconds));
+                if (now - _lastAllocate >= refreshDue)
+                {
+                    await RefreshAllocationAsync(_shutdown.Token).ConfigureAwait(false);
+                }
+
+                await RefreshStalePermissionsAsync(now, _shutdown.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -177,6 +213,71 @@ public sealed class TurnClient : IAsyncDisposable
             }
             catch (Exception)
             {
+            }
+        }
+    }
+
+    private async Task RefreshAllocationAsync(CancellationToken ct)
+    {
+        try
+        {
+            byte[] resp = await Transact(() =>
+            {
+                byte[] txid = NewTxid();
+                return Request(MethodRefresh, txid,
+                    [Attr(AttrUsername, Utf8(_username)), Attr(AttrRealm, Utf8(_realm ?? "")), Attr(AttrNonce, Utf8(_nonce ?? ""))]);
+            }, ct).ConfigureAwait(false);
+            ThrowIfError(resp);
+            foreach ((ushort type, byte[] value) in Attributes(resp))
+            {
+                if (type == AttrLifetime && value.Length >= 4)
+                {
+                    _lifetime = (int)BinaryPrimitives.ReadUInt32BigEndian(value);
+                }
+            }
+
+            _lastAllocate = DateTimeOffset.UtcNow;
+            _refreshFailures = 0;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // After repeated failed refreshes the allocation is gone; close the socket
+            // so the connection fails visibly instead of silently black-holing traffic.
+            if (Interlocked.Increment(ref _refreshFailures) >= 3)
+            {
+                CloseSocket();
+            }
+        }
+    }
+
+    private async Task RefreshStalePermissionsAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        IPAddress[] stale;
+        lock (_permitted)
+        {
+            stale = _permitted.Where(kv => now - kv.Value >= PermissionRefreshEvery).Select(kv => kv.Key).ToArray();
+        }
+
+        foreach (IPAddress peer in stale)
+        {
+            try
+            {
+                await CreatePermissionAsync(peer, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                lock (_permitted)
+                {
+                    _permitted.Remove(peer);
+                }
             }
         }
     }
@@ -195,9 +296,58 @@ public sealed class TurnClient : IAsyncDisposable
         return msg;
     }
 
-    private async Task<byte[]> Transact(byte[] msg, byte[] txid, CancellationToken ct)
+    private async Task<byte[]> Transact(Func<byte[]> build, CancellationToken ct)
     {
-        ulong key = BinaryPrimitives.ReadUInt64BigEndian(txid);
+        byte[] resp = await SendAndAwait(build(), ct).ConfigureAwait(false);
+        if (TryAdoptRotatedAuth(resp))
+        {
+            // 438 stale nonce: the server rotated its nonce; rebuild with the fresh
+            // realm/nonce (the builders read the updated fields) and retry once.
+            resp = await SendAndAwait(build(), ct).ConfigureAwait(false);
+        }
+
+        return resp;
+    }
+
+    private bool TryAdoptRotatedAuth(byte[] resp)
+    {
+        if (!IsError(resp, StaleNonceCode))
+        {
+            return false;
+        }
+
+        string? nonce = null;
+        string? realm = null;
+        foreach ((ushort at, byte[] v) in Attributes(resp))
+        {
+            if (at == AttrNonce)
+            {
+                nonce = Encoding.UTF8.GetString(v);
+            }
+            else if (at == AttrRealm)
+            {
+                realm = Encoding.UTF8.GetString(v);
+            }
+        }
+
+        if (nonce is null)
+        {
+            return false;
+        }
+
+        _nonce = nonce;
+        if (realm is not null && realm != _realm)
+        {
+            _realm = realm;
+            _integrityKey = MD5.HashData(Utf8($"{_username}:{_realm}:{_credential}"));
+        }
+
+        return true;
+    }
+
+    private async Task<byte[]> SendAndAwait(byte[] msg, CancellationToken ct)
+    {
+        ulong key = BinaryPrimitives.ReadUInt64BigEndian(msg.AsSpan(8));
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[key] = tcs;
         try
@@ -220,6 +370,21 @@ public sealed class TurnClient : IAsyncDisposable
             try
             {
                 n = _udp.Receive(buf);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (SocketException) when (_shutdown.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (SocketException)
+            {
+                // Transient errors (ICMP-reported unreachable, interface flap) must not
+                // stop the receive loop; pace briefly so a persistent error cannot spin.
+                Thread.Sleep(20);
+                continue;
             }
             catch
             {
@@ -262,6 +427,25 @@ public sealed class TurnClient : IAsyncDisposable
                 }
             }
         }
+    }
+
+    private static bool IsError(byte[] resp, int code)
+    {
+        ushort type = BinaryPrimitives.ReadUInt16BigEndian(resp);
+        if ((type & ClassError) != ClassError)
+        {
+            return false;
+        }
+
+        foreach ((ushort at, byte[] v) in Attributes(resp))
+        {
+            if (at == AttrErrorCode && v.Length >= 4 && v[2] * 100 + v[3] == code)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void ThrowIfError(byte[] resp)

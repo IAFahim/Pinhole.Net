@@ -58,6 +58,7 @@ internal sealed class PeerState
     public PinholeDatagramHandler? Received;
     public TimeSpan? LastRtt;
     public int Punching;
+    public readonly SemaphoreSlim StunGate = new(1, 1);
     public byte[]? StunTxid;
     public TaskCompletionSource<IPEndPoint>? StunResult;
 }
@@ -119,7 +120,8 @@ internal static class PeerEngine
     {
         s.Shutdown.Cancel();
         s.Udp.Dispose();
-        s.Shutdown.Dispose();
+        // The CTS is deliberately not disposed: the refresh loop may still be
+        // registering on its token, and a timer-less CTS is reclaimed by the GC.
     }
 
     public static void AddRendezvous(PeerState s, IPEndPoint endpoint)
@@ -217,14 +219,24 @@ internal static class PeerEngine
 
     public static async Task<IPEndPoint> ProbeStun(PeerState s, IPEndPoint server, CancellationToken ct)
     {
-        byte[] req = new byte[20];
-        BinaryPrimitives.WriteUInt16BigEndian(req, 0x0001);
-        BinaryPrimitives.WriteUInt32BigEndian(req.AsSpan(4), StunCookie);
-        RandomNumberGenerator.Fill(req.AsSpan(8));
-        s.StunTxid = req.AsSpan(8).ToArray();
-        s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-        s.Udp.SendTo(req, SocketFlags.None, server.Serialize());
-        return await s.StunResult.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
+        // ProbeStun shares StunTxid/StunResult on the state, so concurrent probes are
+        // serialized; the later probe simply runs once the earlier one settles.
+        await s.StunGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            byte[] req = new byte[20];
+            BinaryPrimitives.WriteUInt16BigEndian(req, 0x0001);
+            BinaryPrimitives.WriteUInt32BigEndian(req.AsSpan(4), StunCookie);
+            RandomNumberGenerator.Fill(req.AsSpan(8));
+            s.StunTxid = req.AsSpan(8).ToArray();
+            s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
+            s.Udp.SendTo(req, SocketFlags.None, server.Serialize());
+            return await s.StunResult.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            s.StunGate.Release();
+        }
     }
 
     private static void OnStun(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
@@ -337,7 +349,15 @@ internal static class PeerEngine
 
             if (buf[0] < 0x20)
             {
-                DispatchFrame(s, remote, buf.AsSpan(0, n));
+                try
+                {
+                    // Frame handlers send replies on this receive thread; one failed
+                    // send (unreachable peer, interface flap) must not deafen the socket.
+                    DispatchFrame(s, remote, buf.AsSpan(0, n));
+                }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                {
+                }
             }
             else
             {
@@ -462,7 +482,15 @@ internal static class PeerEngine
                 {
                     foreach (SocketAddress sa in s.Candidates)
                     {
-                        s.Udp.SendTo(probe, SocketFlags.None, sa);
+                        try
+                        {
+                            s.Udp.SendTo(probe, SocketFlags.None, sa);
+                        }
+                        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                        {
+                            // One unroutable candidate (or a brief interface flap) must
+                            // not kill the punch; the pacing delay below bounds retries.
+                        }
                     }
                 }
 
@@ -496,6 +524,11 @@ internal static class PeerEngine
             catch (ObjectDisposedException)
             {
                 return;
+            }
+            catch (SocketException)
+            {
+                // The rendezvous send failed (network flap); retry on the next tick
+                // so the registration does not quietly expire.
             }
         }
     }
