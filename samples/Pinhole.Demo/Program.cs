@@ -2,11 +2,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Text;
+using N0.IrohNet;
 using Pinhole;
+using Pinhole.Iroh;
 
 if (args.Length == 0)
 {
     Console.Error.WriteLine("usage: pinhole-demo <rendezvous ip:port> <myIdHex> [peerIdHex]");
+    Console.Error.WriteLine("       pinhole-demo iroh [peerTicket]");
     Console.Error.WriteLine("       pinhole-demo bench [count] [size]");
     return 2;
 }
@@ -14,6 +17,16 @@ if (args.Length == 0)
 if (args[0] == "bench")
 {
     return await Bench(args.Length > 1 ? int.Parse(args[1]) : 100_000, args.Length > 2 ? int.Parse(args[2]) : 64);
+}
+
+if (args[0] == "iroh")
+{
+    return await IrohChat(args.Length > 1 ? args[1] : null);
+}
+
+if (args[0] == "bindtest")
+{
+    return await BindTest();
 }
 
 if (args.Length < 2)
@@ -61,6 +74,69 @@ while (Console.ReadLine() is { Length: > 0 } line)
 }
 
 return 0;
+
+static unsafe Task<int> BindTest()
+{
+    byte[] alpn = Encoding.ASCII.GetBytes("pinhole/0");
+    EndpointConfig config = iroh.endpoint_config_default();
+    config.relay_mode = RelayMode.RELAY_MODE_DEFAULT;
+    config.discovery_cfg = DiscoveryConfig.DISCOVERY_CONFIG_ALL;
+    fixed (byte* a = alpn)
+    {
+        iroh.endpoint_config_add_alpn(&config, new slice_ref_uint8 { ptr = a, len = (nuint)alpn.Length });
+    }
+
+    Endpoint* ep = iroh.endpoint_default();
+    EndpointResult r = iroh.endpoint_bind(&config, null, null, &ep);
+    Console.WriteLine($"bind result: {r} ep: {(nint)ep:x}");
+    iroh.endpoint_config_free(config);
+    if (ep != null)
+    {
+        iroh.endpoint_free(ep);
+    }
+
+    return Task.FromResult(0);
+}
+
+static async Task<int> IrohChat(string? ticket)
+{
+    await using IrohPinhole node = await IrohPinhole.BindAsync();
+    using var pin = new PeerSocket(0);
+    Console.WriteLine($"ticket: {node.Ticket}");
+    Console.WriteLine($"addrs:  {string.Join(", ", node.DirectAddresses)}");
+    await using IrohLink link = ticket is null ? await node.AcceptAsync() : await node.ConnectAsync(ticket);
+
+    pin.Received += d => Console.WriteLine($"peer(udp):   {Encoding.UTF8.GetString(d)}");
+    link.Received += d => Console.WriteLine($"peer(relay): {Encoding.UTF8.GetString(d)}");
+
+    Console.WriteLine("introducing over iroh…");
+    bool fast = false;
+    try
+    {
+        await link.IntroduceAsync(pin);
+        fast = true;
+        Console.WriteLine($"pinhole open to {pin.Peer} — UDP fast path active");
+    }
+    catch (Exception e)
+    {
+        Console.WriteLine($"punch failed ({e.Message}) — staying on iroh relay path");
+    }
+
+    while (Console.ReadLine() is { Length: > 0 } line)
+    {
+        byte[] body = Encoding.UTF8.GetBytes(line);
+        if (fast)
+        {
+            pin.Send(body);
+        }
+        else
+        {
+            await link.SendAsync(body);
+        }
+    }
+
+    return 0;
+}
 
 static async Task<int> Bench(int n, int size)
 {

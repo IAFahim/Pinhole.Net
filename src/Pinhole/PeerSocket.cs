@@ -33,6 +33,7 @@ public sealed class PeerSocket : IDisposable
     }
 
     public Task<IPEndPoint> RegisterAsync(CancellationToken ct = default) => PeerEngine.Register(_s, ct);
+    public void AddCandidate(IPEndPoint endpoint) => PeerEngine.AddCandidate(_s, endpoint);
     public Task ConnectAsync(ulong targetNodeId, CancellationToken ct = default) => PeerEngine.Connect(_s, targetNodeId, ct);
     public Task ConnectDirectAsync(IPEndPoint endpoint) => PeerEngine.ConnectDirect(_s, endpoint);
     public void Send(ReadOnlySpan<byte> payload) => PeerEngine.SendData(_s, payload);
@@ -47,6 +48,7 @@ internal sealed class PeerState
     public required ulong Magic;
     public readonly CancellationTokenSource Shutdown = new();
     public readonly List<SocketAddress> Rendezvous = new();
+    public readonly List<SocketAddress> Candidates = new();
     public SocketAddress? PeerSa;
     public IPEndPoint? PublicAddress;
     public readonly TaskCompletionSource<IPEndPoint> Observed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -145,8 +147,21 @@ internal static class PeerEngine
 
     public static Task ConnectDirect(PeerState s, IPEndPoint endpoint)
     {
-        IntroducePeer(s, endpoint);
+        AddCandidate(s, endpoint);
         return s.Punched.Task;
+    }
+
+    public static void AddCandidate(PeerState s, IPEndPoint ep)
+    {
+        lock (s.Candidates)
+        {
+            s.Candidates.Add(ep.Serialize());
+        }
+
+        if (Interlocked.CompareExchange(ref s.Punching, 1, 0) == 0)
+        {
+            _ = PunchLoop(s);
+        }
     }
 
     public static void SendData(PeerState s, ReadOnlySpan<byte> payload)
@@ -331,16 +346,7 @@ internal static class PeerEngine
             return;
         }
 
-        IntroducePeer(s, ep!);
-    }
-
-    private static void IntroducePeer(PeerState s, IPEndPoint ep)
-    {
-        Interlocked.CompareExchange(ref s.PeerSa, ep.Serialize(), null);
-        if (Interlocked.CompareExchange(ref s.Punching, 1, 0) == 0)
-        {
-            _ = PunchLoop(s);
-        }
+        AddCandidate(s, ep!);
     }
 
     private static async Task PunchLoop(PeerState s)
@@ -354,9 +360,12 @@ internal static class PeerEngine
         {
             while (!s.Punched.Task.IsCompleted)
             {
-                if (s.PeerSa is { } sa)
+                lock (s.Candidates)
                 {
-                    s.Udp.SendTo(probe, SocketFlags.None, sa);
+                    foreach (SocketAddress sa in s.Candidates)
+                    {
+                        s.Udp.SendTo(probe, SocketFlags.None, sa);
+                    }
                 }
 
                 await Task.Delay(PunchInterval, deadline.Token).ConfigureAwait(false);
