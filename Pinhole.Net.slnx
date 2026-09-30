@@ -5,4 +5,5 @@
   <Project Path="src/Pinhole.Turn/Pinhole.Turn.csproj" />
   <Project Path="src/Pinhole.Providers/Pinhole.Providers.csproj" />
   <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />
+  <Project Path="samples/Pinhole.Mesh/Pinhole.Mesh.csproj" />
 </Solution>

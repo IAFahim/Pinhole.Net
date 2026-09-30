@@ -1,0 +1,125 @@
+name: Mesh
+
+# Manual sessions only — never on push. Dispatches three independent (randomly assigned)
+# GitHub-hosted runners that know nothing about each other in advance: they discover one
+# another solely through tickets on a per-run signaling branch, connect over iroh, exchange
+# fresh random secrets, drop the connections, and repeat — three rounds in a row. The run is
+# green only if every node verified every peer's secret in all three rounds. Everyone shuts
+# down at the 5-minute deadline; node 0 accepts guest joins until then, so any machine
+# (e.g. a dev PC) can join the live session with the ticket printed in the job summary.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mesh:
+    name: node-${{ matrix.index }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2]
+    env:
+      MESH_REPO: ${{ github.repository }}
+      MESH_BRANCH: mesh/${{ github.run_id }}-${{ github.run_attempt }}
+      MESH_DEADLINE_MS: "300000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run mesh node
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MESH_LINGER: ${{ matrix.index == 0 && '1' || '' }}
+        run: dotnet run --project samples/Pinhole.Mesh -c Release -- node ${{ matrix.index }} 3
+      - name: Publish join ticket
+        if: matrix.index == 0 && always()
+        run: |
+          if [ -f ticket.txt ]; then
+            TICKET=$(cat ticket.txt)
+            {
+              echo "## 🕳️ Pinhole mesh — join this live session from any machine"
+              echo
+              echo "Valid until the 5-minute session deadline. From any clone of this repo:"
+              echo
+              echo '```bash'
+              echo "dotnet run --project samples/Pinhole.Mesh -c Release -- guest $TICKET"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  verify:
+    needs: mesh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MESH_REPO: ${{ github.repository }}
+      MESH_BRANCH: mesh/${{ github.run_id }}-${{ github.run_attempt }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Cross-verify all three rounds
+        run: |
+          python3 - << 'EOF'
+          import json, os, urllib.request, sys
+
+          repo, branch, token = os.environ["MESH_REPO"], os.environ["MESH_BRANCH"], os.environ["GITHUB_TOKEN"]
+          headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "pinhole-mesh"}
+
+          def api(path):
+              req = urllib.request.Request(f"https://api.github.com/repos/{repo}/{path}", headers=headers)
+              return json.load(urllib.request.urlopen(req))
+
+          def download(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          ok = True
+          summary = ["## Mesh verdict", ""]
+          for r in (1, 2, 3):
+              try:
+                  reports = {}
+                  for item in api(f"contents/rounds/{r}?ref={branch}"):
+                      if item["name"].endswith(".json"):
+                          rep = download(item["download_url"])
+                          reports[rep["index"]] = rep
+              except Exception as exception:
+                  print(f"round {r}: cannot read reports ({exception})")
+              else:
+                  if set(reports) != {0, 1, 2} or not all(rep["ok"] for rep in reports.values()):
+                      print(f"round {r}: incomplete or failed reports: {sorted(reports)}")
+                      ok = False
+                      continue
+                  sent = {i: rep["sent"] for i, rep in reports.items()}
+                  mismatches = [
+                      f"node {i} <- peer {p}"
+                      for i, rep in reports.items()
+                      for p, secret in rep["received"].items()
+                      if sent[int(p)] != secret
+                  ]
+                  if mismatches:
+                      print(f"round {r}: secret mismatches: {mismatches}")
+                      ok = False
+                  paths = {i: {p: ("udp" if u else "relay") for p, u in rep["udp"].items()} for i, rep in reports.items()}
+                  line = f"round {r}: 3/3 nodes exchanged secrets correctly, paths {paths}"
+                  print(line)
+                  summary.append(f"- {'✅' if not mismatches else '❌'} {line}")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as handle:
+              handle.write("\n".join(summary) + "\n")
+              handle.write("\n**" + ("MESH SUCCESS — 3 strangers, 3 rounds, all secrets verified.**" if ok else "MESH FAILED") + "**\n")
+
+          print("VERIFY:", "PASS" if ok else "FAIL")
+          sys.exit(0 if ok else 1)
+          EOF
+      - name: Clean up signaling branch
+        if: always()
+        run: |
+          BRANCH_ENC=$(echo "$MESH_BRANCH" | sed 's|/|%2F|')
+          curl -s -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$MESH_REPO/git/refs/heads/$BRANCH_ENC" || true
