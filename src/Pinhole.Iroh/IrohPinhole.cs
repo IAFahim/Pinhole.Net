@@ -1,91 +1,111 @@
 using System.Net;
-using System.Runtime.InteropServices;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text;
 using N0.IrohNet;
 using Pinhole;
 
 namespace Pinhole.Iroh;
 
+/// <summary>An iroh-backed rendezvous/relay node: free signaling plus a relay fallback while UDP punching proceeds.</summary>
 public sealed class IrohPinhole : IAsyncDisposable
 {
-    private unsafe Endpoint* _ep;
+    private readonly IrohEndpoint _endpoint;
     private readonly byte[] _alpn;
-    internal readonly List<IPAddress> _addrs;
 
-    private unsafe IrohPinhole(Endpoint* ep, byte[] alpn)
+    private IrohPinhole(IrohEndpoint endpoint, byte[] alpn, string ticket)
     {
-        _ep = ep;
+        _endpoint = endpoint;
         _alpn = alpn;
-        Ticket = IrohEngine.Ticket(ep);
-        _addrs = IrohEngine.Addrs(ep);
+        Ticket = ticket;
     }
 
     public string Ticket { get; }
-    public IReadOnlyList<IPAddress> DirectAddresses => _addrs;
+
+    /// <summary>Local interface addresses offered to peers as hole-punch candidates.</summary>
+    public IReadOnlyList<IPAddress> DirectAddresses => LocalInterfaceAddresses();
 
     public static async Task<IrohPinhole> BindAsync(string alpn = "pinhole/0", string? secretKey = null, CancellationToken ct = default)
     {
-        return await Task.Run(() =>
+        byte[] alpnBytes = Encoding.ASCII.GetBytes(alpn);
+        IrohSecretKey? key = secretKey is null ? null : IrohSecretKey.FromBase32(secretKey);
+        try
         {
-            byte[] alpnBytes = Encoding.ASCII.GetBytes(alpn);
-            unsafe
+            IrohEndpoint endpoint = await IrohEndpoint.BindAsync(new IrohEndpointOptions
             {
-                Endpoint* ep = IrohEngine.Bind(alpnBytes, secretKey);
-                _ = IrohEngine.TryOnline(ep, 15_000);
-                return new IrohPinhole(ep, alpnBytes);
-            }
-        }, ct).ConfigureAwait(false);
+                Alpns = [alpnBytes],
+                RelayMode = IrohRelayMode.Default,
+                Discovery = IrohDiscoveryConfig.None,
+                SecretKey = key,
+            }, ct).ConfigureAwait(false);
+
+            // Best-effort online wait, matching the previous behavior: binding succeeds even
+            // when relays are unreachable; connecting later may still work.
+            _ = await endpoint.WaitForOnlineAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+
+            IrohNodeAddr addr = endpoint.LocalAddr();
+            return new IrohPinhole(endpoint, alpnBytes, addr.Ticket);
+        }
+        finally
+        {
+            key?.Dispose();
+        }
     }
 
     public async Task<IrohLink> ConnectAsync(string peerTicket, CancellationToken ct = default)
     {
-        return await Task.Run(() =>
-        {
-            unsafe
-            {
-                return new IrohLink(this, IrohEngine.Connect(_ep, peerTicket, _alpn), true);
-            }
-        }, ct).ConfigureAwait(false);
+        IrohConnection conn = await _endpoint.ConnectAsync(IrohNodeAddr.Parse(peerTicket), _alpn, ct).ConfigureAwait(false);
+        return new IrohLink(this, conn, initiator: true);
     }
 
     public async Task<IrohLink> AcceptAsync(CancellationToken ct = default)
     {
-        return await Task.Run(() =>
-        {
-            unsafe
-            {
-                return new IrohLink(this, IrohEngine.Accept(_ep, _alpn), false);
-            }
-        }, ct).ConfigureAwait(false);
+        IrohConnection conn = await _endpoint.AcceptAsync(ct).ConfigureAwait(false);
+        return new IrohLink(this, conn, initiator: false);
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => _endpoint.DisposeAsync();
+
+    private static List<IPAddress> LocalInterfaceAddresses()
     {
-        await Task.Run(() =>
+        var addrs = new List<IPAddress>();
+        foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
         {
-            unsafe
+            if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback)
             {
-                Endpoint* ep = _ep;
-                if (ep != null)
-                {
-                    iroh.endpoint_close(ep);
-                    _ep = null;
-                }
+                continue;
             }
-        }).ConfigureAwait(false);
+
+            foreach (UnicastIPAddressInformation unicast in nic.GetIPProperties().UnicastAddresses)
+            {
+                IPAddress ip = unicast.Address;
+                if (ip.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
+                    || IPAddress.IsLoopback(ip)
+                    || ip.IsIPv6LinkLocal
+                    || ip.IsIPv6SiteLocal)
+                {
+                    continue;
+                }
+
+                addrs.Add(ip);
+            }
+        }
+
+        return addrs;
     }
 }
 
+/// <summary>A framed bidirectional link over an iroh connection; carries the punch intro and app payloads.</summary>
 public sealed class IrohLink : IAsyncDisposable
 {
     private readonly IrohPinhole _node;
+    private readonly IrohConnection _conn;
     private readonly bool _initiator;
-    internal unsafe Connection* _conn;
-    internal unsafe SendStream* _send;
-    internal unsafe RecvStream* _recv;
-    internal readonly TaskCompletionSource ReadDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource _shutdown = new();
+    private Stream? _stream;
+    private Task? _readLoop;
 
-    internal unsafe IrohLink(IrohPinhole node, Connection* conn, bool initiator)
+    internal IrohLink(IrohPinhole node, IrohConnection conn, bool initiator)
     {
         _node = node;
         _conn = conn;
@@ -94,255 +114,125 @@ public sealed class IrohLink : IAsyncDisposable
 
     public event Action<byte[]>? Received;
 
+    /// <summary>Exchanges punch candidates over the link's stream and starts the receive loop; resolves once the UDP path is punched (or after 15 s).</summary>
     public async Task IntroduceAsync(PeerSocket pin, CancellationToken ct = default)
     {
-        await Task.Run(() =>
-        {
-            unsafe
-            {
-                SendStream* send;
-                RecvStream* recv;
-                if (_initiator)
-                {
-                    IrohEngine.OpenBi(_conn, &send, &recv);
-                }
-                else
-                {
-                    IrohEngine.AcceptBi(_conn, &send, &recv);
-                }
+        Stream stream = _initiator
+            ? await _conn.OpenStreamAsync(ct).ConfigureAwait(false)
+            : await _conn.AcceptStreamAsync(ct).ConfigureAwait(false);
+        _stream = stream;
 
-                _send = send;
-                _recv = recv;
-                IrohEngine.WriteFrame(send, IrohEngine.PackIntro(_node._addrs, pin.LocalPort));
-            }
-        }, ct).ConfigureAwait(false);
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                IrohEngine.ReadLoop(this, pin);
-            }
-            finally
-            {
-                ReadDone.TrySetResult();
-            }
-        });
+        await WriteFrameAsync(stream, PackIntro(_node.DirectAddresses, pin.LocalPort), ct).ConfigureAwait(false);
+        _readLoop = Task.Run(() => ReadLoopAsync(this, pin, _shutdown.Token));
         await pin.Connected.WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
     }
 
     public async Task SendAsync(ReadOnlyMemory<byte> payload, CancellationToken ct = default)
     {
-        await Task.Run(() =>
-        {
-            unsafe
-            {
-                IrohEngine.WriteFrame(_send, payload.Span);
-            }
-        }, ct).ConfigureAwait(false);
+        Stream stream = _stream ?? throw new InvalidOperationException("the link must be introduced before sending");
+        await WriteFrameAsync(stream, payload, ct).ConfigureAwait(false);
     }
 
     internal void RaiseReceived(byte[] payload) => Received?.Invoke(payload);
 
     public async ValueTask DisposeAsync()
     {
-        await Task.Run(() =>
+        _shutdown.Cancel();
+        if (_readLoop is not null)
         {
-            unsafe
+            // The read loop unwinds within one 250 ms read slice; bound the wait regardless.
+            await Task.WhenAny(_readLoop, Task.Delay(TimeSpan.FromSeconds(3))).ConfigureAwait(false);
+        }
+
+        if (_stream is not null)
+        {
+            await _stream.DisposeAsync().ConfigureAwait(false);
+        }
+
+        await _conn.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private static async Task WriteFrameAsync(Stream stream, ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        if (payload.Length > 0xffff)
+        {
+            throw new ArgumentOutOfRangeException(nameof(payload), "frame too large");
+        }
+
+        byte[] frame = new byte[payload.Length + 2];
+        BitConverter.TryWriteBytes(frame.AsSpan(0, 2), (ushort)payload.Length);
+        payload.Span.CopyTo(frame.AsSpan(2));
+        await stream.WriteAsync(frame, ct).ConfigureAwait(false);
+    }
+
+    private static async Task ReadLoopAsync(IrohLink link, PeerSocket pin, CancellationToken ct)
+    {
+        Stream stream = link._stream!;
+        try
+        {
+            byte[] header = new byte[2];
+            if (!await ReadExactAsync(stream, header, ct).ConfigureAwait(false))
             {
-                if (_send != null)
+                return;
+            }
+
+            int introLength = header[0] | header[1] << 8;
+            byte[] intro = new byte[introLength];
+            if (!await ReadExactAsync(stream, intro, ct).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            ApplyIntro(pin, intro);
+            while (!ct.IsCancellationRequested)
+            {
+                if (!await ReadExactAsync(stream, header, ct).ConfigureAwait(false))
                 {
-                    _ = iroh.send_stream_finish(_send);
-                    _send = null;
+                    return;
                 }
 
-                if (_conn != null)
+                int n = header[0] | header[1] << 8;
+                if (n == 0)
                 {
-                    iroh.connection_close(_conn);
-                    _conn = null;
+                    continue;
                 }
-            }
-        }).ConfigureAwait(false);
-        await Task.WhenAny(ReadDone.Task, Task.Delay(2000)).ConfigureAwait(false);
-        await Task.Run(() =>
-        {
-            unsafe
-            {
-                if (_recv != null)
+
+                byte[] body = new byte[n];
+                if (!await ReadExactAsync(stream, body, ct).ConfigureAwait(false))
                 {
-                    iroh.recv_stream_free(_recv);
-                    _recv = null;
+                    return;
                 }
+
+                link.RaiseReceived(body);
             }
-        }).ConfigureAwait(false);
-    }
-}
-
-internal static unsafe class IrohEngine
-{
-    public static Endpoint* Bind(byte[] alpn, string? secretKey)
-    {
-        EndpointConfig config = iroh.endpoint_config_default();
-        fixed (byte* a = alpn)
-        {
-            iroh.endpoint_config_add_alpn(&config, new slice_ref_uint8 { ptr = a, len = (nuint)alpn.Length });
         }
-
-        SecretKey* key = null;
-        bool keyOwnedByConfig = false;
-        if (secretKey is not null)
+        catch (OperationCanceledException)
         {
-            key = iroh.secret_key_default();
-            byte[] keyBytes = Encoding.ASCII.GetBytes(secretKey + "\0");
-            fixed (byte* k = keyBytes)
+        }
+        catch (Exception)
+        {
+            // A closed stream or dropped connection ends the loop; dispose owns teardown.
+        }
+    }
+
+    private static async Task<bool> ReadExactAsync(Stream stream, Memory<byte> dst, CancellationToken ct)
+    {
+        int got = 0;
+        while (got < dst.Length)
+        {
+            int n = await stream.ReadAsync(dst[got..], ct).ConfigureAwait(false);
+            if (n <= 0)
             {
-                if (iroh.secret_key_from_base32(k, &key) == KeyResult.KEY_RESULT_OK)
-                {
-                    iroh.endpoint_config_add_secret_key(&config, key);
-                    keyOwnedByConfig = true;
-                }
-            }
-        }
-
-        Endpoint* ep = iroh.endpoint_default();
-        EndpointResult r = iroh.endpoint_bind(&config, null, null, &ep);
-        if (key != null && !keyOwnedByConfig)
-        {
-            // Only free the key when the parse failed and it never moved into the config;
-            // endpoint_config_add_secret_key takes the box BY VALUE, so on success the config
-            // owns it and endpoint_config_free below releases it (freeing here would double-free).
-            iroh.secret_key_free(key);
-        }
-
-        iroh.endpoint_config_free(config);
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            iroh.endpoint_free(ep);
-            throw new InvalidOperationException($"iroh bind failed: {r}");
-        }
-
-        return ep;
-    }
-
-    public static EndpointResult TryOnline(Endpoint* ep, ulong timeoutMs) => iroh.endpoint_online(&ep, timeoutMs);
-
-    public static string Ticket(Endpoint* ep)
-    {
-        EndpointAddr addr = iroh.endpoint_addr_default();
-        EndpointResult r = iroh.endpoint_addr(&ep, &addr);
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            throw new InvalidOperationException($"endpoint_addr failed: {r}");
-        }
-
-        byte* s = iroh.endpoint_addr_as_str(&addr);
-        string ticket = Encoding.UTF8.GetString(MemoryMarshal.CreateReadOnlySpanFromNullTerminated(s));
-        iroh.rust_free_string(s);
-        iroh.endpoint_addr_free(addr);
-        return ticket;
-    }
-
-    public static List<IPAddress> Addrs(Endpoint* ep)
-    {
-        var addrs = new List<IPAddress>();
-        EndpointAddr addr = iroh.endpoint_addr_default();
-        if (iroh.endpoint_addr(&ep, &addr) != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            return addrs;
-        }
-
-        for (nuint i = 0; ; i++)
-        {
-            SocketAddr* sa = iroh.endpoint_addr_ip_addrs_nth(&addr, i);
-            if (sa == null)
-            {
-                break;
+                return false;
             }
 
-            byte* s = iroh.socket_addr_as_str(sa);
-            string text = Encoding.UTF8.GetString(MemoryMarshal.CreateReadOnlySpanFromNullTerminated(s));
-            iroh.rust_free_string(s);
-            if (TryParseIp(text, out IPAddress? ip))
-            {
-                addrs.Add(ip!);
-            }
+            got += n;
         }
 
-        iroh.endpoint_addr_free(addr);
-        return addrs;
+        return true;
     }
 
-    public static Connection* Connect(Endpoint* ep, string ticket, byte[] alpn)
-    {
-        EndpointAddr addr = iroh.endpoint_addr_default();
-        byte[] ticketBytes = Encoding.ASCII.GetBytes(ticket + "\0");
-        AddrResult ar;
-        fixed (byte* t = ticketBytes)
-        {
-            ar = iroh.endpoint_addr_from_string(t, &addr);
-        }
-
-        if (ar != AddrResult.ADDR_RESULT_OK)
-        {
-            throw new InvalidOperationException($"bad ticket: {ar}");
-        }
-
-        Connection* conn = iroh.connection_default();
-        EndpointResult r;
-        fixed (byte* a = alpn)
-        {
-            r = iroh.endpoint_connect(&ep, new slice_ref_uint8 { ptr = a, len = (nuint)alpn.Length }, addr, &conn);
-        }
-
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            iroh.connection_free(conn);
-            throw new InvalidOperationException($"iroh connect failed: {r}");
-        }
-
-        return conn;
-    }
-
-    public static Connection* Accept(Endpoint* ep, byte[] alpn)
-    {
-        Connection* conn = iroh.connection_default();
-        EndpointResult r;
-        fixed (byte* a = alpn)
-        {
-            r = iroh.endpoint_accept(&ep, new slice_ref_uint8 { ptr = a, len = (nuint)alpn.Length }, &conn);
-        }
-
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            iroh.connection_free(conn);
-            throw new InvalidOperationException($"iroh accept failed: {r}");
-        }
-
-        return conn;
-    }
-
-    public static void OpenBi(Connection* conn, SendStream** send, RecvStream** recv)
-    {
-        *send = iroh.send_stream_default();
-        *recv = iroh.recv_stream_default();
-        EndpointResult r = iroh.connection_open_bi(&conn, send, recv);
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            throw new InvalidOperationException($"open_bi failed: {r}");
-        }
-    }
-
-    public static void AcceptBi(Connection* conn, SendStream** send, RecvStream** recv)
-    {
-        *send = iroh.send_stream_default();
-        *recv = iroh.recv_stream_default();
-        EndpointResult r = iroh.connection_accept_bi(&conn, send, recv);
-        if (r != EndpointResult.ENDPOINT_RESULT_OK)
-        {
-            throw new InvalidOperationException($"accept_bi failed: {r}");
-        }
-    }
-
-    public static byte[] PackIntro(List<IPAddress> addrs, int udpPort)
+    private static byte[] PackIntro(IReadOnlyList<IPAddress> addrs, int udpPort)
     {
         using var ms = new MemoryStream(64);
         Span<byte> port = stackalloc byte[2];
@@ -357,91 +247,6 @@ internal static unsafe class IrohEngine
         }
 
         return ms.ToArray();
-    }
-
-    public static void WriteFrame(SendStream* send, ReadOnlySpan<byte> payload)
-    {
-        if (payload.Length > 0xffff)
-        {
-            throw new ArgumentOutOfRangeException(nameof(payload), "frame too large");
-        }
-
-        byte[] frame = new byte[payload.Length + 2];
-        BitConverter.TryWriteBytes(frame.AsSpan(0, 2), (ushort)payload.Length);
-        payload.CopyTo(frame.AsSpan(2));
-        fixed (byte* f = frame)
-        {
-            EndpointResult r = iroh.send_stream_write(&send, new slice_ref_uint8 { ptr = f, len = (nuint)frame.Length });
-            if (r != EndpointResult.ENDPOINT_RESULT_OK)
-            {
-                throw new InvalidOperationException($"stream write failed: {r}");
-            }
-        }
-    }
-
-    public static void ReadLoop(IrohLink link, PeerSocket pin)
-    {
-        unsafe
-        {
-            RecvStream* recv = link._recv;
-            Span<byte> hdr = stackalloc byte[2];
-            if (!ReadExact(recv, hdr))
-            {
-                return;
-            }
-
-            int n = hdr[0] | hdr[1] << 8;
-            byte[] intro = new byte[n];
-            if (!ReadExact(recv, intro))
-            {
-                return;
-            }
-
-            ApplyIntro(pin, intro);
-            while (true)
-            {
-                if (!ReadExact(recv, hdr))
-                {
-                    return;
-                }
-
-                n = hdr[0] | hdr[1] << 8;
-                if (n == 0)
-                {
-                    continue;
-                }
-
-                byte[] body = new byte[n];
-                if (!ReadExact(recv, body))
-                {
-                    return;
-                }
-
-                link.RaiseReceived(body);
-            }
-        }
-    }
-
-    private static bool ReadExact(RecvStream* recv, Span<byte> dst)
-    {
-        int got = 0;
-        while (got < dst.Length)
-        {
-            long n;
-            fixed (byte* d = dst)
-            {
-                n = iroh.recv_stream_read(&recv, new slice_mut_uint8 { ptr = d + got, len = (nuint)(dst.Length - got) });
-            }
-
-            if (n <= 0)
-            {
-                return false;
-            }
-
-            got += (int)n;
-        }
-
-        return true;
     }
 
     private static void ApplyIntro(PeerSocket pin, ReadOnlySpan<byte> intro)
@@ -473,23 +278,5 @@ internal static unsafe class IrohEngine
 
             pos += len;
         }
-    }
-
-    private static bool TryParseIp(ReadOnlySpan<char> socketAddr, out IPAddress? ip)
-    {
-        ip = null;
-        int end = socketAddr.LastIndexOf(':');
-        if (end <= 0)
-        {
-            return false;
-        }
-
-        ReadOnlySpan<char> host = socketAddr[..end];
-        if (host.StartsWith('['))
-        {
-            host = host[1..];
-        }
-
-        return IPAddress.TryParse(host, out ip);
     }
 }

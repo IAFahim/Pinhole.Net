@@ -436,3 +436,5 @@ target/
 *.g.cs
 iroh*.rs
 runtimes/
+# Mesh harness local-run artifacts
+ticket.txt

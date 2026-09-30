@@ -1,0 +1,4 @@
+[submodule "extern/irohnet"]
+	path = extern/irohnet
+	url = https://github.com/IAFahim/N0.IrohNet.git
+	branch = feature/safe-connection-layer

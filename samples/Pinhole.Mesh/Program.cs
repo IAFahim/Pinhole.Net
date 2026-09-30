@@ -115,11 +115,8 @@ internal static class MeshNode
 
         Console.WriteLine($"[node {index}] shutting down after {(DateTimeOffset.UtcNow - started).TotalSeconds:F0}s — {roundsOk}/3 rounds verified");
 
-        // Hard exit: the session is over, and native teardown (connection_close / stream frees)
-        // can block indefinitely when a blocked read races a container free on the tokio side.
-        // Everything worth reporting is already on the signaling branch.
-        Environment.Exit(roundsOk == 3 ? 0 : 1);
-#pragma warning disable CS0162 // unreachable after Environment.Exit
+        // The safe layer bounds every native teardown (streams, connections, endpoint), so the
+        // normal `await using` disposal is trusted again — no hard process exit required.
         return roundsOk == 3 ? 0 : 1;
 
         static string Describe(RoundReport report) =>
@@ -294,15 +291,19 @@ internal static class MeshNode
                     Console.WriteLine($"GUEST joined ({(udp ? "udp" : "relay")}) secret {guestSecret.Task.Result[..Math.Min(16, guestSecret.Task.Result.Length)]}…");
                 }
 
-                // Best-effort teardown: a wedged native teardown must not stall further guest
-                // hosting; the process-level deadline exit is the real backstop.
-                _ = link.DisposeAsync();
+                // Bounded teardown: the safe layer's disposals are bounded, and the WaitAsync
+                // backstop keeps a pathological guest session from stalling the hosting loop.
+                try { await link.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
                 pin.Dispose();
             }
             catch (Exception exception)
             {
                 Console.WriteLine($"[node 0] guest session ended: {exception.Message}");
-                _ = link?.DisposeAsync();
+                if (link is not null)
+                {
+                    try { await link.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
+                }
+
                 try { pin?.Dispose(); } catch { }
             }
         }
