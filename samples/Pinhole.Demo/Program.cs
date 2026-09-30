@@ -5,13 +5,33 @@ using System.Text;
 using N0.IrohNet;
 using Pinhole;
 using Pinhole.Iroh;
+using Pinhole.Providers;
+using Pinhole.Turn;
 
 if (args.Length == 0)
 {
     Console.Error.WriteLine("usage: pinhole-demo <rendezvous ip:port> <myIdHex> [peerIdHex]");
     Console.Error.WriteLine("       pinhole-demo iroh [peerTicket]");
+    Console.Error.WriteLine("       pinhole-demo stun [host:port]");
+    Console.Error.WriteLine("       pinhole-demo turn <host:port> <user> <pass> [peerRelayed ep]");
     Console.Error.WriteLine("       pinhole-demo bench [count] [size]");
     return 2;
+}
+
+if (args[0] == "stun")
+{
+    return await StunProbe(args.Length > 1 ? args[1] : "stun.l.google.com:19302");
+}
+
+if (args[0] == "turn")
+{
+    if (args.Length < 4)
+    {
+        Console.Error.WriteLine("usage: pinhole-demo turn <host:port> <user> <pass> [peerRelayed ep]");
+        return 2;
+    }
+
+    return await TurnRelay(args[1], args[2], args[3], args.Length > 4 ? args[4] : null);
 }
 
 if (args[0] == "bench")
@@ -165,4 +185,50 @@ static async Task<int> Bench(int n, int size)
     Console.WriteLine($"{received}/{n} datagrams in {sw.Elapsed.TotalSeconds:F2}s ({received / sw.Elapsed.TotalSeconds:F0} dps)");
     Console.WriteLine($"alloc {alloc} B total, {(double)alloc / Math.Max(1, received):F1} B/dgram, gen0 GCs {GC.CollectionCount(0) - gc0}");
     return 0;
+}
+
+static async Task<int> StunProbe(string target)
+{
+    IPEndPoint server = await ResolveEp(target);
+    using var pin = new PeerSocket(0x51);
+    IPEndPoint observed = await pin.ProbeStunAsync(server);
+    Console.WriteLine($"stun {server} sees this socket at {observed}");
+    return 0;
+}
+
+static async Task<int> TurnRelay(string target, string user, string pass, string? peer)
+{
+    IPEndPoint server = await ResolveEp(target);
+    await using TurnClient turn = await TurnClient.AllocateAsync(server, user, pass);
+    Console.WriteLine($"allocated relayed addr {turn.RelayedAddress}");
+    turn.Received += (from, data) => Console.WriteLine($"relay <= {from}: {Encoding.UTF8.GetString(data)}");
+    if (peer is null)
+    {
+        await turn.CreatePermissionAsync(server.Address);
+        Console.WriteLine("paste this addr to a peer, waiting…");
+        await Task.Delay(600_000);
+        return 0;
+    }
+
+    IPEndPoint peerEp = IPEndPoint.Parse(peer);
+    while (Console.ReadLine() is { } line)
+    {
+        await turn.SendAsync(Encoding.UTF8.GetBytes(line), peerEp);
+    }
+
+    return 0;
+}
+
+static async Task<IPEndPoint> ResolveEp(string s)
+{
+    int colon = s.LastIndexOf(':');
+    string host = s[..colon];
+    int port = int.Parse(s[(colon + 1)..]);
+    if (IPAddress.TryParse(host, out IPAddress? ip))
+    {
+        return new IPEndPoint(ip, port);
+    }
+
+    IPAddress[] addrs = await Dns.GetHostAddressesAsync(host);
+    return new IPEndPoint(addrs[0], port);
 }

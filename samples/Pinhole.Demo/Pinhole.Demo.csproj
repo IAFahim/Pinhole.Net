@@ -13,7 +13,9 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
-	<ProjectReference Include="../../src/Pinhole.Iroh/Pinhole.Iroh.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Iroh/Pinhole.Iroh.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Turn/Pinhole.Turn.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Providers/Pinhole.Providers.csproj" />
 	</ItemGroup>
 
 </Project>

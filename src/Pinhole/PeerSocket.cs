@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -33,6 +34,7 @@ public sealed class PeerSocket : IDisposable
     }
 
     public Task<IPEndPoint> RegisterAsync(CancellationToken ct = default) => PeerEngine.Register(_s, ct);
+    public Task<IPEndPoint> ProbeStunAsync(IPEndPoint stunServer, CancellationToken ct = default) => PeerEngine.ProbeStun(_s, stunServer, ct);
     public void AddCandidate(IPEndPoint endpoint) => PeerEngine.AddCandidate(_s, endpoint);
     public Task ConnectAsync(ulong targetNodeId, CancellationToken ct = default) => PeerEngine.Connect(_s, targetNodeId, ct);
     public Task ConnectDirectAsync(IPEndPoint endpoint) => PeerEngine.ConnectDirect(_s, endpoint);
@@ -56,16 +58,20 @@ internal sealed class PeerState
     public PinholeDatagramHandler? Received;
     public TimeSpan? LastRtt;
     public int Punching;
+    public byte[]? StunTxid;
+    public TaskCompletionSource<IPEndPoint>? StunResult;
 }
 
 internal static class PeerEngine
 {
+    private const byte FrameStun = 0x01;
     private const byte FramePunc = 0x05;
     private const byte FramePack = 0x06;
     private const byte FrameData = 0x10;
     private const byte FramePing = 0x11;
     private const byte FramePong = 0x12;
     private const int MaxStackFrame = 512;
+    private const uint StunCookie = 0x2112A442;
 
     private static readonly TimeSpan PunchInterval = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan PunchTimeout = TimeSpan.FromSeconds(10);
@@ -79,6 +85,7 @@ internal static class PeerEngine
     private static FrameHandler?[] BuildTable()
     {
         var table = new FrameHandler?[0x20];
+        table[FrameStun] = OnStun;
         table[FramePunc] = OnPunc;
         table[FramePack] = OnPack;
         table[FrameData] = OnData;
@@ -206,6 +213,97 @@ internal static class PeerEngine
         frame[0] = FramePing;
         BitConverter.TryWriteBytes(frame[1..], Environment.TickCount64);
         s.Udp.SendTo(frame, SocketFlags.None, peer);
+    }
+
+    public static async Task<IPEndPoint> ProbeStun(PeerState s, IPEndPoint server, CancellationToken ct)
+    {
+        byte[] req = new byte[20];
+        BinaryPrimitives.WriteUInt16BigEndian(req, 0x0001);
+        BinaryPrimitives.WriteUInt32BigEndian(req.AsSpan(4), StunCookie);
+        RandomNumberGenerator.Fill(req.AsSpan(8));
+        s.StunTxid = req.AsSpan(8).ToArray();
+        s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
+        s.Udp.SendTo(req, SocketFlags.None, server.Serialize());
+        return await s.StunResult.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
+    }
+
+    private static void OnStun(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length < 20
+            || BinaryPrimitives.ReadUInt32BigEndian(frame[4..]) != StunCookie
+            || s.StunTxid is not { } txid
+            || !frame.Slice(8, 12).SequenceEqual(txid))
+        {
+            return;
+        }
+
+        int end = Math.Min(frame.Length, 20 + BinaryPrimitives.ReadUInt16BigEndian(frame[2..]));
+        int pos = 20;
+        while (pos + 4 <= end)
+        {
+            ushort attrType = BinaryPrimitives.ReadUInt16BigEndian(frame[pos..]);
+            int attrLen = BinaryPrimitives.ReadUInt16BigEndian(frame[(pos + 2)..]);
+            if ((attrType is 0x0020 or 0x0001) && attrLen >= 8)
+            {
+                if (TryDecodeAddress(frame.Slice(pos + 4, attrLen), txid, attrType == 0x0020, out IPEndPoint? ep))
+                {
+                    s.PublicAddress = ep;
+                    s.StunResult?.TrySetResult(ep!);
+                }
+
+                return;
+            }
+
+            pos += 4 + ((attrLen + 3) & ~3);
+        }
+    }
+
+    private static bool TryDecodeAddress(ReadOnlySpan<byte> value, ReadOnlySpan<byte> txid, bool xor, out IPEndPoint? ep)
+    {
+        ep = null;
+        byte family = value[1];
+        ushort port = BinaryPrimitives.ReadUInt16BigEndian(value[2..]);
+        if (xor)
+        {
+            port ^= (ushort)(StunCookie >> 16);
+        }
+
+        if (family == 0x01 && value.Length >= 8)
+        {
+            Span<byte> raw = stackalloc byte[4];
+            value.Slice(4, 4).CopyTo(raw);
+            if (xor)
+            {
+                raw[0] ^= 0x21;
+                raw[1] ^= 0x12;
+                raw[2] ^= 0xA4;
+                raw[3] ^= 0x42;
+            }
+
+            ep = new IPEndPoint(new IPAddress(raw), port);
+            return true;
+        }
+
+        if (family == 0x02 && value.Length >= 20)
+        {
+            Span<byte> raw = stackalloc byte[16];
+            value.Slice(4, 16).CopyTo(raw);
+            if (xor)
+            {
+                Span<byte> mask = stackalloc byte[16];
+                BinaryPrimitives.WriteUInt32BigEndian(mask, StunCookie);
+                txid.CopyTo(mask[4..]);
+                for (int i = 0; i < 16; i++)
+                {
+                    raw[i] ^= mask[i];
+                }
+            }
+
+            ep = new IPEndPoint(new IPAddress(raw), port);
+            return true;
+        }
+
+        return false;
     }
 
     private static void RecvLoop(PeerState s)

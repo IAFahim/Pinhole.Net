@@ -5,10 +5,12 @@ Lightweight NAT-traversal P2P transport for .NET — one UDP socket, no native d
 Rendezvous + hole punching + keepalive, designed for multiplayer games and P2P apps.
 Raw UDP fast path; NativeAOT throughout; zero allocations on the hot path.
 
-- `src/Pinhole` — the client library (`Pinhole.Net` on NuGet, net8.0)
+- `src/Pinhole` — the client library (`Pinhole.Net` on NuGet, net8.0): punch, STUN probe, datagrams
+- `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications, any standard TURN
+- `src/Pinhole.Providers` — known-provider catalog: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Iroh` — optional bridge: free rendezvous/signaling + relay fallback via n0's iroh infrastructure
 - `src/Pinhole.Rendezvous` — the signaling/introducer server (single NativeAOT binary, deployable anywhere a UDP port is open)
-- `samples/Pinhole.Demo` — register/punch/chat demo + throughput bench + iroh bridge demo
+- `samples/Pinhole.Demo` — register/punch/chat demo + throughput bench + stun/turn/iroh probes
 
 ## Run it — own rendezvous
 
@@ -28,6 +30,19 @@ dotnet run --project samples/Pinhole.Demo -- iroh <ticket> # dials via iroh, the
 Both exchange UDP port + address candidates over an iroh stream, then Pinhole
 punches its own raw-UDP pinhole. If the punch fails, the iroh stream stays as
 the relayed fallback channel.
+
+## Free infrastructure probes
+
+```bash
+pinhole-demo stun stun.l.google.com:19302   # -> reflexive addr (verified live)
+pinhole-demo stun stun.cloudflare.com:3478  # -> reflexive addr (verified live)
+pinhole-demo turn <host:port> <user> <pass> # TURN allocate -> relayed addr, then relay datagrams
+```
+
+STUN probing rides the pinhole socket itself (`pin.ProbeStunAsync`), so the
+observed mapping is the mapping punching needs. TURN allocations run on a
+dedicated socket as a separate fallback channel. Verified against a real
+coturn server: allocate -> create-permission -> send/data indications.
 
 ## Bench
 

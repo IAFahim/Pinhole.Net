@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>TURN relay client for Pinhole.Net — RFC 5766 allocate/permission/indication data path, one socket, zero native deps</Description>
+		<PackageId>Pinhole.Turn</PackageId>
+		<IsPackable>true</IsPackable>
+		<IsAotCompatible>true</IsAotCompatible>
+	</PropertyGroup>
+
+</Project>

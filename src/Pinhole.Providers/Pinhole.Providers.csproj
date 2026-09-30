@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>Known STUN/TURN provider catalog for Pinhole.Net — Google, Cloudflare, Metered, Open Relay, Twilio endpoint presets</Description>
+		<PackageId>Pinhole.Providers</PackageId>
+		<IsPackable>true</IsPackable>
+		<IsAotCompatible>true</IsAotCompatible>
+	</PropertyGroup>
+
+</Project>
