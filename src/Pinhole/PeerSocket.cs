@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -5,198 +6,357 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>
-/// A peer's own UDP socket: registers with a rendezvous server (which sees our public
-/// mapped address, doubling as STUN), then punches a NAT pinhole to another peer.
-/// One socket carries signaling and data so the observed mapping is the punched mapping.
-///
-/// Wire format — signaling to the rendezvous is ASCII lines; peer frames are binary with
-/// a leading type byte &lt; 0x20:
-///   PUNC (0x05) + u64 magic   — punch probe; opens our outbound mapping
-///   PACK (0x06) + u64 magic   — punch ack; carrying OUR magic proves the pinhole opened
-///   DATA (0x10) + payload     — a datagram on the established pinhole
-///   PING (0x11) + i64 ticks   — keepalive / latency probe
-///   PONG (0x12) + i64 ticks   — echoes PING
-/// </summary>
+public delegate void PinholeDatagramHandler(ReadOnlySpan<byte> payload);
+
 public sealed class PeerSocket : IDisposable
 {
-    private static readonly TimeSpan PunchInterval = TimeSpan.FromMilliseconds(200);
-    private static readonly TimeSpan PunchTimeout = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan SignalTimeout = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan RegisterRefresh = TimeSpan.FromSeconds(30);
+    private readonly PeerState _s;
 
+    public PeerSocket(ulong nodeId, IPEndPoint? bind = null)
+    {
+        _s = PeerEngine.CreateState(nodeId, bind);
+        PeerEngine.Start(_s);
+    }
+
+    public void AddRendezvous(IPEndPoint endpoint) => PeerEngine.AddRendezvous(_s, endpoint);
+
+    public int LocalPort => ((IPEndPoint)_s.Udp.LocalEndPoint!).Port;
+    public IPEndPoint? PublicAddress => _s.PublicAddress;
+    public IPEndPoint? Peer => _s.PeerSa is { } sa ? (IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(sa) : null;
+    public TimeSpan? LastRtt => _s.LastRtt;
+    public Task Connected => _s.Punched.Task;
+
+    public event PinholeDatagramHandler? Received
+    {
+        add => _s.Received += value;
+        remove => _s.Received -= value;
+    }
+
+    public Task<IPEndPoint> RegisterAsync(CancellationToken ct = default) => PeerEngine.Register(_s, ct);
+    public Task ConnectAsync(ulong targetNodeId, CancellationToken ct = default) => PeerEngine.Connect(_s, targetNodeId, ct);
+    public Task ConnectDirectAsync(IPEndPoint endpoint) => PeerEngine.ConnectDirect(_s, endpoint);
+    public void Send(ReadOnlySpan<byte> payload) => PeerEngine.SendData(_s, payload);
+    public void Ping() => PeerEngine.Ping(_s);
+    public void Dispose() => PeerEngine.Shutdown(_s);
+}
+
+internal sealed class PeerState
+{
+    public required Socket Udp;
+    public required ulong NodeId;
+    public required ulong Magic;
+    public readonly CancellationTokenSource Shutdown = new();
+    public readonly List<SocketAddress> Rendezvous = new();
+    public SocketAddress? PeerSa;
+    public IPEndPoint? PublicAddress;
+    public readonly TaskCompletionSource<IPEndPoint> Observed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public readonly TaskCompletionSource Punched = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public PinholeDatagramHandler? Received;
+    public TimeSpan? LastRtt;
+    public int Punching;
+}
+
+internal static class PeerEngine
+{
     private const byte FramePunc = 0x05;
     private const byte FramePack = 0x06;
     private const byte FrameData = 0x10;
     private const byte FramePing = 0x11;
     private const byte FramePong = 0x12;
+    private const int MaxStackFrame = 512;
 
-    private readonly Socket _udp;
-    private readonly IPEndPoint _rendezvous;
-    private readonly ulong _nodeId;
-    private readonly ulong _magic;
-    private readonly CancellationTokenSource _shutdown = new();
-    private readonly TaskCompletionSource<IPEndPoint> _observed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly TaskCompletionSource _punched = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly TaskCompletionSource _intro = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private IPEndPoint? _peer;
-    private int _punching;
+    private static readonly TimeSpan PunchInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan PunchTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SignalTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan RegisterRefresh = TimeSpan.FromSeconds(30);
 
-    /// <summary>Creates a peer socket that will signal through <paramref name="rendezvous"/> as <paramref name="nodeId"/>.</summary>
-    public PeerSocket(IPEndPoint rendezvous, ulong nodeId)
+    private delegate void FrameHandler(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame);
+
+    private static readonly FrameHandler?[] FrameTable = BuildTable();
+
+    private static FrameHandler?[] BuildTable()
     {
-        _rendezvous = rendezvous;
-        _nodeId = nodeId;
-        _magic = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
-        _udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-        _udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-        _ = Task.Run(RecvLoop);
-        _ = Task.Run(RegisterRefreshLoop);
+        var table = new FrameHandler?[0x20];
+        table[FramePunc] = OnPunc;
+        table[FramePack] = OnPack;
+        table[FrameData] = OnData;
+        table[FramePing] = OnPing;
+        table[FramePong] = OnPong;
+        return table;
     }
 
-    /// <summary>This socket's public mapped endpoint as observed by the rendezvous; set after <see cref="RegisterAsync"/>.</summary>
-    public IPEndPoint? PublicAddress { get; private set; }
-
-    /// <summary>The punched peer endpoint once connected; null before.</summary>
-    public IPEndPoint? Peer => _peer;
-
-    /// <summary>Round-trip time of the last PING/PONG on the pinhole, or null before any pong.</summary>
-    public TimeSpan? LastRtt { get; private set; }
-
-    /// <summary>Completes when the pinhole is confirmed open (a PACK carrying our magic arrived).</summary>
-    public Task Connected => _punched.Task;
-
-    /// <summary>Raised for each DATA datagram received on the pinhole.</summary>
-    public event Action<byte[]>? Received;
-
-    /// <summary>Registers with the rendezvous and returns this socket's observed public endpoint.</summary>
-    public async Task<IPEndPoint> RegisterAsync(CancellationToken ct = default)
+    public static PeerState CreateState(ulong nodeId, IPEndPoint? bind)
     {
-        await SignalAsync($"REG {_nodeId:x16}", ct).ConfigureAwait(false);
-        return await _observed.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>Asks the rendezvous to introduce <paramref name="targetNodeId"/>, then punches until the pinhole opens.</summary>
-    public async Task ConnectAsync(ulong targetNodeId, CancellationToken ct = default)
-    {
-        if (!_observed.Task.IsCompleted)
+        var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
+        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, 4 * 1024 * 1024);
+        if (OperatingSystem.IsWindows())
         {
-            throw new InvalidOperationException("RegisterAsync must complete before connecting.");
+            const int sioUdpConnreset = -1744830452;
+            udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
         }
 
-        await SignalAsync($"WANT {_nodeId:x16} {targetNodeId:x16}", ct).ConfigureAwait(false);
-        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        udp.Bind(bind ?? new IPEndPoint(IPAddress.IPv6Any, 0));
+        return new PeerState { Udp = udp, NodeId = nodeId, Magic = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) };
+    }
+
+    public static void Start(PeerState s)
+    {
+        new Thread(() => RecvLoop(s)) { IsBackground = true, Name = "pinhole-recv", Priority = ThreadPriority.AboveNormal }.Start();
+        _ = RefreshLoop(s);
+    }
+
+    public static void Shutdown(PeerState s)
+    {
+        s.Shutdown.Cancel();
+        s.Udp.Dispose();
+        s.Shutdown.Dispose();
+    }
+
+    public static void AddRendezvous(PeerState s, IPEndPoint endpoint)
+    {
+        lock (s.Rendezvous)
+        {
+            s.Rendezvous.Add(endpoint.Serialize());
+        }
+    }
+
+    public static async Task<IPEndPoint> Register(PeerState s, CancellationToken ct)
+    {
+        lock (s.Rendezvous)
+        {
+            if (s.Rendezvous.Count == 0)
+            {
+                throw new InvalidOperationException("no rendezvous added");
+            }
+        }
+
+        SignalAll(s, $"REG {s.NodeId:x16}");
+        return await s.Observed.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
+    }
+
+    public static async Task Connect(PeerState s, ulong targetNodeId, CancellationToken ct)
+    {
+        SignalAll(s, $"WANT {s.NodeId:x16} {targetNodeId:x16}");
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, s.Shutdown.Token);
         deadline.CancelAfter(PunchTimeout);
-        await _punched.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+        await s.Punched.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
     }
 
-    /// <summary>Sends a datagram to the punched peer. Throws if not connected.</summary>
-    public void Send(ReadOnlySpan<byte> payload)
+    public static Task ConnectDirect(PeerState s, IPEndPoint endpoint)
     {
-        if (_peer is null || !_punched.Task.IsCompleted)
+        IntroducePeer(s, endpoint);
+        return s.Punched.Task;
+    }
+
+    public static void SendData(PeerState s, ReadOnlySpan<byte> payload)
+    {
+        SocketAddress peer = s.PeerSa ?? throw new InvalidOperationException("pinhole not open");
+        if (!s.Punched.Task.IsCompleted)
         {
-            throw new InvalidOperationException("The pinhole is not open yet.");
+            throw new InvalidOperationException("pinhole not open");
         }
 
-        byte[] frame = new byte[payload.Length + 1];
-        frame[0] = FrameData;
-        payload.CopyTo(frame.AsSpan(1));
-        _udp.SendTo(frame, SocketFlags.None, _peer);
+        int n = payload.Length + 1;
+        if (n <= MaxStackFrame)
+        {
+            Span<byte> frame = stackalloc byte[n];
+            frame[0] = FrameData;
+            payload.CopyTo(frame[1..]);
+            s.Udp.SendTo(frame, SocketFlags.None, peer);
+            return;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(n);
+        try
+        {
+            rented[0] = FrameData;
+            payload.CopyTo(rented.AsSpan(1));
+            s.Udp.SendTo(rented.AsSpan(0, n), SocketFlags.None, peer);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
-    /// <summary>Sends a keepalive PING; the peer's PONG updates <see cref="LastRtt"/>.</summary>
-    public void Ping()
+    public static void Ping(PeerState s)
     {
-        if (_peer is null)
+        if (s.PeerSa is not { } peer)
         {
             return;
         }
 
-        byte[] frame = new byte[9];
+        Span<byte> frame = stackalloc byte[9];
         frame[0] = FramePing;
-        BitConverter.TryWriteBytes(frame.AsSpan(1), Environment.TickCount64);
-        _udp.SendTo(frame, SocketFlags.None, _peer);
+        BitConverter.TryWriteBytes(frame[1..], Environment.TickCount64);
+        s.Udp.SendTo(frame, SocketFlags.None, peer);
     }
 
-    public void Dispose()
+    private static void RecvLoop(PeerState s)
     {
-        _shutdown.Cancel();
-        _udp.Dispose();
-    }
-
-    private Task SignalAsync(string line, CancellationToken ct) =>
-        _udp.SendToAsync(new ArraySegment<byte>(Encoding.ASCII.GetBytes(line + '\n')), SocketFlags.None, _rendezvous, ct).AsTask();
-
-    private async Task RecvLoop()
-    {
-        byte[] buffer = new byte[2048];
-        while (!_shutdown.IsCancellationRequested)
+        byte[] buf = new byte[2048];
+        var remote = new SocketAddress(AddressFamily.InterNetworkV6);
+        while (!s.Shutdown.IsCancellationRequested)
         {
-            SocketReceiveFromResult res;
+            int n;
             try
             {
-                res = await _udp.ReceiveFromAsync(new ArraySegment<byte>(buffer), SocketFlags.None, new IPEndPoint(IPAddress.IPv6Any, 0)).ConfigureAwait(false);
+                n = s.Udp.ReceiveFrom(buf, SocketFlags.None, remote);
             }
-            catch (Exception e) when (e is SocketException or ObjectDisposedException or OperationCanceledException)
+            catch (ObjectDisposedException)
             {
                 return;
             }
-
-            if (res.ReceivedBytes == 0)
+            catch (SocketException) when (s.Shutdown.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (SocketException)
             {
                 continue;
             }
 
-            if (buffer[0] < 0x20)
+            if (n == 0)
             {
-                PeerFrame((IPEndPoint)res.RemoteEndPoint, buffer, res.ReceivedBytes);
+                continue;
+            }
+
+            if (buf[0] < 0x20)
+            {
+                DispatchFrame(s, remote, buf.AsSpan(0, n));
             }
             else
             {
-                ServerLine(Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim());
+                OnSignal(s, buf.AsSpan(0, n));
             }
         }
     }
 
-    private void ServerLine(string line)
+    private static void DispatchFrame(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame) =>
+        FrameTable[frame[0]]?.Invoke(s, remote, frame);
+
+    private static void OnPunc(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
     {
-        string[] parts = line.Split(' ');
-        switch (parts)
+        if (frame.Length < 9)
         {
-            case ["OBS", var observed] when IPEndPoint.TryParse(observed, out IPEndPoint? ep):
-                PublicAddress = ep;
-                _observed.TrySetResult(ep);
+            return;
+        }
+
+        Span<byte> pack = stackalloc byte[9];
+        pack[0] = FramePack;
+        frame[1..9].CopyTo(pack[1..]);
+        s.Udp.SendTo(pack, SocketFlags.None, remote);
+    }
+
+    private static void OnPack(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length < 9 || BitConverter.ToUInt64(frame[1..]) != s.Magic)
+        {
+            return;
+        }
+
+        s.PeerSa = Clone(remote);
+        s.Punched.TrySetResult();
+    }
+
+    private static void OnData(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length < 2 || s.Received is not { } handler)
+        {
+            return;
+        }
+
+        handler(frame[1..]);
+    }
+
+    private static void OnPing(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length < 9)
+        {
+            return;
+        }
+
+        Span<byte> pong = stackalloc byte[9];
+        pong[0] = FramePong;
+        frame[1..9].CopyTo(pong[1..]);
+        s.Udp.SendTo(pong, SocketFlags.None, remote);
+    }
+
+    private static void OnPong(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length < 9)
+        {
+            return;
+        }
+
+        s.LastRtt = TimeSpan.FromMilliseconds(Environment.TickCount64 - BitConverter.ToInt64(frame[1..]));
+    }
+
+    private static void OnSignal(PeerState s, ReadOnlySpan<byte> line)
+    {
+        line = line.TrimEnd("\r\n"u8);
+        int space = line.IndexOf((byte)' ');
+        if (space <= 0)
+        {
+            return;
+        }
+
+        ReadOnlySpan<byte> arg = line[(space + 1)..];
+        switch (line[0])
+        {
+            case (byte)'O':
+                OnObserved(s, arg);
                 break;
-            case ["INTRO", _, var addr] when IPEndPoint.TryParse(addr, out IPEndPoint? peer):
-                OnIntro(peer);
+            case (byte)'I':
+                OnIntro(s, arg);
                 break;
         }
     }
 
-    private void OnIntro(IPEndPoint peer)
+    private static void OnObserved(PeerState s, ReadOnlySpan<byte> arg)
     {
-        _peer ??= peer;
-        _intro.TrySetResult();
-        if (Interlocked.CompareExchange(ref _punching, 1, 0) == 0)
+        if (TryParseEndpoint(arg, out IPEndPoint? ep))
         {
-            _ = Task.Run(PunchLoop);
+            s.PublicAddress = ep;
+            s.Observed.TrySetResult(ep!);
         }
     }
 
-    private async Task PunchLoop()
+    private static void OnIntro(PeerState s, ReadOnlySpan<byte> arg)
+    {
+        int space = arg.LastIndexOf((byte)' ');
+        if (space < 0 || !TryParseEndpoint(arg[(space + 1)..], out IPEndPoint? ep))
+        {
+            return;
+        }
+
+        IntroducePeer(s, ep!);
+    }
+
+    private static void IntroducePeer(PeerState s, IPEndPoint ep)
+    {
+        Interlocked.CompareExchange(ref s.PeerSa, ep.Serialize(), null);
+        if (Interlocked.CompareExchange(ref s.Punching, 1, 0) == 0)
+        {
+            _ = PunchLoop(s);
+        }
+    }
+
+    private static async Task PunchLoop(PeerState s)
     {
         byte[] probe = new byte[9];
         probe[0] = FramePunc;
-        BitConverter.TryWriteBytes(probe.AsSpan(1), _magic);
-        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+        BitConverter.TryWriteBytes(probe.AsSpan(1), s.Magic);
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(s.Shutdown.Token);
         deadline.CancelAfter(PunchTimeout);
         try
         {
-            while (!_punched.Task.IsCompleted)
+            while (!s.Punched.Task.IsCompleted)
             {
-                if (_peer is not null)
+                if (s.PeerSa is { } sa)
                 {
-                    _udp.SendTo(probe, SocketFlags.None, _peer);
+                    s.Udp.SendTo(probe, SocketFlags.None, sa);
                 }
 
                 await Task.Delay(PunchInterval, deadline.Token).ConfigureAwait(false);
@@ -205,54 +365,70 @@ public sealed class PeerSocket : IDisposable
         catch (OperationCanceledException)
         {
         }
-    }
-
-    private void PeerFrame(IPEndPoint remote, byte[] buffer, int length)
-    {
-        switch (buffer[0])
+        catch (ObjectDisposedException)
         {
-            case FramePunc when length == 9:
-                // Their probe got in — ack it so THEIR pinhole registers as open.
-                byte[] pack = new byte[9];
-                pack[0] = FramePack;
-                buffer.AsSpan(1, 8).CopyTo(pack.AsSpan(1));
-                _udp.SendTo(pack, SocketFlags.None, remote);
-                break;
-            case FramePack when length == 9 && BitConverter.ToUInt64(buffer, 1) == _magic:
-                _peer ??= remote; // the addr that answered our probe is the live pinhole
-                _punched.TrySetResult();
-                break;
-            case FrameData when length > 1:
-                Received?.Invoke(buffer[1..length]);
-                break;
-            case FramePing when length == 9:
-                byte[] pong = new byte[9];
-                pong[0] = FramePong;
-                buffer.AsSpan(1, 8).CopyTo(pong.AsSpan(1));
-                _udp.SendTo(pong, SocketFlags.None, remote);
-                break;
-            case FramePong when length == 9:
-                LastRtt = TimeSpan.FromMilliseconds(Environment.TickCount64 - BitConverter.ToInt64(buffer, 1));
-                break;
         }
     }
 
-    private async Task RegisterRefreshLoop()
+    private static async Task RefreshLoop(PeerState s)
     {
-        while (!_shutdown.IsCancellationRequested)
+        while (!s.Shutdown.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(RegisterRefresh, _shutdown.Token).ConfigureAwait(false);
-                if (_observed.Task.IsCompleted)
+                await Task.Delay(RegisterRefresh, s.Shutdown.Token).ConfigureAwait(false);
+                if (s.Observed.Task.IsCompleted)
                 {
-                    await SignalAsync($"REG {_nodeId:x16}", _shutdown.Token).ConfigureAwait(false);
+                    SignalAll(s, $"REG {s.NodeId:x16}");
                 }
             }
             catch (OperationCanceledException)
             {
                 return;
             }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
         }
+    }
+
+    private static void SignalAll(PeerState s, ReadOnlySpan<char> line)
+    {
+        Span<byte> buf = stackalloc byte[line.Length + 1];
+        int n = Encoding.ASCII.GetBytes(line, buf);
+        buf[n] = (byte)'\n';
+        ReadOnlySpan<byte> frame = buf[..(n + 1)];
+        lock (s.Rendezvous)
+        {
+            foreach (SocketAddress sa in s.Rendezvous)
+            {
+                s.Udp.SendTo(frame, SocketFlags.None, sa);
+            }
+        }
+    }
+
+    private static bool TryParseEndpoint(ReadOnlySpan<byte> ascii, out IPEndPoint? ep)
+    {
+        ep = null;
+        if (ascii.Length == 0 || ascii.Length > 64)
+        {
+            return false;
+        }
+
+        Span<char> chars = stackalloc char[ascii.Length];
+        int n = Encoding.ASCII.GetChars(ascii, chars);
+        return IPEndPoint.TryParse(chars[..n], out ep);
+    }
+
+    private static SocketAddress Clone(SocketAddress src)
+    {
+        var dst = new SocketAddress(src.Family, src.Size);
+        for (int i = 0; i < src.Size; i++)
+        {
+            dst[i] = src[i];
+        }
+
+        return dst;
     }
 }

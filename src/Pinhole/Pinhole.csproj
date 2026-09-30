@@ -8,7 +8,6 @@
 		<Description>Lightweight NAT-traversal P2P datagram transport: rendezvous, hole punching, keepalive — one UDP socket, no native dependencies</Description>
 		<PackageId>Pinhole.Net</PackageId>
 		<IsPackable>true</IsPackable>
-		<!-- Pure managed code, no reflection — this turns on the AOT/trim analyzers so we stay that way. -->
 		<IsAotCompatible>true</IsAotCompatible>
 	</PropertyGroup>
 

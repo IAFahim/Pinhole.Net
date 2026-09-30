@@ -7,7 +7,6 @@
 		<Nullable>enable</Nullable>
 		<AssemblyName>pinhole-rendezvous</AssemblyName>
 		<Description>Pinhole rendezvous/signaling server — tiny UDP introducer, NativeAOT single binary</Description>
-		<!-- Single self-contained native binary; nothing to install on the VPS. -->
 		<PublishAot>true</PublishAot>
 		<InvariantGlobalization>true</InvariantGlobalization>
 	</PropertyGroup>

@@ -4,14 +4,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-// pinhole-rendezvous — UDP signaling server: doubles as STUN (it sees each peer's
-// mapped public endpoint) and as the introducer that swaps candidate addresses.
-//
-//   REG <id>            → records (id → sender endpoint), replies "OBS <ip:port>"
-//   WANT <me> <target>  → sends "INTRO <other> <ep>" to both sides;
-//                         target unknown → "WAIT <target>", INTROs fire when it REGs
-// Entries expire after Ttl seconds unless refreshed by a re-REG.
-
 int port = args.Length > 0 ? int.Parse(args[0]) : 7777;
 TimeSpan ttl = TimeSpan.FromSeconds(120);
 
