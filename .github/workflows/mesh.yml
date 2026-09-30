@@ -117,8 +117,18 @@ jobs:
           print("VERIFY:", "PASS" if ok else "FAIL")
           sys.exit(0 if ok else 1)
           EOF
+
+  cleanup:
+    needs: [mesh, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      MESH_REPO: ${{ github.repository }}
+      MESH_BRANCH: mesh/${{ github.run_id }}-${{ github.run_attempt }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
       - name: Clean up signaling branch
-        if: always()
         run: |
           BRANCH_ENC=$(echo "$MESH_BRANCH" | sed 's|/|%2F|')
           curl -s -X DELETE -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \

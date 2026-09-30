@@ -114,6 +114,12 @@ internal static class MeshNode
         }
 
         Console.WriteLine($"[node {index}] shutting down after {(DateTimeOffset.UtcNow - started).TotalSeconds:F0}s — {roundsOk}/3 rounds verified");
+
+        // Hard exit: the session is over, and native teardown (connection_close / stream frees)
+        // can block indefinitely when a blocked read races a container free on the tokio side.
+        // Everything worth reporting is already on the signaling branch.
+        Environment.Exit(roundsOk == 3 ? 0 : 1);
+#pragma warning disable CS0162 // unreachable after Environment.Exit
         return roundsOk == 3 ? 0 : 1;
 
         static string Describe(RoundReport report) =>
@@ -288,13 +294,15 @@ internal static class MeshNode
                     Console.WriteLine($"GUEST joined ({(udp ? "udp" : "relay")}) secret {guestSecret.Task.Result[..Math.Min(16, guestSecret.Task.Result.Length)]}…");
                 }
 
-                await link.DisposeAsync().ConfigureAwait(false);
+                // Best-effort teardown: a wedged native teardown must not stall further guest
+                // hosting; the process-level deadline exit is the real backstop.
+                _ = link.DisposeAsync();
                 pin.Dispose();
             }
             catch (Exception exception)
             {
                 Console.WriteLine($"[node 0] guest session ended: {exception.Message}");
-                try { if (link is not null) { await link.DisposeAsync().ConfigureAwait(false); } } catch { }
+                _ = link?.DisposeAsync();
                 try { pin?.Dispose(); } catch { }
             }
         }
