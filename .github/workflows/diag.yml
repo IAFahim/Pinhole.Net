@@ -26,8 +26,8 @@ jobs:
       - name: Run one test class with hard timeout
         run: |
           if [ "${{ matrix.filter }}" = "EmptySanity" ]; then
-            timeout 100 dotnet test tests/Pinhole.Tests --filter "FullyQualifiedName~NonexistentClass" || echo "no tests matched (expected)"
+            perl -e 'alarm shift; exec @ARGV' 100 dotnet test tests/Pinhole.Tests --filter "FullyQualifiedName~NonexistentClass" || echo "no tests matched (expected)"
             exit 0
           fi
-          timeout 100 dotnet test tests/Pinhole.Tests --filter "FullyQualifiedName~${{ matrix.filter }}" --logger "console;verbosity=detailed"
+          perl -e 'alarm shift; exec @ARGV' 100 dotnet test tests/Pinhole.Tests --filter "FullyQualifiedName~${{ matrix.filter }}" --logger "console;verbosity=detailed"
           echo "class filter ${{ matrix.filter }} finished with exit $?"
