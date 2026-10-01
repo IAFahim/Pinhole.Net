@@ -1,9 +1,9 @@
 name: Diag
 
-# Temporary macOS hang bisection. Class runs identified that every component owning a
-# dedicated thread blocked in sync Receive/ReceiveFrom freezes under testhost on macOS,
-# while async-loop components work. This probe checks whether the same code hangs in a
-# plain console app (no testhost), isolating runtime-vs-test-infra.
+# Temporary macOS hang bisection. Established so far: the suite hangs only under
+# testhost (console probe passes all socket scenarios incl. PeerSocket punch), and
+# only in collections whose components own dedicated blocking receive threads.
+# This run captures managed stacks of the hung testhost with dotnet-stack.
 
 on:
   workflow_dispatch:
@@ -12,109 +12,39 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  stacks:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Build console probe (no testhost)
+      - name: Install dotnet-stack
+        run: dotnet tool install --global dotnet-stack
+      - name: Run slice and capture hung testhost stacks
         run: |
-          mkdir -p probe
-          cat > probe/Probe.csproj <<'EOF'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <OutputType>Exe</OutputType>
-              <TargetFramework>net10.0</TargetFramework>
-              <ImplicitUsings>enable</ImplicitUsings>
-              <Nullable>enable</Nullable>
-            </PropertyGroup>
-            <ItemGroup>
-              <ProjectReference Include="../src/Pinhole/Pinhole.csproj" />
-              <ProjectReference Include="../src/Pinhole.Turn/Pinhole.Turn.csproj" />
-            </ItemGroup>
-          </Project>
-          EOF
-          cat > probe/Program.cs <<'EOF'
-          using System.Diagnostics;
-          using System.Net;
-          using System.Net.Sockets;
-          using System.Text;
-          using Pinhole;
-
-          int fail = 0;
-          void Check(bool ok, string what, long ms) =>
-              Console.WriteLine($"{(ok ? "PASS" : "FAIL")} {what} [{ms} ms]");
-
-          // A: async socket control (the pattern known to work on macOS)
-          var swA = Stopwatch.StartNew();
-          {
-              using var a = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-              a.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-              using var b = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-              b.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-              await a.SendToAsync("hi"u8.ToArray(), SocketFlags.None, new IPEndPoint(IPAddress.IPv6Loopback, b.LocalEndPoint is IPEndPoint be ? be.Port : 0));
-              byte[] bufA = new byte[64];
-              int nA = await b.ReceiveAsync(bufA, SocketFlags.None);
-              Check(Encoding.UTF8.GetString(bufA, 0, nA) == "hi", "async socket echo", swA.ElapsedMilliseconds);
-          }
-
-          // B: dedicated thread blocked in sync ReceiveFrom + concurrent async op
-          var swB = Stopwatch.StartNew();
-          {
-              using var rx = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-              rx.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-              int rxPort = ((IPEndPoint)rx.LocalEndPoint!).Port;
-              var seen = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-              var t = new Thread(() =>
-              {
-                  try
-                  {
-                      EndPoint from = new IPEndPoint(IPAddress.IPv6Any, 0);
-                      byte[] buf = new byte[64];
-                      int n = rx.ReceiveFrom(buf, SocketFlags.None, ref from);
-                      seen.TrySetResult(Encoding.UTF8.GetString(buf, 0, n));
-                  }
-                  catch (Exception ex)
-                  {
-                      seen.TrySetResult("err:" + ex.GetType().Name);
-                  }
-              });
-              t.Start();
-              using var tx = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-              tx.SendTo("probe-b"u8, SocketFlags.None, new IPEndPoint(IPAddress.IPv6Loopback, rxPort));
-              string result = await seen.Task.WaitAsync(TimeSpan.FromSeconds(8));
-              Check(result == "probe-b", "blocking recv thread + async op", swB.ElapsedMilliseconds);
-              if (result != "probe-b") fail++;
-          }
-
-          // C: full PeerSocket punch + data on loopback
-          var swC = Stopwatch.StartNew();
-          {
-              using var p1 = new PeerSocket(1);
-              using var p2 = new PeerSocket(2);
-              _ = p1.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, p2.LocalPort));
-              _ = p2.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, p1.LocalPort));
-              await Task.WhenAll(p1.Connected, p2.Connected).WaitAsync(TimeSpan.FromSeconds(8));
-              var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-              p2.Received += span => got.TrySetResult(span.ToArray());
-              p1.Send("probe-c"u8);
-              byte[] data = await got.Task.WaitAsync(TimeSpan.FromSeconds(8));
-              Check(Encoding.UTF8.GetString(data) == "probe-c", "PeerSocket punch + data", swC.ElapsedMilliseconds);
-              if (Encoding.UTF8.GetString(data) != "probe-c") fail++;
-          }
-
-          Console.WriteLine($"probe result: fail={fail}");
-          return fail == 0 ? 0 : 1;
-          EOF
-          dotnet build probe/Probe.csproj
-      - name: Run probe (no testhost, hard timeout)
-        run: |
-          perl -e 'alarm shift; exec @ARGV' 90 dotnet run --project probe --no-build
-          echo "probe exit: $?"
-      - name: Same suite slice under testhost
-        run: |
-          perl -e 'alarm shift; exec @ARGV' 100 dotnet test tests/Pinhole.Tests --filter "FullyQualifiedName~StunTests" --logger "console;verbosity=detailed"
-          echo "testhost exit: $?"
+          dotnet build tests/Pinhole.Tests
+          dotnet test tests/Pinhole.Tests --no-build --filter "FullyQualifiedName~StunTests" --logger "console;verbosity=detailed" &
+          TEST_PID=$!
+          HOST_PID=""
+          for i in $(seq 1 40); do
+            HOST_PID=$(pgrep -f "testhost" | head -1 || true)
+            if [ -n "$HOST_PID" ]; then break; fi
+            sleep 2
+          done
+          echo "testhost pid: ${HOST_PID:-none}"
+          if [ -z "$HOST_PID" ]; then
+            echo "no testhost process found; test run may have finished:"
+            wait $TEST_PID || true
+            exit 0
+          fi
+          sleep 20   # let the hang settle in
+          echo "=== dotnet-stack report ==="
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet-stack report -p "$HOST_PID" || true
+          echo "=== test process still alive? ==="
+          kill -0 $TEST_PID 2>/dev/null && echo "dotnet test alive (hung)" || echo "dotnet test exited"
+          kill $TEST_PID 2>/dev/null || true
+          sleep 2
+          kill -9 $TEST_PID 2>/dev/null || true
