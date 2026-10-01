@@ -31,6 +31,11 @@ public sealed class FakeStunServer : IDisposable
     /// before the real reply, exercising the client's txid mismatch rejection.</summary>
     public bool SendDecoyFirst { get; set; }
 
+    /// <summary>When set, the server claims THIS endpoint is the client's mapped address
+    /// instead of the observed one — simulating a NAT that assigns a mapping per
+    /// destination (what NatDetector must call Symmetric).</summary>
+    public IPEndPoint? ReportMappedOverride { get; set; }
+
     private async Task RunAsync()
     {
         IPEndPoint any = new(_udp.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
@@ -52,15 +57,16 @@ public sealed class FakeStunServer : IDisposable
             }
 
             IPEndPoint remote = (IPEndPoint)res.RemoteEndPoint;
+            IPEndPoint mapped = ReportMappedOverride ?? remote;
             byte[] txid = _buf[8..20];
             if (SendDecoyFirst)
             {
                 byte[] decoyTxid = new byte[12];
                 Random.Shared.NextBytes(decoyTxid);
-                await _udp.SendToAsync(BuildResponse(decoyTxid, remote), SocketFlags.None, remote).ConfigureAwait(false);
+                await _udp.SendToAsync(BuildResponse(decoyTxid, mapped), SocketFlags.None, remote).ConfigureAwait(false);
             }
 
-            await _udp.SendToAsync(BuildResponse(txid, remote), SocketFlags.None, remote).ConfigureAwait(false);
+            await _udp.SendToAsync(BuildResponse(txid, mapped), SocketFlags.None, remote).ConfigureAwait(false);
         }
 
         static byte[] BuildResponse(byte[] txid, IPEndPoint observed)

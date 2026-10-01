@@ -11,6 +11,7 @@ if (args.Length == 0)
     Console.Error.WriteLine("usage: pinhole-demo node [connectionString]");
     Console.Error.WriteLine("       pinhole-demo rendezvous <ip:port> <myIdHex> [peerIdHex]");
     Console.Error.WriteLine("       pinhole-demo stun [host:port]");
+    Console.Error.WriteLine("       pinhole-demo nat");
     Console.Error.WriteLine("       pinhole-demo turn <host:port> <user> <pass> [peerRelayed ep]");
     Console.Error.WriteLine("       pinhole-demo bench [count] [size]");
     return 2;
@@ -19,6 +20,19 @@ if (args.Length == 0)
 if (args[0] == "node")
 {
     return await NodeChat(args.Length > 1 ? args[1] : null);
+}
+
+if (args[0] == "nat")
+{
+    Console.WriteLine("probing the free STUN catalog to classify this network's NAT…");
+    NatType type = await NatDetector.DetectAsync();
+    Console.WriteLine(type switch
+    {
+        NatType.Cone => "cone-shaped NAT: same mapping everywhere — strangers can punch each other",
+        NatType.Symmetric => "symmetric NAT: one mapping per destination — dial through a relay",
+        _ => "unknown: not enough responsive STUN servers to compare mappings",
+    });
+    return 0;
 }
 
 if (args[0] == "stun")
