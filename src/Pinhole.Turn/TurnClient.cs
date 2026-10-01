@@ -7,6 +7,13 @@ using System.Text;
 
 namespace Pinhole.Turn;
 
+/// <summary>
+/// A relayed connection through any RFC 5766 TURN server: allocate, refresh, permission and
+/// send/data indications over one UDP socket, authenticated with long-term credentials.
+/// No native dependencies. Allocation and permission refreshes run on a background loop;
+/// a 438 stale nonce is adopted and the request retried once. Inbound payloads surface via
+/// <see cref="Received"/>; the address peers send to is <see cref="RelayedAddress"/>.
+/// </summary>
 public sealed class TurnClient : IAsyncDisposable
 {
     private const uint Cookie = 0x2112A442;
@@ -73,20 +80,35 @@ public sealed class TurnClient : IAsyncDisposable
         recv.Start();
     }
 
+    /// <summary>Local endpoint of the relay socket, bound before the allocation handshake and valid as soon as the client exists. This is not the address peers should send to — that is <see cref="RelayedAddress"/>.</summary>
     public IPEndPoint LocalEndPoint { get; }
 
+    /// <summary>The TURN server being relayed through, as passed to <see cref="AllocateAsync(IPEndPoint, string, string, CancellationToken)"/>. The socket is connected to it; every packet this client exchanges goes to this endpoint only.</summary>
     public IPEndPoint Server { get; }
 
+    /// <summary>The long-term-credential username (RFC 5389) supplied at allocation.</summary>
     public string Username { get; }
 
+    /// <summary>The long-term-credential secret supplied at allocation. Kept in plain memory for the client's whole life — it re-derives the integrity key whenever the server rotates its realm — so it cannot be scrubbed on dispose.</summary>
     public string Credential { get; }
 
+    /// <summary>The relayed address the server allocated: the address peers send to. Null until <see cref="AllocateAsync(IPEndPoint, string, string, CancellationToken)"/> succeeds; fixed for the client's lifetime after that.</summary>
     public IPEndPoint? RelayedAddress { get; private set; }
 
+    /// <summary>False once the socket is gone: after <see cref="DisposeAsync"/>, after a failed allocation, or after three consecutive failed allocation refreshes — the refresh loop closes the socket then so traffic fails visibly instead of black-holing. An internal flag, not a probe: a path that died quietly still reports true.</summary>
     public bool IsAlive => Volatile.Read(ref _disposed) == 0;
 
+    /// <summary>Raised with the origin peer and payload of every Data Indication. Handlers run synchronously on the dedicated receive thread — the same thread that completes permission and refresh transactions — so a slow handler stalls both directions of the client, and a throwing handler becomes an unhandled thread exception. Each payload array is a private copy and may be retained.</summary>
     public event Action<IPEndPoint, byte[]>? Received;
 
+    /// <summary>
+    /// Allocates a relay on <paramref name="server"/> using long-term credentials: an unauthenticated
+    /// Allocate first learns the realm and nonce, the authenticated retry allocates. On success starts
+    /// the background refresh loop and returns a client with <see cref="RelayedAddress"/> set. Each
+    /// transaction waits at most 8 s; server error responses surface as
+    /// <see cref="InvalidOperationException"/>. On any failure the socket is already closed — there is
+    /// nothing left to dispose.
+    /// </summary>
     public static async Task<TurnClient> AllocateAsync(IPEndPoint server, string username, string credential, CancellationToken ct = default)
     {
         var client = new TurnClient(server, username, credential);
@@ -104,6 +126,12 @@ public sealed class TurnClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Asks the server to accept traffic to and from <paramref name="peerIp"/>. TURN permissions are
+    /// per-IP, not per-port. A 438 stale nonce is adopted and the request rebuilt once with the fresh
+    /// realm and nonce. Also records the peer so <see cref="SendAsync(ReadOnlyMemory{byte}, IPEndPoint, CancellationToken)"/>
+    /// skips its own permission request while the entry is under 240 s old. Throws on error response or timeout.
+    /// </summary>
     public async Task CreatePermissionAsync(IPAddress peerIp, CancellationToken ct = default)
     {
         byte[] resp = await Transact(() =>
@@ -119,6 +147,12 @@ public sealed class TurnClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Sends <paramref name="payload"/> to <paramref name="peer"/> as a Send Indication, first creating
+    /// or refreshing the peer's permission when it is unseen or its entry is 240 s old. The await — and
+    /// any throw — covers only that permission request; the indication itself is unacknowledged
+    /// fire-and-forget with no delivery guarantee, and a socket error on it is swallowed.
+    /// </summary>
     public async Task SendAsync(ReadOnlyMemory<byte> payload, IPEndPoint peer, CancellationToken ct = default)
     {
         bool needsPermit;
@@ -139,6 +173,12 @@ public sealed class TurnClient : IAsyncDisposable
         SendIndication(msg);
     }
 
+    /// <summary>
+    /// Raw fire-and-forget Send Indication: no permission handling, so the server silently drops the
+    /// data unless the peer was already permitted via <see cref="CreatePermissionAsync(IPAddress, CancellationToken)"/>
+    /// or <see cref="SendAsync(ReadOnlyMemory{byte}, IPEndPoint, CancellationToken)"/>. Never waits on the
+    /// network — a UDP send is a buffer handoff — and a socket error is swallowed, not reported.
+    /// </summary>
     public void Send(ReadOnlySpan<byte> payload, IPEndPoint peer)
     {
         byte[] txid = NewTxid();
@@ -627,6 +667,10 @@ public sealed class TurnClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Cancels the refresh loop and closes the socket; the receive thread notices within its
+    /// 200 ms receive poll. No deallocation Refresh is sent, so the server holds the allocation open
+    /// until its lifetime — 600 s unless the server negotiated otherwise — expires. Completes
+    /// synchronously and is safe to call more than once.</summary>
     public async ValueTask DisposeAsync()
     {
         _shutdown.Cancel();

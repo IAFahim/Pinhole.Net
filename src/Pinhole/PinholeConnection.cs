@@ -8,24 +8,39 @@ namespace Pinhole;
 /// come back; <see cref="Closed"/> is terminal and only ever reached by closing.</summary>
 public enum PinholeConnectionState
 {
+    /// <summary>Trying candidates; nothing is flowing yet.</summary>
     Punching = 0,
+
+    /// <summary>A direct path is active and carrying traffic.</summary>
     Open = 1,
+
+    /// <summary>Relay-only after direct-path trouble; fully usable, higher latency.</summary>
     Degraded = 2,
+
+    /// <summary>No usable path after the punch budget ran out; the object survives and can still come back.</summary>
     Dead = 3,
+
+    /// <summary>Terminal, and only ever reached by closing.</summary>
     Closed = 4,
 }
 
 /// <summary>The physical path a connection is currently using.</summary>
 public enum PathKind : byte
 {
+    /// <summary>No path in use.</summary>
     None = 0,
+
+    /// <summary>Peer-to-peer across the public internet through the punched hole.</summary>
     Direct = 1,
+
+    /// <summary>Through a TURN relay.</summary>
     Relay = 2,
 }
 
 /// <summary>Snapshot of the current path.</summary>
 public sealed record PinholePath(PathKind Kind, IPEndPoint? Remote, DateTimeOffset Since)
 {
+    /// <summary>The "no path" sentinel: null remote, timestamp at the Unix epoch.</summary>
     public static readonly PinholePath None = new(PathKind.None, null, DateTimeOffset.UnixEpoch);
 }
 
@@ -41,6 +56,7 @@ public readonly record struct PinholeStats(
     long PingsSent,
     long PongsReceived)
 {
+    /// <summary>Pings sent minus pongs received, floored at zero — the honest approximation of loss this layer can offer.</summary>
     public long PingsLost => Math.Max(0, PingsSent - PongsReceived);
 }
 
@@ -151,11 +167,13 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         await _engine.CloseAsync(_c).ConfigureAwait(false);
     }
 
+    /// <summary>Closes the connection — same as <see cref="CloseAsync"/>, with the best-effort bye fire-and-forget rather than awaited.</summary>
     public ValueTask DisposeAsync()
     {
         _engine.DisposeConnection(_c);
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>Closes the connection — same as <see cref="CloseAsync"/>, with the best-effort bye fire-and-forget rather than awaited.</summary>
     public void Dispose() => _engine.DisposeConnection(_c);
 }

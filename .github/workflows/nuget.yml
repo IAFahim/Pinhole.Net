@@ -1,0 +1,36 @@
+name: Publish to NuGet
+
+# Publishes the three packages (Pinhole.Net, Pinhole.Turn, Pinhole.Providers) on tag
+# pushes matching a version (v1.0.0). Requires an NUGET_API_KEY secret with push rights;
+# without it the workflow builds and packs (with symbols) but skips the push, so a
+# release can never half-publish silently.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Pack (release, with symbols)
+        run: dotnet pack Pinhole.Net.slnx -c Release -o artifacts
+      - name: Publish
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        run: dotnet nuget push 'artifacts/*.nupkg' --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate
+      - name: Publish (symbol packages)
+        if: ${{ secrets.NUGET_API_KEY != '' }}
+        run: dotnet nuget push 'artifacts/*.snupkg' --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packages
+          path: artifacts/*

@@ -7,39 +7,77 @@ using System.Text;
 
 namespace Pinhole;
 
+/// <summary>Receives one datagram payload from the peer. The span points into the receive
+/// buffer and is only valid for the duration of the call — copy anything you keep.</summary>
 public delegate void PinholeDatagramHandler(ReadOnlySpan<byte> payload);
 
+/// <summary>The raw 1:1 punch engine beneath the session API: one UDP socket, hole punching
+/// to a single peer via rendezvous signalling or STUN, then bare datagrams. No relays, no
+/// roaming — see <see cref="PinholeNode"/> for the open-forever layer.</summary>
 public sealed class PeerSocket : IDisposable
 {
     private readonly PeerState _s;
 
+    /// <summary>Binds a dual-mode IPv6 UDP socket (OS-assigned port unless <paramref name="bind"/>
+    /// says otherwise) and starts the receive loop.</summary>
     public PeerSocket(ulong nodeId, IPEndPoint? bind = null)
     {
         _s = PeerEngine.CreateState(nodeId, bind);
         PeerEngine.Start(_s);
     }
 
+    /// <summary>Adds a rendezvous server this socket registers with, so peers can discover it and be introduced to it.</summary>
     public void AddRendezvous(IPEndPoint endpoint) => PeerEngine.AddRendezvous(_s, endpoint);
 
+    /// <summary>The bound UDP port.</summary>
     public int LocalPort => ((IPEndPoint)_s.Udp.LocalEndPoint!).Port;
+
+    /// <summary>The public endpoint as last observed — by a STUN probe or reported back by a rendezvous server. Null until either happens.</summary>
     public IPEndPoint? PublicAddress => _s.PublicAddress;
+
+    /// <summary>The peer's endpoint once the pinhole is open; null before that.</summary>
     public IPEndPoint? Peer => _s.PeerSa is { } sa ? (IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(sa) : null;
+
+    /// <summary>Round-trip time of the most recent answered <see cref="Ping"/>, if any.</summary>
     public TimeSpan? LastRtt => _s.LastRtt;
+
+    /// <summary>Completes when the punch lands (a peer's reply matched this socket's magic).</summary>
     public Task Connected => _s.Punched.Task;
 
+    /// <summary>Datagrams received from the peer; the payload span is valid only during the call.</summary>
     public event PinholeDatagramHandler? Received
     {
         add => _s.Received += value;
         remove => _s.Received -= value;
     }
 
+    /// <summary>Announces this socket to every rendezvous; completes when one reports back the
+    /// public endpoint it observed. Throws if no rendezvous is configured; times out after 10 s.</summary>
     public Task<IPEndPoint> RegisterAsync(CancellationToken ct = default) => PeerEngine.Register(_s, ct);
+
+    /// <summary>Sends one STUN binding request and completes with the reflexive address.
+    /// Concurrent probes are serialized on shared state — the later one waits for the earlier.</summary>
     public Task<IPEndPoint> ProbeStunAsync(IPEndPoint stunServer, CancellationToken ct = default) => PeerEngine.ProbeStun(_s, stunServer, ct);
+
+    /// <summary>Adds a candidate endpoint and starts (or feeds) the punch loop, which probes
+    /// every candidate until one replies. Add candidates as you learn them.</summary>
     public void AddCandidate(IPEndPoint endpoint) => PeerEngine.AddCandidate(_s, endpoint);
+
+    /// <summary>Asks the rendezvous servers to introduce the target peer, then punches; completes
+    /// when the pinhole opens. Fails after a 10 s punch timeout.</summary>
     public Task ConnectAsync(ulong targetNodeId, CancellationToken ct = default) => PeerEngine.Connect(_s, targetNodeId, ct);
+
+    /// <summary>Punches straight at a known endpoint — no rendezvous involved. Completes when
+    /// the pinhole opens; unlike <see cref="ConnectAsync(ulong, CancellationToken)"/> there is no built-in timeout.</summary>
     public Task ConnectDirectAsync(IPEndPoint endpoint) => PeerEngine.ConnectDirect(_s, endpoint);
+
+    /// <summary>Sends one unreliable datagram through the open pinhole; throws if it is not open.</summary>
     public void Send(ReadOnlySpan<byte> payload) => PeerEngine.SendData(_s, payload);
+
+    /// <summary>Sends a round-trip probe to the peer; a no-op before the pinhole is open. The answer updates <see cref="LastRtt"/>.</summary>
     public void Ping() => PeerEngine.Ping(_s);
+
+    /// <summary>Releases the socket; this layer has no bye frame, so the peer simply sees silence.</summary>
     public void Dispose() => PeerEngine.Shutdown(_s);
 }
 

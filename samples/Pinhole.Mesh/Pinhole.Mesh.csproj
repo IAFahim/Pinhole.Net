@@ -3,6 +3,7 @@
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
 		<TargetFramework>net10.0</TargetFramework>
+		<IsPackable>false</IsPackable>
 		<RootNamespace>Pinhole.Mesh</RootNamespace>
 		<AssemblyName>pinhole-mesh</AssemblyName>
 		<ImplicitUsings>enable</ImplicitUsings>

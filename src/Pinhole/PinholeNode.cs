@@ -118,11 +118,13 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// dialers to skip the hopeless punch). Set from <see cref="NatDetector"/> results.</summary>
     public void SetNatHint(NatHint hint) => _natHint = hint;
 
+    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer), relays are released, and the socket is disposed. Idempotent.</summary>
     public ValueTask DisposeAsync()
     {
         _engine.Dispose();
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer), relays are released, and the socket is disposed. Idempotent.</summary>
     public void Dispose() => _engine.Dispose();
 }

@@ -2,7 +2,7 @@
 
 	<PropertyGroup>
 		<Authors>IAFahim</Authors>
-		<Version>0.1.0</Version>
+		<Version>1.0.0</Version>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<RepositoryUrl>https://github.com/IAFahim/Pinhole.Net</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>

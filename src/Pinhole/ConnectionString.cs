@@ -32,8 +32,13 @@ public sealed record PinholeCandidate(
 /// dialers can skip a hopeless punch (symmetric NAT) and go straight to relay.</summary>
 public enum NatHint : byte
 {
+    /// <summary>The publisher has not classified its NAT; dialers should attempt the punch.</summary>
     Unknown = 0,
+
+    /// <summary>Endpoint-independent mapping: the reflexive candidate is reusable, so a direct punch can land.</summary>
     Cone = 1,
+
+    /// <summary>Per-destination mapping: the observed reflexive address is useless to a dialer — skip the punch, go straight to relay.</summary>
     Symmetric = 2,
 }
 
@@ -42,14 +47,26 @@ public enum NatHint : byte
 /// between peers — clipboard, lobby, your server — is the application's concern.</summary>
 public sealed class ConnectionString
 {
+    /// <summary>The scheme prefix ("pinhole1") every encoded string starts with; the digit is the format version.</summary>
     public const string Scheme = "pinhole1";
+
+    /// <summary>The most candidates one string may carry; the constructor throws above this.</summary>
     public const int MaxCandidates = 32;
+
+    /// <summary>The hard cap on encoded length accepted by <see cref="Parse"/> — longer strings are rejected as malformed, not parsed.</summary>
     public const int MaxEncodedLength = 4096;
 
+    /// <summary>The peer's stable ID — the only part that survives roaming while every candidate address churns.</summary>
     public ulong PeerId { get; }
+
+    /// <summary>The NAT classification the publisher embedded, to steer dialers away from a hopeless punch.</summary>
     public NatHint NatHint { get; }
+
+    /// <summary>Every address the peer is reachable on — direct, reflexive, and relay entries as published.</summary>
     public IReadOnlyList<PinholeCandidate> Candidates { get; }
 
+    /// <summary>Assembles a string from a peer ID, its candidates, and a NAT hint. Throws
+    /// <see cref="ArgumentOutOfRangeException"/> above <see cref="MaxCandidates"/> candidates.</summary>
     public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown)
     {
         if (candidates.Count > MaxCandidates)
@@ -79,6 +96,8 @@ public sealed class ConnectionString
         return Scheme + ":" + Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
     }
 
+    /// <summary>Attempts a <see cref="Parse"/> without throwing: returns false on any malformed
+    /// input (wrong scheme, bad base64url, wrong version, truncated or trailing payload).</summary>
     public static bool TryParse(string text, [NotNullWhen(true)] out ConnectionString? cs)
     {
         try
@@ -93,6 +112,9 @@ public sealed class ConnectionString
         }
     }
 
+    /// <summary>Strict parse: throws <see cref="FormatException"/> on anything but a well-formed
+    /// current-version string, and <see cref="ArgumentNullException"/> on null. Accepts at most
+    /// <see cref="MaxEncodedLength"/> characters and <see cref="MaxCandidates"/> candidates.</summary>
     public static ConnectionString Parse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
