@@ -968,7 +968,7 @@ internal sealed class NodeEngine : IDisposable
         ConnState? c = Lookup(BitConverter.ToUInt64(buf, 1));
         if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
         {
-            Console.WriteLine($"[pinhole] recv {type} from {BitConverter.ToUInt64(buf, 1):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
+            TraceLine($"recv {type} from {BitConverter.ToUInt64(buf, 1):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
         }
 
         if (c is null)
@@ -1259,8 +1259,30 @@ internal sealed class NodeEngine : IDisposable
     // ------------------------------------------------------------------ paths & state
 
     // PINHOLE_TRACE=1 logs every direct-path adoption change — debugging aid for NAT
-    // hairpin mysteries; compiled out of the hot path when unset.
-    private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1";
+    // hairpin mysteries; compiled out of the hot path when unset. PINHOLE_TRACE_FILE=<path>
+    // mirrors the lines to a file (xunit swallows console output from engine threads).
+    private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1"
+        || Environment.GetEnvironmentVariable("PINHOLE_TRACE_FILE") is { Length: > 0 };
+
+    private static readonly object TraceGate = new();
+
+    private static void TraceLine(string line)
+    {
+        Console.WriteLine("[pinhole] " + line);
+        if (Environment.GetEnvironmentVariable("PINHOLE_TRACE_FILE") is { Length: > 0 } path)
+        {
+            try
+            {
+                lock (TraceGate)
+                {
+                    File.AppendAllText(path, $"[{DateTimeOffset.UtcNow:HH:mm:ss.fff}] [pid {Environment.ProcessId}] {line}\n");
+                }
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
 
     private void TracePath(ConnState c, SocketAddress source)
     {
@@ -1270,16 +1292,16 @@ internal sealed class NodeEngine : IDisposable
         }
 
         IPEndPoint next = ToEndpoint(source);
-        Console.WriteLine($"[pinhole] peer {c.PeerId:x16} path -> {next} (was {c.DirectRemoteEp}, state {c.State}/{c.Path})");
+        TraceLine($"peer {c.PeerId:x16} path -> {next} (was {c.DirectRemoteEp}, state {c.State}/{c.Path})");
     }
 
     private void DirectPathConfirmed(ConnState c, SocketAddress source)
     {
         lock (c.Gate)
         {
-            if (c.State == PinholeConnectionState.Closed)
+            if (c.State == PinholeConnectionState.Closed || c.BlackholeDirect)
             {
-                return;
+                return; // test hook: this direct path is dead; nothing can confirm it
             }
 
             TracePath(c, source);
