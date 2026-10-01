@@ -74,7 +74,51 @@ pinhole-demo bench 100000 64
 # 299k datagrams/s, 0 B/datagram allocated, 0 GCs (loopback)
 ```
 
-## Status & roadmap
+## Roadmap — the 1.0 API
+
+The dev surface the milestones below build toward. Iroh's ergonomics (`bind → ticket →
+connect/accept`), this library's connection contract underneath:
+
+```csharp
+using Pinhole;
+
+// ---------- PC A (listener) ----------
+await using PinholeNode a = await PinholeNode.BindAsync();
+// binds the UDP socket, registers with iroh's public relay (home base),
+// probes free STUN (Google/Cloudflare) for the reflexive candidate.
+
+string cs = a.ConnectionString;
+// "pinhole1:AAE..." — peer ID + relay + direct/reflexive candidates.
+// THE app moves this string to PC B: paste, lobby, your server — your problem.
+
+await using PinholeConnection conn = await a.AcceptAsync();
+
+conn.Received += dgram => Console.WriteLine(Encoding.UTF8.GetString(dgram));
+conn.Send("hello from A"u8);          // unreliable datagram, hot path, zero-alloc
+await conn.Closed;                    // fires only on Close() — roaming never fires it
+
+// ---------- PC B (dialer) ----------
+await using PinholeNode b = await PinholeNode.BindAsync();
+await using PinholeConnection conn = await b.ConnectAsync(csFromA);
+
+conn.Send("hello from B"u8);
+```
+
+- `PinholeNode.BindAsync()` → socket + relay home + STUN probe, all internal.
+- `node.ConnectionString` → the single discovery artifact; `ConnectAsync(string)` consumes it.
+- `ConnectAsync` runs the chain internally: direct punch first, iroh relay as the standing
+  fallback — it returns when connected *on either path*, never "fails because punch failed".
+- `PinholeConnection`: `Send(span)` / `Received` event / `State`
+  (`Punching → Open → Degraded → Closed`) / `Path` (direct-reflexive-or-relay + RTT) /
+  `CloseAsync()`. WiFi→mobile, rebind, NAT death: handled inside, same object, no events required.
+- `MaxPayload` guard; `Ping()` as a tool.
+- `Pinhole.Iroh` becomes the internal C# client of iroh's public relays; the dev never touches it.
+
+Deliberately absent, by design: no encryption/auth (plaintext — do it above), no
+reliability/ordering/streams, no keepalive scheduling, no signaling service (string
+transport is yours). On top of the connection, bring your own protocol — UDP, TCP, QUIC.
+
+## Status
 
 Done: punch/TURN/rendezvous hardening ([#1](https://github.com/IAFahim/Pinhole.Net/issues/1)),
 safe-layer migration ([#2](https://github.com/IAFahim/Pinhole.Net/issues/2)),
