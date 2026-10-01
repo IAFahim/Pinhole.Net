@@ -3,8 +3,6 @@ name: CI
 # Build + unit/loopback suite on every push and PR (the mesh workflow stays manual-only).
 # The suite is fully self-contained: STUN and TURN are exercised against in-process fake
 # servers, so no internet access, real relay, or native toolchain is needed on any OS.
-# The iroh bridge and samples compile in the ubuntu bench job and the mesh workflow,
-# where cargo is available to generate NativeMethods.g.cs and build the native library.
 
 on:
   push:
@@ -46,32 +44,46 @@ jobs:
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 
+  mesh-local:
+    name: mesh-smoke (3 nodes, one machine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish once
+        run: dotnet publish samples/Pinhole.Mesh -c Release -o meshbin
+      - name: Run three strangers over a filesystem signaling channel
+        run: |
+          export MESH_SIGNAL_DIR="$RUNNER_TEMP/signal"
+          export MESH_DEADLINE_MS=90000
+          mkdir -p "$MESH_SIGNAL_DIR"
+          for i in 0 1 2; do
+            MESH_LINGER=$([ "$i" = 0 ] && echo 1 || echo "") \
+              dotnet meshbin/pinhole-mesh.dll node $i 3 > "$RUNNER_TEMP/node$i.log" 2>&1 &
+          done
+          FAIL=0
+          for i in 0 1 2; do wait %$((i+1)) || FAIL=1; done
+          echo "--- node logs ---"
+          cat "$RUNNER_TEMP"/node*.log
+          exit $FAIL
+
   bench:
     name: bench-canary
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Native library (cargo, cached)
-        uses: actions/cache@v4
-        with:
-          path: |
-            extern/irohnet/iroh-bindgen/target
-            extern/irohnet/N0.IrohNet.NativeAssets.Linux/runtimes
-          key: iroh-native-${{ runner.os }}-${{ hashFiles('extern/irohnet/iroh-c-ffi/iroh-c-ffi/Cargo.lock', 'extern/irohnet/iroh-bindgen/Cargo.lock') }}
-      - name: Compile libiroh_bindgen (also generates NativeMethods.g.cs via cargo build.rs)
-        run: dotnet build extern/irohnet/N0.IrohNet.NativeAssets.Linux/N0.IrohNet.NativeAssets.Linux.csproj -f net10.0 -r linux-x64
       - name: Throughput and allocation canary
         run: |
           # The dps floor is runner-calibrated (2 shared vCPUs reach ~60k; real
           # hardware does 600k+); the strict zero-allocation gate is the real signal.
-          OUT=$(dotnet run --project samples/Pinhole.Demo -c Release -p:TargetFrameworks=net10.0 -- bench 300000 64)
+          OUT=$(dotnet run --project samples/Pinhole.Demo -c Release -- bench 300000 64)
           echo "$OUT"
           DPS=$(echo "$OUT" | grep -oP '\d+(?= dps)')
           BPD=$(echo "$OUT" | grep -oP '[\d.]+(?= B/dgram)')

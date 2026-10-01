@@ -1,7 +1,6 @@
 <Solution>
   <Project Path="src/Pinhole/Pinhole.csproj" />
   <Project Path="src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" />
-  <Project Path="src/Pinhole.Iroh/Pinhole.Iroh.csproj" />
   <Project Path="src/Pinhole.Turn/Pinhole.Turn.csproj" />
   <Project Path="src/Pinhole.Providers/Pinhole.Providers.csproj" />
   <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />

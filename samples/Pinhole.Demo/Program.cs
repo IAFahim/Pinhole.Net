@@ -3,18 +3,22 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using Pinhole;
-using Pinhole.Iroh;
 using Pinhole.Providers;
 using Pinhole.Turn;
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("usage: pinhole-demo <rendezvous ip:port> <myIdHex> [peerIdHex]");
-    Console.Error.WriteLine("       pinhole-demo iroh [peerTicket]");
+    Console.Error.WriteLine("usage: pinhole-demo node [connectionString]");
+    Console.Error.WriteLine("       pinhole-demo rendezvous <ip:port> <myIdHex> [peerIdHex]");
     Console.Error.WriteLine("       pinhole-demo stun [host:port]");
     Console.Error.WriteLine("       pinhole-demo turn <host:port> <user> <pass> [peerRelayed ep]");
     Console.Error.WriteLine("       pinhole-demo bench [count] [size]");
     return 2;
+}
+
+if (args[0] == "node")
+{
+    return await NodeChat(args.Length > 1 ? args[1] : null);
 }
 
 if (args[0] == "stun")
@@ -38,92 +42,108 @@ if (args[0] == "bench")
     return await Bench(args.Length > 1 ? int.Parse(args[1]) : 100_000, args.Length > 2 ? int.Parse(args[2]) : 64);
 }
 
-if (args[0] == "iroh")
+if (args[0] == "rendezvous")
 {
-    return await IrohChat(args.Length > 1 ? args[1] : null);
+    return await RendezvousChat(args[1..]);
 }
 
-if (args.Length < 2)
+Console.Error.WriteLine($"unknown mode '{args[0]}'");
+return 2;
+
+// ---------------------------------------------------------------------------------------------
+
+// The README program, verbatim shape: bind, print the connection string, dial or accept,
+// exchange datagrams. Direct when punchable, relayed when not — the chain runs inside.
+static async Task<int> NodeChat(string? connectionString)
 {
-    Console.Error.WriteLine("usage: pinhole-demo <rendezvous ip:port> <myIdHex> [peerIdHex]");
-    return 2;
-}
-
-IPEndPoint server = IPEndPoint.Parse(args[0]);
-ulong me = ulong.Parse(args[1], NumberStyles.HexNumber);
-
-using PeerSocket peer = new(me);
-peer.AddRendezvous(server);
-peer.Received += data => Console.WriteLine($"peer: {Encoding.UTF8.GetString(data)}");
-
-IPEndPoint observed = await peer.RegisterAsync();
-Console.WriteLine($"registered as {me:x4} — rendezvous sees me at {observed}");
-
-if (args.Length > 2)
-{
-    ulong target = ulong.Parse(args[2], NumberStyles.HexNumber);
-    Console.WriteLine($"dialing {target:x4}…");
-    await peer.ConnectAsync(target);
-}
-
-await peer.Connected;
-Console.WriteLine($"pinhole open to {peer.Peer} — type lines to send, Ctrl-C quits");
-
-_ = Task.Run(async () =>
-{
-    while (true)
+    await using PinholeNode node = await PinholeNode.BindAsync();
+    Console.WriteLine($"peer id   {node.PeerId:x16}");
+    Console.WriteLine($"udp port  {node.LocalPort}");
+    if (node.PublicEndpoints.Count > 0)
     {
-        peer.Ping();
-        await Task.Delay(5000);
-        if (peer.LastRtt is { } rtt)
+        Console.WriteLine($"public    {string.Join(", ", node.PublicEndpoints)}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("connection string (paste it to the peer — how is your problem):");
+    Console.WriteLine(node.ConnectionString);
+    Console.WriteLine();
+
+    PinholeConnection conn = connectionString is null
+        ? await node.AcceptAsync()
+        : await node.ConnectAsync(connectionString);
+
+    Console.WriteLine($"connected to {conn.PeerId:x16} — state {conn.State}, path {conn.Path.Kind} ({conn.Path.Remote})");
+    Console.WriteLine("type lines to send, Ctrl-C quits");
+
+    conn.Received += d => Console.WriteLine($"peer: {Encoding.UTF8.GetString(d)}");
+    conn.StateChanged += s => Console.WriteLine($"  path state -> {s}");
+    _ = Task.Run(async () =>
+    {
+        while (true)
         {
-            Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F0} ms");
+            await Task.Delay(5000);
+            conn.Ping();
+            if (conn.LastRtt is { } rtt)
+            {
+                Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F1} ms via {conn.Path.Kind}");
+            }
         }
-    }
-});
-
-while (Console.ReadLine() is { Length: > 0 } line)
-{
-    peer.Send(Encoding.UTF8.GetBytes(line));
-}
-
-return 0;
-
-static async Task<int> IrohChat(string? ticket)
-{
-    await using IrohPinhole node = await IrohPinhole.BindAsync();
-    using var pin = new PeerSocket(0);
-    Console.WriteLine($"ticket: {node.Ticket}");
-    Console.WriteLine($"addrs:  {string.Join(", ", node.DirectAddresses)}");
-    await using IrohLink link = ticket is null ? await node.AcceptAsync() : await node.ConnectAsync(ticket);
-
-    pin.Received += d => Console.WriteLine($"peer(udp):   {Encoding.UTF8.GetString(d)}");
-    link.Received += d => Console.WriteLine($"peer(relay): {Encoding.UTF8.GetString(d)}");
-
-    Console.WriteLine("introducing over iroh…");
-    bool fast = false;
-    try
-    {
-        await link.IntroduceAsync(pin);
-        fast = true;
-        Console.WriteLine($"pinhole open to {pin.Peer} — UDP fast path active");
-    }
-    catch (Exception e)
-    {
-        Console.WriteLine($"punch failed ({e.Message}) — staying on iroh relay path");
-    }
+    });
 
     while (Console.ReadLine() is { Length: > 0 } line)
     {
-        byte[] body = Encoding.UTF8.GetBytes(line);
-        if (fast)
+        conn.Send(Encoding.UTF8.GetBytes(line));
+    }
+
+    return 0;
+}
+
+// The 1:1 rendezvous introducer flow over the raw PeerSocket engine (pre-session layer).
+static async Task<int> RendezvousChat(string[] args)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("usage: pinhole-demo rendezvous <ip:port> <myIdHex> [peerIdHex]");
+        return 2;
+    }
+
+    IPEndPoint server = IPEndPoint.Parse(args[0]);
+    ulong me = ulong.Parse(args[1], NumberStyles.HexNumber);
+
+    using PeerSocket peer = new(me);
+    peer.AddRendezvous(server);
+    peer.Received += data => Console.WriteLine($"peer: {Encoding.UTF8.GetString(data)}");
+
+    IPEndPoint observed = await peer.RegisterAsync();
+    Console.WriteLine($"registered as {me:x4} — rendezvous sees me at {observed}");
+
+    if (args.Length > 2)
+    {
+        ulong target = ulong.Parse(args[2], NumberStyles.HexNumber);
+        Console.WriteLine($"dialing {target:x4}…");
+        await peer.ConnectAsync(target);
+    }
+
+    await peer.Connected;
+    Console.WriteLine($"pinhole open to {peer.Peer} — type lines to send, Ctrl-C quits");
+
+    _ = Task.Run(async () =>
+    {
+        while (true)
         {
-            pin.Send(body);
+            peer.Ping();
+            await Task.Delay(5000);
+            if (peer.LastRtt is { } rtt)
+            {
+                Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F0} ms");
+            }
         }
-        else
-        {
-            await link.SendAsync(body);
-        }
+    });
+
+    while (Console.ReadLine() is { Length: > 0 } line)
+    {
+        peer.Send(Encoding.UTF8.GetBytes(line));
     }
 
     return 0;
@@ -184,7 +204,7 @@ static async Task<int> TurnRelay(string target, string user, string pass, string
     }
 
     IPEndPoint peerEp = IPEndPoint.Parse(peer);
-    while (Console.ReadLine() is { } line)
+    while (Console.ReadLine() is { Length: > 0 } line)
     {
         await turn.SendAsync(Encoding.UTF8.GetBytes(line), peerEp);
     }

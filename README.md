@@ -12,47 +12,43 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole` package, net10.0): punch, STUN probe, datagrams — one UDP socket, zero allocations on the hot path
+- `src/Pinhole` — the connection core (`Pinhole` package, net10.0): `PinholeNode`/`PinholeConnection` session API + the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the hot path, no native dependencies
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
-- `src/Pinhole.Iroh` — legacy bridge onto the iroh **Rust library** — being removed in [#8](https://github.com/IAFahim/Pinhole.Net/issues/8); after that, iroh remains in the picture only as free public relay infrastructure, consumed as a protocol
-- `samples/Pinhole.Demo` — register/punch/chat demo + throughput bench + stun/turn/iroh probes
-- `tests/Pinhole.Tests` — loopback xunit suite: punch/ping/data, STUN+TURN against in-process fake servers, rendezvous protocol + bounds, teardown bounds
+- `samples/Pinhole.Demo` — the README program (`node` chat over connection strings), rendezvous chat, throughput bench, stun/turn probes
+- `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
+- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, STUN+TURN against in-process fake servers, rendezvous protocol + bounds, teardown bounds
 
 ## Build & test
 
 ```bash
-git clone --recurse-submodules https://github.com/IAFahim/Pinhole.Net   # submodule goes away with #8
+git clone https://github.com/IAFahim/Pinhole.Net
 cd Pinhole.Net
-# one-time, until #8 removes the iroh bridge: cargo build of the native lib
-dotnet build extern/irohnet/N0.IrohNet.NativeAssets.Linux -f net10.0 -r linux-x64
-dotnet build Pinhole.Net.slnx -p:TargetFrameworks=net10.0   # pin keeps the submodule's mobile TFMs out
-dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo needed
+dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo, nothing native
 ```
 
-After [#8](https://github.com/IAFahim/Pinhole.Net/issues/8) the clone needs no submodules, no cargo, no TFM pin — plain `dotnet test`.
+Pure C# end to end — no submodules, no Rust toolchain, no TFM pins.
+
+## Run it — connection strings (free infrastructure, no server)
+
+```bash
+dotnet run --project samples/Pinhole.Demo -- node          # prints the connection string, listens
+dotnet run --project samples/Pinhole.Demo -- node <string> # dials it from any machine
+```
+
+`BindAsync` probes the free STUN servers and allocates the free OpenRelay TURN server as
+the standing fallback; the string carries the peer ID plus direct/reflexive/relay
+candidates. `ConnectAsync` runs the chain internally — direct punch first, relay when the
+punch fails — and the connection opens on whichever path works.
 
 ## Run it — own rendezvous
 
 ```bash
-dotnet run --project src/Pinhole.Rendezvous -- 7777            # signaling box
-dotnet run --project samples/Pinhole.Demo -- 127.0.0.1:7777 aaaa        # listen
-dotnet run --project samples/Pinhole.Demo -- 127.0.0.1:7777 bbbb aaaa   # dial
+dotnet run --project src/Pinhole.Rendezvous -- 7777                        # signaling box
+dotnet run --project samples/Pinhole.Demo -- rendezvous 127.0.0.1:7777 aaaa        # listen
+dotnet run --project samples/Pinhole.Demo -- rendezvous 127.0.0.1:7777 bbbb aaaa   # dial
 ```
-
-## Run it — iroh infra (free, no server)
-
-```bash
-dotnet run --project samples/Pinhole.Demo -- iroh          # prints ticket, listens
-dotnet run --project samples/Pinhole.Demo -- iroh <ticket> # dials via iroh, then punches
-```
-
-Today this rides the iroh Rust bridge: both sides exchange UDP port + address candidates
-over an iroh stream, then Pinhole punches its own raw-UDP pinhole, with the iroh stream
-as the relayed fallback channel. The bridge is temporary scaffolding — the destination
-shape is the [#4](https://github.com/IAFahim/Pinhole.Net/issues/4) session API: a
-connection string in, an open-forever connection out, relay = free public infrastructure.
 
 ## Free infrastructure probes
 

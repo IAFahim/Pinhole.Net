@@ -7,11 +7,11 @@
 		<AssemblyName>pinhole-mesh</AssemblyName>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Description>CI mesh harness: N independent machines discover each other via a signaling channel, connect over iroh, exchange fresh random secrets, drop and repeat — with a guest mode so any machine (e.g. a dev PC) can join a live session from just the printed ticket.</Description>
+		<Description>CI mesh harness: N independent machines discover each other via a signaling channel, connect over the pure-C# session API, exchange fresh random secrets, drop and repeat — with a guest mode so any machine (e.g. a dev PC) can join a live session from just the printed ticket.</Description>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\..\src\Pinhole.Iroh\Pinhole.Iroh.csproj" />
+		<ProjectReference Include="..\..\src\Pinhole\Pinhole.csproj" />
 	</ItemGroup>
 
 </Project>

@@ -1,15 +1,25 @@
 name: Mesh
 
-# Manual sessions only — never on push. Dispatches three independent (randomly assigned)
-# GitHub-hosted runners that know nothing about each other in advance: they discover one
-# another solely through tickets on a per-run signaling branch, connect over iroh, exchange
-# fresh random secrets, drop the connections, and repeat — three rounds in a row. The run is
-# green only if every node verified every peer's secret in all three rounds. Everyone shuts
-# down at the 5-minute deadline; node 0 accepts guest joins until then, so any machine
-# (e.g. a dev PC) can join the live session with the ticket printed in the job summary.
+# Manual sessions only — never on push (plus the weekly canary schedule). Dispatches three
+# independent (randomly assigned) GitHub-hosted runners that know nothing about each other in
+# advance: they discover one another solely through connection strings on a per-run signaling
+# branch, connect over the pure-C# session API (direct UDP when punchable, free TURN relay
+# when not), exchange fresh random secrets, drop the connections, and repeat — three rounds
+# in a row. The run is green only if every node verified every peer's secret in all three
+# rounds. Everyone shuts down at the 5-minute deadline; node 0 accepts guest joins until
+# then, so any machine (e.g. a dev PC) can join the live session with the connection string
+# printed in the job summary. Dispatch with force_relay=true to strip the direct candidates
+# from all tickets and prove the relay-only chain.
 
 on:
   workflow_dispatch:
+    inputs:
+      force_relay:
+        description: 'Force every connection onto the TURN relay path (no direct candidates in tickets)'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: write
@@ -27,28 +37,17 @@ jobs:
       MESH_REPO: ${{ github.repository }}
       MESH_BRANCH: mesh/${{ github.run_id }}-${{ github.run_attempt }}
       MESH_DEADLINE_MS: "300000"
+      MESH_FORCE_RELAY: ${{ github.event.inputs.force_relay == 'true' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build native iroh library (cargo, cached)
-        uses: actions/cache@v4
-        with:
-          path: |
-            extern/irohnet/iroh-bindgen/target
-            extern/irohnet/N0.IrohNet.NativeAssets.Linux/runtimes
-          key: iroh-native-${{ runner.os }}-${{ hashFiles('extern/irohnet/iroh-c-ffi/iroh-c-ffi/Cargo.lock', 'extern/irohnet/iroh-bindgen/Cargo.lock') }}
-      - name: Compile libiroh_bindgen
-        run: dotnet build extern/irohnet/N0.IrohNet.NativeAssets.Linux/N0.IrohNet.NativeAssets.Linux.csproj -f net10.0 -r linux-x64
       - name: Run mesh node
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MESH_LINGER: ${{ matrix.index == 0 && '1' || '' }}
-        run: dotnet run --project samples/Pinhole.Mesh -c Release -p:TargetFrameworks=net10.0 -- node ${{ matrix.index }} 3
+        run: dotnet run --project samples/Pinhole.Mesh -c Release -- node ${{ matrix.index }} 3
       - name: Publish join ticket
         if: matrix.index == 0 && always()
         run: |
@@ -60,7 +59,7 @@ jobs:
               echo "Valid until the 5-minute session deadline. From any clone of this repo:"
               echo
               echo '```bash'
-              echo "dotnet run --project samples/Pinhole.Mesh -c Release -p:TargetFrameworks=net10.0 -- guest $TICKET"
+              echo "dotnet run --project samples/Pinhole.Mesh -c Release -- guest $TICKET"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi

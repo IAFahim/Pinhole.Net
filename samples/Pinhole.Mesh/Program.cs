@@ -1,18 +1,22 @@
 // Pinhole mesh harness — proves NAT-independent P2P between machines that know nothing
-// about each other beforehand.
+// about each other beforehand, using only the pure-C# session API (PinholeNode).
 //
 //   pinhole-mesh node <index> <count>    CI mode: discovers peers over a signaling channel,
 //                                        runs 3 connect/exchange/drop rounds of fresh random
 //                                        secrets, exits 0 only if all rounds verify, hard
 //                                        shutdown at the 5-minute deadline. Node 0 additionally
 //                                        hosts guest joins until the deadline.
-//   pinhole-mesh guest <ticket>          Local mode: join a live session from just the ticket,
-//                                        exchange a random secret, print what the mesh answered.
+//   pinhole-mesh guest <cs>              Local mode: join a live session from just the printed
+//                                        connection string, exchange a random secret, print
+//                                        what the mesh answered.
 //
 // Signaling is pluggable: MESH_SIGNAL_DIR switches to a local filesystem channel (used for
 // same-machine runs); otherwise the GitHub Contents API on branch $MESH_BRANCH is used, so
 // three unrelated GitHub-hosted runners can find each other with nothing shared in advance
-// except the repo they were spawned from.
+// except the repo they were spawned from. The connection string each node announces is the
+// real discovery artifact: peer ID + direct/reflexive candidates + free-relay fallback.
+// MESH_FORCE_RELAY=1 strips the direct candidates from announced tickets, forcing every
+// connection onto the TURN relay path.
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -22,7 +26,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Pinhole;
-using Pinhole.Iroh;
 
 if (args is ["node", var indexText, var countText]
     && int.TryParse(indexText, out int index) && int.TryParse(countText, out int count))
@@ -35,7 +38,7 @@ if (args is ["guest", var ticket])
     return await Guest.RunAsync(ticket);
 }
 
-Console.Error.WriteLine("usage: pinhole-mesh node <index> <count> | pinhole-mesh guest <ticket>");
+Console.Error.WriteLine("usage: pinhole-mesh node <index> <count> | pinhole-mesh guest <cs>");
 return 2;
 
 // ---------------------------------------------------------------------------------------------
@@ -49,7 +52,6 @@ internal static class MeshNode
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromMilliseconds(
         double.TryParse(Environment.GetEnvironmentVariable("MESH_DEADLINE_MS"), CultureInfo.InvariantCulture, out double ms) ? ms : 300_000);
-    private static readonly TimeSpan PunchBudget = TimeSpan.FromSeconds(6);
 
     public static async Task<int> RunAsync(int index, int count)
     {
@@ -57,8 +59,8 @@ internal static class MeshNode
         DateTimeOffset deadline = started + Deadline;
 
         await using ISignal signal = Signal.Create();
-        await using IrohPinhole node = await IrohPinhole.BindAsync("pinhole-mesh/1").WaitAsync(Reserve(deadline, 60));
-        Console.WriteLine($"[node {index}] bound");
+        await using PinholeNode node = await PinholeNode.BindAsync().WaitAsync(Reserve(deadline, 60));
+        Console.WriteLine($"[node {index}] bound (peer {node.PeerId:x16}, public: {string.Join(", ", node.PublicEndpoints)})");
 
         int roundsOk = 0;
         List<string> mySecrets = new();
@@ -67,15 +69,15 @@ internal static class MeshNode
             await signal.AnnounceAsync($"tickets/{index}.json", JsonSerializer.Serialize(new TicketAnnounce
             {
                 Index = index,
-                Ticket = node.Ticket,
+                Ticket = TicketOf(node),
             }, MeshJson.Options)).WaitAsync(Reserve(deadline, 45));
 
             if (index == 0)
             {
-                Console.WriteLine("TICKET " + node.Ticket);
+                Console.WriteLine("TICKET " + node.ConnectionString);
                 try
                 {
-                    await File.WriteAllTextAsync("ticket.txt", node.Ticket + "\n");
+                    await File.WriteAllTextAsync("ticket.txt", node.ConnectionString + "\n");
                 }
                 catch (IOException)
                 {
@@ -88,7 +90,7 @@ internal static class MeshNode
 
             for (int round = 1; round <= 3; round++)
             {
-                RoundReport report = await RunRoundAsync(index, count, round, node, tickets, deadline);
+                RoundReport report = await RunRoundAsync(index, count, round, node, signal, deadline);
                 await signal.AnnounceAsync($"rounds/{round}/{index}.json", JsonSerializer.Serialize(report, MeshJson.Options))
                     .WaitAsync(Reserve(deadline, 20));
                 Console.WriteLine($"[node {index}] round {round}: {(report.Ok ? "OK" : "FAILED")} — {Describe(report)}");
@@ -107,16 +109,13 @@ internal static class MeshNode
         }
 
         // Node 0 keeps accepting guests until the deadline so any machine (e.g. a dev PC)
-        // can join with the ticket while the session is live; everyone else shuts down early.
+        // can join with the connection string while the session is live.
         if (index == 0 && Environment.GetEnvironmentVariable("MESH_LINGER") == "1")
         {
             await HostGuestsAsync(node, mySecrets, deadline);
         }
 
         Console.WriteLine($"[node {index}] shutting down after {(DateTimeOffset.UtcNow - started).TotalSeconds:F0}s — {roundsOk}/3 rounds verified");
-
-        // The safe layer bounds every native teardown (streams, connections, endpoint), so the
-        // normal `await using` disposal is trusted again — no hard process exit required.
         return roundsOk == 3 ? 0 : 1;
 
         static string Describe(RoundReport report) =>
@@ -128,11 +127,25 @@ internal static class MeshNode
             TimeSpan.FromSeconds(Math.Max(1, Math.Min(seconds, (deadline - DateTimeOffset.UtcNow).TotalSeconds - 1)));
     }
 
+    // MESH_FORCE_RELAY=1 strips direct candidates from announced tickets: peers can then
+    // only meet through the TURN relay — the CI canary uses this to exercise relay paths.
+    private static string TicketOf(PinholeNode node)
+    {
+        if (Environment.GetEnvironmentVariable("MESH_FORCE_RELAY") != "1")
+        {
+            return node.ConnectionString;
+        }
+
+        ConnectionString full = ConnectionString.Parse(node.ConnectionString);
+        var relayOnly = full.Candidates.Where(c => c.Kind == CandidateKind.Relay).ToList();
+        return new ConnectionString(full.PeerId, relayOnly, full.NatHint).ToString();
+    }
+
     private static async Task<RoundReport> RunRoundAsync(
-        int index, int count, int round, IrohPinhole node, Dictionary<int, string> tickets, DateTimeOffset deadline)
+        int index, int count, int round, PinholeNode node, ISignal signal, DateTimeOffset deadline)
     {
         string mySecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var contexts = new List<LinkContext>();
+        var contexts = new List<ConnContext>();
         TimeSpan budget = TimeSpan.FromTicks(Math.Min(
             TimeSpan.FromSeconds(80).Ticks,
             (deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(4)).Ticks));
@@ -140,54 +153,70 @@ internal static class MeshNode
 
         try
         {
-            // Lower index listens, higher index dials: every pair forms exactly one iroh link.
-            Task<IrohLink>[] dials = Enumerable.Range(0, index)
-                .Select(j => node.ConnectAsync(tickets[j]).WaitAsync(roundCts.Token))
-                .ToArray();
-            Task<IrohLink>[] accepts = Enumerable.Repeat(0, count - 1 - index)
-                .Select(_ => node.AcceptAsync().WaitAsync(roundCts.Token))
-                .ToArray();
-            IrohLink[] established = await Task.WhenAll(dials.Concat(accepts)).ConfigureAwait(false);
-
-            foreach (IrohLink link in established)
+            // Fresh tickets per round: a peer that roamed or rebound since the session
+            // started re-announces its current candidates instead of being dialed stale.
+            await signal.AnnounceAsync($"rounds/{round}/tickets/{index}.json", JsonSerializer.Serialize(new TicketAnnounce
             {
-                LinkContext context = new(link);
-                contexts.Add(context);
-                context.Pin.Received += span => context.OnFrame(span.ToArray());
-                link.Received += context.OnFrame;
+                Index = index,
+                Ticket = TicketOf(node),
+            }, MeshJson.Options)).WaitAsync(budget);
+            Dictionary<int, string> roundTickets = await signal.WaitForCountAsync($"rounds/{round}/tickets", count, budget);
 
-                try
+            // Lower index listens, higher index dials: every pair forms exactly one
+            // connection; ConnectAsync runs the direct->relay chain internally.
+            IEnumerable<Task<PinholeConnection>> pending = Enumerable.Range(0, index)
+                .Select(j => node.ConnectAsync(roundTickets[j]).WaitAsync(roundCts.Token))
+                .Concat(Enumerable.Repeat(0, count - 1 - index)
+                    .Select(_ => node.AcceptAsync(roundCts.Token).WaitAsync(roundCts.Token)));
+
+            // Attach the receive handler the instant each connection resolves: a datagram
+            // that lands before the handler exists is gone (no reliability to lean on),
+            // and the acceptor side may resolve long after peers began blasting secrets.
+            async Task<PinholeConnection> Watch(Task<PinholeConnection> pendingConn)
+            {
+                PinholeConnection conn = await pendingConn.ConfigureAwait(false);
+                var context = new ConnContext(conn);
+                lock (contexts)
                 {
-                    // The streams are initialized before the punch wait, so a punch that never
-                    // opens still leaves the relayed iroh path fully usable.
-                    await link.IntroduceAsync(context.Pin).WaitAsync(PunchBudget, roundCts.Token).ConfigureAwait(false);
-                    context.Udp = context.Pin.Connected.IsCompleted;
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                catch (TimeoutException)
-                {
+                    contexts.Add(context);
                 }
 
-                byte[] body = Encoding.UTF8.GetBytes($"SECRET:{round}:{index}:{mySecret}");
-                if (context.Udp)
-                {
-                    context.Pin.Send(body);
-                }
-                else
-                {
-                    await link.SendAsync(body).WaitAsync(roundCts.Token).ConfigureAwait(false);
-                }
+                conn.Received += context.OnFrame;
+                return conn;
             }
 
+            await Task.WhenAll(pending.Select(Watch)).ConfigureAwait(false);
+
+            // Datagrams are unreliable: keep re-sending our secret until every peer's
+            // secret is in. "I heard everyone" is not "everyone heard me", so keep a
+            // floor on the retransmit window before trusting that conclusion.
+            byte[] body = Encoding.UTF8.GetBytes($"SECRET:{round}:{index}:{mySecret}");
             var sw = Stopwatch.StartNew();
-            while (contexts.Count(c => c.Peer >= 0) < count - 1 && sw.Elapsed < TimeSpan.FromSeconds(25))
+            while (sw.Elapsed < TimeSpan.FromSeconds(25))
             {
-                await Task.Delay(250).ConfigureAwait(false);
+                lock (contexts)
+                {
+                    foreach (ConnContext context in contexts)
+                    {
+                        try { context.Conn.Send(body); } catch { }
+                    }
+                }
+
+                bool allHeard = false;
+                lock (contexts)
+                {
+                    allHeard = contexts.All(c => c.Peer >= 0);
+                }
+
+                if (allHeard && sw.Elapsed >= TimeSpan.FromSeconds(8))
+                {
+                    break;
+                }
+
+                await Task.Delay(allHeard ? 500 : 300).ConfigureAwait(false);
             }
 
-            IEnumerable<LinkContext> heard = contexts.Where(c => c.Peer >= 0);
+            ConnContext[] heard = contexts.Where(c => c.Peer >= 0).ToArray();
             return new RoundReport
             {
                 Round = round,
@@ -195,7 +224,7 @@ internal static class MeshNode
                 Ok = heard.Count() == count - 1,
                 Sent = mySecret,
                 Received = new Dictionary<int, string>(heard.Select(c => KeyValuePair.Create(c.Peer, c.Secret))),
-                Udp = new Dictionary<int, bool>(heard.Select(c => KeyValuePair.Create(c.Peer, c.Udp))),
+                Udp = new Dictionary<int, bool>(heard.Select(c => KeyValuePair.Create(c.Peer, c.IsDirect))),
             };
         }
         catch (Exception exception)
@@ -206,24 +235,28 @@ internal static class MeshNode
         finally
         {
             roundCts.Cancel();
-            foreach (LinkContext context in contexts)
+            ConnContext[] snapshot;
+            lock (contexts)
             {
-                try { await context.Link.DisposeAsync().ConfigureAwait(false); } catch { }
-                try { context.Pin.Dispose(); } catch { }
+                snapshot = contexts.ToArray();
+            }
+
+            foreach (ConnContext context in snapshot)
+            {
+                try { await context.Conn.CloseAsync().ConfigureAwait(false); } catch { }
             }
         }
     }
 
-    /// <summary>One established link: learns the peer's index from the first SECRET frame it delivers.</summary>
-    private sealed class LinkContext(IrohLink link)
+    /// <summary>One established connection: learns the peer's index from the first SECRET frame it delivers.</summary>
+    private sealed class ConnContext(PinholeConnection conn)
     {
-        public readonly IrohLink Link = link;
-        public readonly PeerSocket Pin = new(0x51E5_0000 + (uint)Environment.TickCount64);
-        public bool Udp;
+        public readonly PinholeConnection Conn = conn;
         public int Peer = -1;
         public string Secret = "";
+        public bool IsDirect;
 
-        public void OnFrame(byte[] frame)
+        public void OnFrame(ReadOnlySpan<byte> frame)
         {
             string text = Encoding.UTF8.GetString(frame);
             if (text.StartsWith("SECRET:", StringComparison.Ordinal))
@@ -233,25 +266,25 @@ internal static class MeshNode
                 {
                     Peer = peer;
                     Secret = parts[3];
+                    IsDirect = Conn.Path.Kind == PathKind.Direct;
                 }
             }
         }
     }
 
-    private static async Task HostGuestsAsync(IrohPinhole node, List<string> secrets, DateTimeOffset deadline)
+    private static async Task HostGuestsAsync(PinholeNode node, List<string> secrets, DateTimeOffset deadline)
     {
         Console.WriteLine($"[node 0] hosting guest joins until deadline ({(deadline - DateTimeOffset.UtcNow).TotalSeconds:F0}s left)");
         while (DateTimeOffset.UtcNow < deadline - TimeSpan.FromSeconds(8))
         {
-            IrohLink? link = null;
-            PeerSocket? pin = null;
+            PinholeConnection? conn = null;
             try
             {
-                link = await node.AcceptAsync().WaitAsync(deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(8))
+                conn = await node.AcceptAsync().WaitAsync(deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(8))
                     .ConfigureAwait(false);
-                pin = new PeerSocket(0x9E57_0000);
+
                 var guestSecret = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-                void OnFrame(byte[] frame)
+                void OnFrame(ReadOnlySpan<byte> frame)
                 {
                     string text = Encoding.UTF8.GetString(frame);
                     if (text.StartsWith("GUEST:", StringComparison.Ordinal))
@@ -260,51 +293,25 @@ internal static class MeshNode
                     }
                 }
 
-                pin.Received += span => OnFrame(span.ToArray());
-                link.Received += OnFrame;
-
-                bool udp = false;
-                try
-                {
-                    await link.IntroduceAsync(pin).WaitAsync(PunchBudget).ConfigureAwait(false);
-                    udp = pin.Connected.IsCompleted;
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                catch (TimeoutException)
-                {
-                }
-
+                conn.Received += OnFrame;
                 byte[] body = Encoding.UTF8.GetBytes("WELCOME:" + JsonSerializer.Serialize(new { from = "pinhole-mesh", secrets }));
-                if (udp)
-                {
-                    pin.Send(body);
-                }
-                else
-                {
-                    await link.SendAsync(body).ConfigureAwait(false);
-                }
+                conn.Send(body);
 
                 if (await Task.WhenAny(guestSecret.Task, Task.Delay(TimeSpan.FromSeconds(10))).ConfigureAwait(false) == guestSecret.Task)
                 {
-                    Console.WriteLine($"GUEST joined ({(udp ? "udp" : "relay")}) secret {guestSecret.Task.Result[..Math.Min(16, guestSecret.Task.Result.Length)]}…");
+                    Console.WriteLine($"GUEST joined ({conn.Path.Kind}) secret {guestSecret.Task.Result[..Math.Min(16, guestSecret.Task.Result.Length)]}…");
                 }
 
-                // Bounded teardown: the safe layer's disposals are bounded, and the WaitAsync
-                // backstop keeps a pathological guest session from stalling the hosting loop.
-                try { await link.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
-                pin.Dispose();
+                // Bounded teardown; a pathological guest session must not stall the hosting loop.
+                try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
             }
             catch (Exception exception)
             {
                 Console.WriteLine($"[node 0] guest session ended: {exception.Message}");
-                if (link is not null)
+                if (conn is not null)
                 {
-                    try { await link.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
+                    try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
                 }
-
-                try { pin?.Dispose(); } catch { }
             }
         }
     }
@@ -312,16 +319,15 @@ internal static class MeshNode
 
 internal static class Guest
 {
-    public static async Task<int> RunAsync(string ticket)
+    public static async Task<int> RunAsync(string connectionString)
     {
         string mySecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        await using IrohPinhole node = await IrohPinhole.BindAsync("pinhole-mesh/1").WaitAsync(TimeSpan.FromSeconds(60));
-        using PeerSocket pin = new(0x6E57_0001);
-        await using IrohLink link = await node.ConnectAsync(ticket).WaitAsync(TimeSpan.FromSeconds(60));
+        await using PinholeNode node = await PinholeNode.BindAsync().WaitAsync(TimeSpan.FromSeconds(60));
+        await using PinholeConnection conn = await node.ConnectAsync(connectionString).WaitAsync(TimeSpan.FromSeconds(60));
         Console.WriteLine("[guest] connected to the live session");
 
         var answered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnFrame(byte[] frame)
+        void OnFrame(ReadOnlySpan<byte> frame)
         {
             string text = Encoding.UTF8.GetString(frame);
             if (text.StartsWith("WELCOME:", StringComparison.Ordinal))
@@ -330,35 +336,18 @@ internal static class Guest
             }
         }
 
-        pin.Received += span => OnFrame(span.ToArray());
-        link.Received += OnFrame;
-
-        bool udp = false;
-        try
+        conn.Received += OnFrame;
+        byte[] hello = Encoding.UTF8.GetBytes("GUEST:" + mySecret);
+        var guestSw = Stopwatch.StartNew();
+        while (!answered.Task.IsCompleted && guestSw.Elapsed < TimeSpan.FromSeconds(15))
         {
-            await link.IntroduceAsync(pin).WaitAsync(TimeSpan.FromSeconds(6));
-            udp = pin.Connected.IsCompleted;
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (TimeoutException)
-        {
+            try { conn.Send(hello); } catch { }
+            await Task.Delay(300);
         }
 
-        byte[] body = Encoding.UTF8.GetBytes("GUEST:" + mySecret);
-        if (udp)
+        if (answered.Task.IsCompleted)
         {
-            pin.Send(body);
-        }
-        else
-        {
-            await link.SendAsync(body);
-        }
-
-        if (await Task.WhenAny(answered.Task, Task.Delay(TimeSpan.FromSeconds(15))) == answered.Task)
-        {
-            Console.WriteLine($"[guest] mesh answered over {(udp ? "raw UDP (punched)" : "iroh relay")} with its secrets:");
+            Console.WriteLine($"[guest] mesh answered over {conn.Path.Kind} with its secrets:");
             Console.WriteLine(answered.Task.Result);
             return 0;
         }

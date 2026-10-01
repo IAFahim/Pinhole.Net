@@ -966,6 +966,11 @@ internal sealed class NodeEngine : IDisposable
         FrameType type = (FrameType)buf[0];
         ReadOnlySpan<byte> frame = buf.AsSpan(0, n);
         ConnState? c = Lookup(BitConverter.ToUInt64(buf, 1));
+        if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
+        {
+            Console.WriteLine($"[pinhole] recv {type} from {BitConverter.ToUInt64(buf, 1):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
+        }
+
         if (c is null)
         {
             if (type != FrameType.Punc || frame.Length < HeaderSize + 4 || !_options.Listen || _disposed)
@@ -1182,7 +1187,7 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private void AnnounceTo(ConnState c)
+    private void AnnounceTo(ConnState c, bool blast = false)
     {
         IReadOnlyList<PinholeCandidate> candidates = LocalCandidatesSnapshot();
         var payload = new MemoryStream(32 + candidates.Count * 32);
@@ -1204,8 +1209,41 @@ internal sealed class NodeEngine : IDisposable
         byte[] frame = new byte[HeaderSize + payload.Length];
         WriteHeader(frame, FrameType.Announce);
         payload.GetBuffer().AsSpan(0, (int)payload.Length).CopyTo(frame.AsSpan(HeaderSize));
-        Arrival arrival = CurrentArrival(c);
-        SendOnArrival(c, arrival, frame);
+
+        if (blast)
+        {
+            // Right after a rebind no path is confirmed live, but the PEER's own addresses
+            // are still valid targets: the announce carries our new candidates to wherever
+            // the peer currently is, and its reply frames teach us the newest path back.
+            SendOnArrival(c, CurrentArrival(c), frame);
+            PinholeCandidate[] targets;
+            lock (_gate)
+            {
+                targets = c.PeerCandidates.ToArray();
+            }
+
+            foreach (PinholeCandidate target in targets)
+            {
+                if (target.Kind == CandidateKind.Relay)
+                {
+                    SendViaRelayTo(frame, target.Address);
+                }
+                else
+                {
+                    try
+                    {
+                        SendToWire(target.Address, frame);
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                    {
+                    }
+                }
+            }
+
+            return;
+        }
+
+        SendOnArrival(c, CurrentArrival(c), frame);
     }
 
     private Arrival CurrentArrival(ConnState c)
@@ -1220,6 +1258,21 @@ internal sealed class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ paths & state
 
+    // PINHOLE_TRACE=1 logs every direct-path adoption change — debugging aid for NAT
+    // hairpin mysteries; compiled out of the hot path when unset.
+    private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1";
+
+    private void TracePath(ConnState c, SocketAddress source)
+    {
+        if (!TraceEnabled)
+        {
+            return;
+        }
+
+        IPEndPoint next = ToEndpoint(source);
+        Console.WriteLine($"[pinhole] peer {c.PeerId:x16} path -> {next} (was {c.DirectRemoteEp}, state {c.State}/{c.Path})");
+    }
+
     private void DirectPathConfirmed(ConnState c, SocketAddress source)
     {
         lock (c.Gate)
@@ -1229,6 +1282,7 @@ internal sealed class NodeEngine : IDisposable
                 return;
             }
 
+            TracePath(c, source);
             c.DirectRemote = source;
             c.DirectRemoteEp = ToEndpoint(source);
             if (c.State != PinholeConnectionState.Open)
@@ -1361,7 +1415,8 @@ internal sealed class NodeEngine : IDisposable
 
     /// <summary>Re-probes the world and, when the socket's network is gone, rebinds the
     /// socket, re-allocates the relays, and re-announces to every peer. Connection objects
-    /// survive the whole maneuver.</summary>
+    /// survive the whole maneuver. A single lost STUN probe proves nothing (servers
+    /// rate-limit); every configured server must go silent before a rebind happens.</summary>
     public async Task RecoverAsync(bool forceRebind, CancellationToken ct)
     {
         if (_disposed || Interlocked.Exchange(ref _recovering, 1) != 0)
@@ -1376,7 +1431,16 @@ internal sealed class NodeEngine : IDisposable
 
             if (!needRebind && stunServers.Count > 0)
             {
-                IPEndPoint? probe = await TryProbe(stunServers[0], ct).ConfigureAwait(false);
+                IPEndPoint? probe = null;
+                foreach (IPEndPoint server in stunServers.Take(3))
+                {
+                    probe = await TryProbe(server, ct).ConfigureAwait(false);
+                    if (probe is not null)
+                    {
+                        break;
+                    }
+                }
+
                 if (probe is not null)
                 {
                     lock (_gate)
@@ -1394,7 +1458,7 @@ internal sealed class NodeEngine : IDisposable
                     return;
                 }
 
-                needRebind = true; // STUN silence: the socket's network is gone
+                needRebind = true; // every STUN server silent: the socket's network is gone
             }
 
             if (needRebind)
@@ -1474,7 +1538,7 @@ internal sealed class NodeEngine : IDisposable
                 _ = PermitRelayAsync(c, c.RelayRemote);
             }
 
-            AnnounceTo(c);
+            AnnounceTo(c, blast: true);
             KickPunch(c);
         }
     }
