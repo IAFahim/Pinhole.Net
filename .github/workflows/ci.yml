@@ -34,7 +34,10 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Run test suite
-        run: dotnet test tests/Pinhole.Tests --logger trx --logger "console;verbosity=detailed"
+        run: >
+          dotnet test tests/Pinhole.Tests
+          --logger trx --logger "console;verbosity=detailed"
+          --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
 
   bench:
     name: bench-canary
