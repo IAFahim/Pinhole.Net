@@ -56,7 +56,7 @@ jobs:
               using var b = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
               b.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
               await a.SendToAsync("hi"u8.ToArray(), SocketFlags.None, new IPEndPoint(IPAddress.IPv6Loopback, b.LocalEndPoint is IPEndPoint be ? be.Port : 0));
-              var got = await b.ReceiveAsync(new byte[64]);
+              var got = await b.ReceiveAsync(new byte[64], SocketFlags.None);
               Check(Encoding.UTF8.GetString(got) == "hi", "async socket echo", swA.ElapsedMilliseconds);
           }
 
