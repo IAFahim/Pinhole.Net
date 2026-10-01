@@ -67,8 +67,13 @@ life, across every network change.
 Or run it with no code at all:
 
 ```bash
-dotnet run --project samples/Pinhole.Demo -- node          # prints the connection string, listens
-dotnet run --project samples/Pinhole.Demo -- node <string> # dials it from any machine
+# The 30-line version — samples/Pinhole.Tiny: machine A prints a ticket, B dials it, chat.
+dotnet run --project samples/Pinhole.Tiny                   # machine A
+dotnet run --project samples/Pinhole.Tiny <ticket>          # machine B, anywhere on earth
+
+# The fuller version — RTT display, path states, plus stun/nat/turn probes and bench.
+dotnet run --project samples/Pinhole.Demo -- node           # prints the connection string, listens
+dotnet run --project samples/Pinhole.Demo -- node <string>  # dials it from any machine
 ```
 
 ## Usage
@@ -264,6 +269,7 @@ invisible. Late joins don't disturb existing pairs.
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — the README program (`node` chat over connection strings), rendezvous chat, throughput bench, stun/nat/turn probes
+- `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
 - `tests/Pinhole.Tests` — loopback xunit suite (45 tests): session API + punch/ping/data, roaming (rebind, degrade, honest death), NAT detection, STUN+TURN against in-process fake servers, rendezvous protocol + bounds
 
