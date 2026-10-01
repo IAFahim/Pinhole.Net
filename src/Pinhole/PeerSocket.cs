@@ -112,7 +112,10 @@ internal static class PeerEngine
 
     public static void Start(PeerState s)
     {
-        new Thread(() => RecvLoop(s)) { IsBackground = true, Name = "pinhole-recv", Priority = ThreadPriority.AboveNormal }.Start();
+        // No raised priority here: the receive thread blocks in recvfrom, so priority buys
+        // nothing, and setting it before Start() can priority-invert against runtime
+        // locks on macOS and wedge the whole process.
+        new Thread(() => RecvLoop(s)) { IsBackground = true, Name = "pinhole-recv" }.Start();
         _ = RefreshLoop(s);
     }
 
