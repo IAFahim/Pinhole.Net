@@ -150,9 +150,11 @@ static async Task<int> Bench(int n, int size)
         a.Send(msg);
     }
 
+    // Snapshot before any await: GetAllocatedBytesForCurrentThread is per-thread, and
+    // the continuation after an await can resume on a different thread-pool thread.
+    long alloc = GC.GetAllocatedBytesForCurrentThread() - allocBefore;
     await Task.WhenAny(done.Task, Task.Delay(30_000));
     sw.Stop();
-    long alloc = GC.GetAllocatedBytesForCurrentThread() - allocBefore;
     Console.WriteLine($"{received}/{n} datagrams in {sw.Elapsed.TotalSeconds:F2}s ({received / sw.Elapsed.TotalSeconds:F0} dps)");
     Console.WriteLine($"alloc {alloc} B total, {(double)alloc / Math.Max(1, received):F1} B/dgram, gen0 GCs {GC.CollectionCount(0) - gc0}");
     return 0;
