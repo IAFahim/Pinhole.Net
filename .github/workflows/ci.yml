@@ -38,6 +38,13 @@ jobs:
           dotnet test tests/Pinhole.Tests
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
+      - name: Upload test results (hang diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testresults-${{ matrix.os }}
+          path: tests/Pinhole.Tests/TestResults/
+          retention-days: 5
 
   bench:
     name: bench-canary
