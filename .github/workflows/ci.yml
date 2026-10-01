@@ -1,0 +1,68 @@
+name: CI
+
+# Build + unit/loopback suite on every push and PR (the mesh workflow stays manual-only).
+# The suite is fully self-contained: STUN and TURN are exercised against in-process fake
+# servers, so no internet access or real relay is needed on any OS.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build solution
+        # The pin keeps the submodule's mobile TFMs (and their workload requirements)
+        # out of the restore graph; no native compilation happens in this job.
+        run: dotnet build Pinhole.Net.slnx -p:TargetFrameworks=net10.0
+      - name: Run test suite
+        run: dotnet test tests/Pinhole.Tests --logger trx
+
+  bench:
+    name: bench-canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Throughput and allocation canary
+        run: |
+          OUT=$(dotnet run --project samples/Pinhole.Demo -c Release -p:TargetFrameworks=net10.0 -- bench 300000 64)
+          echo "$OUT"
+          DPS=$(echo "$OUT" | grep -oP '\d+(?= dps)')
+          BPD=$(echo "$OUT" | grep -oP '[\d.]+(?= B/dgram)')
+          echo "dps=$DPS per-dgram=$BPD B"
+          if [ -z "$DPS" ] || [ -z "$BPD" ]; then
+            echo "could not parse bench output"; exit 1
+          fi
+          awk -v dps="$DPS" 'BEGIN { exit (dps >= 250000) ? 0 : 1 }' \
+            || { echo "FAIL: $DPS dps is under the 250000 canary floor"; exit 1; }
+          awk -v bpd="$BPD" 'BEGIN { exit (bpd < 0.1) ? 0 : 1 }' \
+            || { echo "FAIL: $BPD B/dgram exceeds the zero-allocation canary"; exit 1; }
+          echo "BENCH CANARY PASS"

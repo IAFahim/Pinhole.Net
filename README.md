@@ -5,12 +5,22 @@ Lightweight NAT-traversal P2P transport for .NET — one UDP socket, no native d
 Rendezvous + hole punching + keepalive, designed for multiplayer games and P2P apps.
 Raw UDP fast path; NativeAOT throughout; zero allocations on the hot path.
 
-- `src/Pinhole` — the client library (`Pinhole.Net` on NuGet, net8.0): punch, STUN probe, datagrams
+- `src/Pinhole` — the client library (`Pinhole.Net` on NuGet, net10.0): punch, STUN probe, datagrams
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications, any standard TURN
 - `src/Pinhole.Providers` — known-provider catalog: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
-- `src/Pinhole.Iroh` — optional bridge: free rendezvous/signaling + relay fallback via n0's iroh infrastructure
+- `src/Pinhole.Iroh` — optional bridge: free rendezvous/signaling + relay fallback via n0's iroh infrastructure (via the [N0.IrohNet.Safe](https://github.com/IsaMorphic/N0.IrohNet/pull/50) submodule; needs `cargo` on Linux for the native lib)
 - `src/Pinhole.Rendezvous` — the signaling/introducer server (single NativeAOT binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — register/punch/chat demo + throughput bench + stun/turn/iroh probes
+- `tests/Pinhole.Tests` — loopback xunit suite: punch/ping/data, STUN+TURN against in-process fake servers, rendezvous protocol + bounds, teardown bounds
+
+## Build & test
+
+```bash
+git clone --recurse-submodules https://github.com/IAFahim/Pinhole.Net
+cd Pinhole.Net
+dotnet build Pinhole.Net.slnx -p:TargetFrameworks=net10.0   # pin keeps the submodule's mobile TFMs out
+dotnet test tests/Pinhole.Tests
+```
 
 ## Run it — own rendezvous
 

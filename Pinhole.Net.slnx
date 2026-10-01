@@ -6,4 +6,5 @@
   <Project Path="src/Pinhole.Providers/Pinhole.Providers.csproj" />
   <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />
   <Project Path="samples/Pinhole.Mesh/Pinhole.Mesh.csproj" />
+  <Project Path="tests/Pinhole.Tests/Pinhole.Tests.csproj" />
 </Solution>

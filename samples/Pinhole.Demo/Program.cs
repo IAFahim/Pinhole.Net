@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Text;
-using N0.IrohNet;
 using Pinhole;
 using Pinhole.Iroh;
 using Pinhole.Providers;
@@ -42,11 +41,6 @@ if (args[0] == "bench")
 if (args[0] == "iroh")
 {
     return await IrohChat(args.Length > 1 ? args[1] : null);
-}
-
-if (args[0] == "bindtest")
-{
-    return await BindTest();
 }
 
 if (args.Length < 2)
@@ -94,29 +88,6 @@ while (Console.ReadLine() is { Length: > 0 } line)
 }
 
 return 0;
-
-static unsafe Task<int> BindTest()
-{
-    byte[] alpn = Encoding.ASCII.GetBytes("pinhole/0");
-    EndpointConfig config = iroh.endpoint_config_default();
-    config.relay_mode = RelayMode.RELAY_MODE_DEFAULT;
-    config.discovery_cfg = DiscoveryConfig.DISCOVERY_CONFIG_ALL;
-    fixed (byte* a = alpn)
-    {
-        iroh.endpoint_config_add_alpn(&config, new slice_ref_uint8 { ptr = a, len = (nuint)alpn.Length });
-    }
-
-    Endpoint* ep = iroh.endpoint_default();
-    EndpointResult r = iroh.endpoint_bind(&config, null, null, &ep);
-    Console.WriteLine($"bind result: {r} ep: {(nint)ep:x}");
-    iroh.endpoint_config_free(config);
-    if (ep != null)
-    {
-        iroh.endpoint_free(ep);
-    }
-
-    return Task.FromResult(0);
-}
 
 static async Task<int> IrohChat(string? ticket)
 {

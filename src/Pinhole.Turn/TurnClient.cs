@@ -61,9 +61,12 @@ public sealed class TurnClient : IAsyncDisposable
 
         _udp.Bind(new IPEndPoint(server.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0));
         _udp.Connect(server);
+        LocalEndPoint = (IPEndPoint)_udp.LocalEndPoint!;
         Thread recv = new(RecvLoop) { IsBackground = true, Name = "turn-recv" };
         recv.Start();
     }
+
+    public IPEndPoint LocalEndPoint { get; }
 
     public IPEndPoint? RelayedAddress { get; private set; }
 
