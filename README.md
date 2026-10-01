@@ -18,8 +18,10 @@ Raw UDP fast path; NativeAOT throughout; zero allocations on the hot path.
 ```bash
 git clone --recurse-submodules https://github.com/IAFahim/Pinhole.Net
 cd Pinhole.Net
+# one-time: cargo build of the native iroh lib (also generates NativeMethods.g.cs via build.rs)
+dotnet build extern/irohnet/N0.IrohNet.NativeAssets.Linux -f net10.0 -r linux-x64
 dotnet build Pinhole.Net.slnx -p:TargetFrameworks=net10.0   # pin keeps the submodule's mobile TFMs out
-dotnet test tests/Pinhole.Tests
+dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo needed
 ```
 
 ## Run it — own rendezvous

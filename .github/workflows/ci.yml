@@ -2,7 +2,9 @@ name: CI
 
 # Build + unit/loopback suite on every push and PR (the mesh workflow stays manual-only).
 # The suite is fully self-contained: STUN and TURN are exercised against in-process fake
-# servers, so no internet access or real relay is needed on any OS.
+# servers, so no internet access, real relay, or native toolchain is needed on any OS.
+# The iroh bridge and samples compile in the ubuntu bench job and the mesh workflow,
+# where cargo is available to generate NativeMethods.g.cs and build the native library.
 
 on:
   push:
@@ -28,22 +30,16 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Build solution
-        # The pin keeps the submodule's mobile TFMs (and their workload requirements)
-        # out of the restore graph; no native compilation happens in this job.
-        run: dotnet build Pinhole.Net.slnx -p:TargetFrameworks=net10.0
       - name: Run test suite
         run: dotnet test tests/Pinhole.Tests --logger trx
 
   bench:
     name: bench-canary
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +47,16 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native library (cargo, cached)
+        uses: actions/cache@v4
+        with:
+          path: |
+            extern/irohnet/iroh-bindgen/target
+            extern/irohnet/N0.IrohNet.NativeAssets.Linux/runtimes
+          key: iroh-native-${{ runner.os }}-${{ hashFiles('extern/irohnet/iroh-c-ffi/iroh-c-ffi/Cargo.lock', 'extern/irohnet/iroh-bindgen/Cargo.lock') }}
+      - name: Compile libiroh_bindgen (also generates NativeMethods.g.cs via cargo build.rs)
+        run: dotnet build extern/irohnet/N0.IrohNet.NativeAssets.Linux/N0.IrohNet.NativeAssets.Linux.csproj -f net10.0 -r linux-x64
       - name: Throughput and allocation canary
         run: |
           OUT=$(dotnet run --project samples/Pinhole.Demo -c Release -p:TargetFrameworks=net10.0 -- bench 300000 64)
