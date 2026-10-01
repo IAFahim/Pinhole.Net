@@ -34,7 +34,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Run test suite
-        run: dotnet test tests/Pinhole.Tests --logger trx
+        run: dotnet test tests/Pinhole.Tests --logger trx --logger "console;verbosity=detailed"
 
   bench:
     name: bench-canary
