@@ -98,6 +98,10 @@ internal static class PeerEngine
     public static PeerState CreateState(ulong nodeId, IPEndPoint? bind)
     {
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        // Blocked receives must wake up periodically: closing a socket while a sync
+        // receive holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so
+        // disposal needs the receive loop to come back and observe the shutdown flag.
+        udp.ReceiveTimeout = 200;
         udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
         udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, 4 * 1024 * 1024);
         if (OperatingSystem.IsWindows())
@@ -112,9 +116,6 @@ internal static class PeerEngine
 
     public static void Start(PeerState s)
     {
-        // No raised priority here: the receive thread blocks in recvfrom, so priority buys
-        // nothing, and setting it before Start() can priority-invert against runtime
-        // locks on macOS and wedge the whole process.
         new Thread(() => RecvLoop(s)) { IsBackground = true, Name = "pinhole-recv" }.Start();
         _ = RefreshLoop(s);
     }

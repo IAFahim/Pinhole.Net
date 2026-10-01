@@ -53,6 +53,10 @@ public sealed class TurnClient : IAsyncDisposable
         _username = username;
         _credential = credential;
         _udp = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        // Blocked receives must wake up periodically: closing the socket while a sync
+        // receive holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so
+        // disposal needs the receive loop to come back and observe the disposed flag.
+        _udp.ReceiveTimeout = 200;
         if (OperatingSystem.IsWindows())
         {
             const int sioUdpConnreset = -1744830452;

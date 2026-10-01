@@ -49,6 +49,7 @@ public sealed class FakeTurnServer : IDisposable
         _lifetimeSeconds = lifetimeSeconds;
         _key = MD5.HashData(Encoding.UTF8.GetBytes($"{user}:{realm}:{password}"));
         _main = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        _main.ReceiveTimeout = 200; // bounded wakeups keep dispose from wedging on macOS
         _main.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         Control = (IPEndPoint)_main.LocalEndPoint!;
         new Thread(Run) { IsBackground = true, Name = "fake-turn" }.Start();
