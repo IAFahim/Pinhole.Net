@@ -128,7 +128,7 @@ internal static class PeerEngine
     {
         lock (s.Rendezvous)
         {
-            s.Rendezvous.Add(endpoint.Serialize());
+            s.Rendezvous.Add(ToWire(endpoint));
         }
     }
 
@@ -164,13 +164,27 @@ internal static class PeerEngine
     {
         lock (s.Candidates)
         {
-            s.Candidates.Add(ep.Serialize());
+            s.Candidates.Add(ToWire(ep));
         }
 
         if (Interlocked.CompareExchange(ref s.Punching, 1, 0) == 0)
         {
             _ = PunchLoop(s);
         }
+    }
+
+    private static SocketAddress ToWire(IPEndPoint ep)
+    {
+        // The socket is dual-mode IPv6: IPv4 targets must be v4-mapped or Windows
+        // sendto rejects the address family outright; the unspecified v6 address is
+        // not a valid destination anywhere but Linux tolerates it, so map it to loopback.
+        if (ep.Address.AddressFamily == AddressFamily.InterNetwork || ep.Address.Equals(IPAddress.IPv6Any))
+        {
+            IPAddress mapped = ep.Address.Equals(IPAddress.IPv6Any) ? IPAddress.IPv6Loopback : ep.Address.MapToIPv6();
+            ep = new IPEndPoint(mapped, ep.Port);
+        }
+
+        return ep.Serialize();
     }
 
     public static void SendData(PeerState s, ReadOnlySpan<byte> payload)
@@ -230,7 +244,7 @@ internal static class PeerEngine
             RandomNumberGenerator.Fill(req.AsSpan(8));
             s.StunTxid = req.AsSpan(8).ToArray();
             s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-            s.Udp.SendTo(req, SocketFlags.None, server.Serialize());
+            s.Udp.SendTo(req, SocketFlags.None, ToWire(server));
             return await s.StunResult.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
         }
         finally

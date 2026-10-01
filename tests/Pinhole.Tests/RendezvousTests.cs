@@ -15,8 +15,9 @@ public sealed class RendezvousTests
     public async Task Reg_ReturnsObservedAddress()
     {
         await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
         using var peer = new PeerSocket(0x11);
-        peer.AddRendezvous(server.LocalEndPoint);
+        peer.AddRendezvous(serverEp);
 
         IPEndPoint observed = await peer.RegisterAsync().WaitAsync(DefaultTimeout);
 
@@ -28,10 +29,11 @@ public sealed class RendezvousTests
     public async Task Want_TargetRegisters_BothPeersGetIntros_AndPunch()
     {
         await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
         using var waiter = new PeerSocket(0x22);
         using var target = new PeerSocket(0x33);
-        waiter.AddRendezvous(server.LocalEndPoint);
-        target.AddRendezvous(server.LocalEndPoint);
+        waiter.AddRendezvous(serverEp);
+        target.AddRendezvous(serverEp);
 
         // Waiter wants a target that has not registered yet -> WAIT, and the intro fires
         // the moment the target shows up; both sides then punch each other over loopback.
@@ -51,10 +53,11 @@ public sealed class RendezvousTests
     public async Task Want_TargetAlreadyRegistered_ImmediateIntro()
     {
         await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
         using var a = new PeerSocket(0x44);
         using var b = new PeerSocket(0x55);
-        a.AddRendezvous(server.LocalEndPoint);
-        b.AddRendezvous(server.LocalEndPoint);
+        a.AddRendezvous(serverEp);
+        b.AddRendezvous(serverEp);
         _ = a.RegisterAsync();
         await Task.Delay(300);
 
@@ -66,12 +69,13 @@ public sealed class RendezvousTests
     public async Task Sweep_EvictsNodesAndWants_AfterTtl()
     {
         await using RendezvousServer server = RendezvousServer.Start(ttl: TimeSpan.FromSeconds(1));
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
         using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
-        await client.SendToAsync(Encoding.ASCII.GetBytes("REG 00000000000000aa\n"), SocketFlags.None, server.LocalEndPoint);
-        await client.SendToAsync(Encoding.ASCII.GetBytes("WANT 00000000000000bb 00000000000000cc\n"), SocketFlags.None, server.LocalEndPoint);
+        await client.SendToAsync(Encoding.ASCII.GetBytes("REG 00000000000000aa\n"), SocketFlags.None, serverEp);
+        await client.SendToAsync(Encoding.ASCII.GetBytes("WANT 00000000000000bb 00000000000000cc\n"), SocketFlags.None, serverEp);
         await Task.Delay(300);
         Assert.Equal(1, server.NodeCount);
         Assert.Equal(1, server.WantCount);
@@ -85,12 +89,13 @@ public sealed class RendezvousTests
     public async Task Waiters_PerTarget_AreBounded()
     {
         await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
         using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         for (int i = 0; i < RendezvousServer.MaxWaitersPerTarget + 10; i++)
         {
-            await client.SendToAsync(Encoding.ASCII.GetBytes($"WANT {i:x16} 00000000000000dd\n"), SocketFlags.None, server.LocalEndPoint);
+            await client.SendToAsync(Encoding.ASCII.GetBytes($"WANT {i:x16} 00000000000000dd\n"), SocketFlags.None, serverEp);
         }
 
         await Task.Delay(500);
@@ -101,12 +106,19 @@ public sealed class RendezvousTests
     public async Task Nodes_TableIsBounded_OldestEvicted()
     {
         await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
         using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         for (int i = 0; i <= RendezvousServer.MaxNodes; i++)
         {
-            await client.SendToAsync(Encoding.ASCII.GetBytes($"REG {i:x16}\n"), SocketFlags.None, server.LocalEndPoint);
+            await client.SendToAsync(Encoding.ASCII.GetBytes($"REG {i:x16}\n"), SocketFlags.None, serverEp);
+            if (i % 64 == 63)
+            {
+                // Pace the burst so the server's per-datagram reply loop keeps up
+                // instead of dropping registrations on slower machines.
+                await Task.Delay(15);
+            }
         }
 
         await Task.Delay(1000);
