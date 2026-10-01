@@ -71,15 +71,179 @@ dotnet run --project samples/Pinhole.Demo -- node          # prints the connecti
 dotnet run --project samples/Pinhole.Demo -- node <string> # dials it from any machine
 ```
 
-## What you get on a connection
+## Usage
 
-- `Send(ReadOnlySpan<byte>)` — unreliable datagram, zero-alloc hot path, `MaxPayload`-guarded (1200 B; larger sends throw clearly instead of dying in the network).
-- `Received` event — datagrams in.
-- `State` + `StateChanged` — `Punching → Open → Degraded → Dead → Closed`, honest at all times.
-- `Path` — which path is carrying traffic (`Direct` or `Relay`), since when, to which endpoint.
-- `LastRtt` / `AverageRtt`, `Stats` — sent/received/failed/bytes counters plus pings/pongs; loss on an unreliable path can't be observed directly, so `PingsLost` (pings sent − pongs received) is the honest approximation. AOT-safe plain counters.
-- `Ping()` — a tool you call when you want an RTT. Never a background keepalive nanny.
-- `CloseAsync()` / `Closed` — the only ways the connection ends. Roaming never fires it.
+### Receiving datagrams
+
+`Received` fires on the connection's receive thread. The span is only valid during the
+call — copy (`dgram.ToArray()`) if you queue it somewhere. Keep handlers fast; do real
+work on your own scheduler.
+
+```csharp
+conn.Received += dgram => Console.WriteLine(Encoding.UTF8.GetString(dgram));
+
+// Need the bytes to outlive the handler?
+List<byte[]> inbox = new();
+conn.Received += dgram =>
+{
+    lock (inbox) { inbox.Add(dgram.ToArray()); }   // copy: the span dies with the handler
+};
+```
+
+### Watching the connection
+
+States are honest at all times, and `Path` tells you what is physically carrying traffic:
+
+```csharp
+conn.StateChanged += state => Console.WriteLine($"{DateTime.Now:T} -> {state}");
+// Punching -> Open : a direct path opened
+// Open     -> Degraded : direct path died, relay took over (datagrams keep flowing)
+// Degraded -> Open    : a direct path was re-found (automatic upgrade)
+// *        -> Dead     : no usable path (no relay configured); the object can come back
+// *        -> Closed   : someone closed it — the only terminal state
+
+Console.WriteLine(conn.State);            // PinholeConnectionState.Open
+Console.WriteLine(conn.Path.Kind);        // Direct or Relay
+Console.WriteLine(conn.Path.Remote);      // the peer endpoint in use right now
+Console.WriteLine(conn.Path.Since);       // when this path became the one
+```
+
+### Unreliable means unreliable
+
+`Send` fires a datagram into the network and returns. There is no ack, no retransmit, no
+ordering — by design. If your protocol needs an exchange, retransmit until you hear back
+(this is exactly what the mesh canary does):
+
+```csharp
+// Send until the peer's reply arrives (or give up).
+var replied = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+conn.Received += reply => replied.TrySetResult(reply.ToArray());
+
+var sw = Stopwatch.StartNew();
+while (!replied.Task.IsCompleted && sw.Elapsed < TimeSpan.FromSeconds(5))
+{
+    conn.Send(payload);
+    await Task.Delay(300);
+}
+```
+
+Datagrams larger than `MaxPayload` (1200 bytes) throw `ArgumentOutOfRangeException`
+before touching the network — chunk your protocol above this layer instead.
+
+### Roaming — the connection survives the network
+
+WiFi→mobile, IP change, NAT rebind, path death: handled inside. The same
+`PinholeConnection` object keeps working; datagrams pause for a moment and resume. You
+never re-dial and you never get a replacement object. `Closed` does not fire — roaming is
+not closing.
+
+```csharp
+// Everything below is usually automatic (network-change watch is on by default).
+// Force a re-probe yourself when you know better than the OS:
+await node.RoamNowAsync();
+
+// Or just observe:
+conn.StateChanged += s => log($"path now: {conn.Path.Kind} via {conn.Path.Remote}");
+```
+
+If the network dies completely with no relay configured, the connection becomes `Dead`
+— the object survives, and once the network is back:
+
+```csharp
+await node.RoamNowAsync();   // re-probe STUN, rebind if needed, re-announce, re-punch
+// conn returns to Open (or Degraded) on its own; no re-dial, same object
+```
+
+### Tools: ping, RTT, stats
+
+`Ping()` is a tool you call — Pinhole never schedules keepalives for you.
+
+```csharp
+conn.Ping();
+// ...after the pong lands:
+Console.WriteLine(conn.LastRtt);     // TimeSpan? — most recent answered ping
+Console.WriteLine(conn.AverageRtt);  // TimeSpan? — EWMA across answered pings
+
+PinholeStats s = conn.Stats;
+Console.WriteLine($"{s.DatagramsSent} sent, {s.DatagramsReceived} received, " +
+                  $"{s.DatagramsSendFailed} failed, {s.PingsLost} pings lost");
+// Loss on an unreliable path can't be observed directly; PingsLost (pings sent −
+// pongs received) is the honest approximation. All counters are AOT-safe plain numbers.
+```
+
+### Know your NAT
+
+`NatDetector` compares what several STUN servers observe of the same socket. A symmetric
+NAT gets a hint embedded in future connection strings, so dialers skip the hopeless punch
+and go straight to relay:
+
+```csharp
+NatType nat = await NatDetector.DetectAsync();       // free STUN catalog
+node.SetNatHint(nat switch
+{
+    NatType.Cone      => NatHint.Cone,       // punch away
+    NatType.Symmetric => NatHint.Symmetric,  // dialers will lean on the relay
+    _                 => NatHint.Unknown,
+});
+```
+
+### Configuration
+
+Parameterless `BindAsync()` uses all free infrastructure (free STUN catalog + free
+OpenRelay TURN). Everything is overridable:
+
+```csharp
+var node = await PinholeNode.BindAsync(new PinholeOptions
+{
+    // Your own relay instead of (or as well as) the free one:
+    Relays = [new TurnServerConfig(
+        new IPEndPoint(IPAddress.Parse("203.0.113.10"), 3478), "user", "pass")],
+
+    // Or presets from Pinhole.Providers (DNS-resolved for you):
+    // Relays = (await Providers.TurnServers.OpenRelay.ResolveAsync())
+    //     .Select(ep => new TurnServerConfig(ep, "openrelayproject", "openrelayproject"))
+    //     .ToArray(),
+
+    StunServers = null,             // null = free catalog; [] = no reflexive stage
+    Listen = true,                  // accept strangers dialing your string
+    EnableNetworkWatch = true,      // auto-roam on OS network changes
+    ConnectTimeout = TimeSpan.FromSeconds(15),  // whole-chain dial budget
+    BindProbeBudget = TimeSpan.FromSeconds(5),  // bind-time probe budget (failures tolerated)
+});
+```
+
+Deterministic test/offline node (no internet at all — what the test suite uses):
+
+```csharp
+var local = await PinholeNode.BindAsync(new PinholeOptions
+{
+    StunServers = [],
+    Relays = [],
+});
+```
+
+### Many peers
+
+One node, many connections, one socket. Dial every string you're given, accept in a loop:
+
+```csharp
+// Dial a lobby full of peers:
+List<PinholeConnection> peers = new();
+foreach (string ticket in lobbyTickets)
+{
+    peers.Add(await node.ConnectAsync(ticket));
+}
+
+// And/or accept whoever dials you — each AcceptAsync call yields one connection:
+while (running)
+{
+    PinholeConnection guest = await node.AcceptAsync(ct);
+    guest.Received += HandleFrame;         // void HandleFrame(ReadOnlySpan<byte> frame)
+}
+```
+
+Connections are identified by stable peer ID, never by IP — that's what makes roaming
+invisible. Late joins don't disturb existing pairs.
 
 ## Failure modes, honestly
 
