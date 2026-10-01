@@ -52,6 +52,9 @@ public sealed class TurnClient : IAsyncDisposable
     {
         _username = username;
         _credential = credential;
+        Server = server;
+        Username = username;
+        Credential = credential;
         _udp = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
         // Blocked receives must wake up periodically: closing the socket while a sync
         // receive holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so
@@ -71,6 +74,12 @@ public sealed class TurnClient : IAsyncDisposable
     }
 
     public IPEndPoint LocalEndPoint { get; }
+
+    public IPEndPoint Server { get; }
+
+    public string Username { get; }
+
+    public string Credential { get; }
 
     public IPEndPoint? RelayedAddress { get; private set; }
 

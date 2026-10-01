@@ -5,10 +5,19 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
-		<Description>Lightweight NAT-traversal P2P datagram transport: rendezvous, hole punching, keepalive — one UDP socket, no native dependencies</Description>
+		<Description>Connection library for .NET — the bottom layer, nothing else: NAT-traversal connections over free STUN and free TURN relays, connection strings, open-forever roaming. One UDP socket, zero allocations on the hot path, no native dependencies</Description>
 		<PackageId>Pinhole.Net</PackageId>
 		<IsPackable>true</IsPackable>
 		<IsAotCompatible>true</IsAotCompatible>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Pinhole.Turn\Pinhole.Turn.csproj" />
+		<ProjectReference Include="..\Pinhole.Providers\Pinhole.Providers.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
 
 </Project>
