@@ -24,11 +24,15 @@ jobs:
       - name: Pack (release, with symbols)
         run: dotnet pack Pinhole.Net.slnx -c Release -o artifacts
       - name: Publish
-        if: ${{ secrets.NUGET_API_KEY != '' }}
-        run: dotnet nuget push 'artifacts/*.nupkg' --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate
-      - name: Publish (symbol packages)
-        if: ${{ secrets.NUGET_API_KEY != '' }}
-        run: dotnet nuget push 'artifacts/*.snupkg' --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.NUGET_API_KEY }} --skip-duplicate
+        env:
+          NUGET_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_KEY" ]; then
+            echo "NUGET_API_KEY secret not set — skipping push; packages land in the workflow artifact"
+            exit 0
+          fi
+          dotnet nuget push artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_KEY" --skip-duplicate
+          dotnet nuget push artifacts/*.snupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_KEY" --skip-duplicate
       - uses: actions/upload-artifact@v4
         if: always()
         with:
