@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using Pinhole;
 using Pinhole.Rendezvous;
 using Xunit;
 
@@ -71,9 +70,9 @@ public sealed class RendezvousTests
         await using RendezvousServer server = RendezvousServer.Start(ttl: TimeSpan.FromSeconds(1));
         IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
-        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+        client.DualMode = true;
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-        IPEndPoint any = new(IPAddress.IPv6Any, 0);
         await client.SendToAsync(Encoding.ASCII.GetBytes("REG 00000000000000aa\n"), SocketFlags.None, serverEp);
         await client.SendToAsync(Encoding.ASCII.GetBytes("WANT 00000000000000bb 00000000000000cc\n"), SocketFlags.None, serverEp);
         await Task.Delay(300);
@@ -91,7 +90,8 @@ public sealed class RendezvousTests
         await using RendezvousServer server = RendezvousServer.Start();
         IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
-        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+        client.DualMode = true;
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         for (int i = 0; i < RendezvousServer.MaxWaitersPerTarget + 10; i++)
         {
@@ -108,7 +108,8 @@ public sealed class RendezvousTests
         await using RendezvousServer server = RendezvousServer.Start();
         IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
 
-        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        using Socket client = new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+        client.DualMode = true;
         client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         for (int i = 0; i <= RendezvousServer.MaxNodes; i++)
         {

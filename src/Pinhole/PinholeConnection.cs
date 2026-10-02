@@ -100,12 +100,14 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
     }
 
     /// <summary>Sends one unreliable datagram on the current path. Zero-allocation hot path;
-    /// payloads above <see cref="MaxPayload"/> throw before touching the network.</summary>
+    /// empty payloads and payloads above <see cref="MaxPayload"/> throw before touching the
+    /// network (a zero-length datagram is undeliverable by definition).</summary>
     public void Send(ReadOnlySpan<byte> payload) => _engine.Send(_c, payload);
 
     /// <summary>Sends a path probe and schedules the round-trip time into
-    /// <see cref="LastRtt"/>/<see cref="AverageRtt"/>. A diagnostic tool — Pinhole never
-    /// schedules keepalives for you.</summary>
+    /// <see cref="LastRtt"/>/<see cref="AverageRtt"/>. A diagnostic tool that never throws —
+    /// a probe that cannot leave simply goes unanswered — and Pinhole never schedules
+    /// keepalives for you.</summary>
     public void Ping() => _engine.Ping(_c);
 
     /// <summary>Round-trip time of the most recent answered ping, if any.</summary>

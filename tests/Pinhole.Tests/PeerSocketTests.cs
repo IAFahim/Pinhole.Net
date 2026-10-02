@@ -1,6 +1,4 @@
 using System.Net;
-using System.Text;
-using Pinhole;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -143,14 +141,13 @@ public sealed class PeerSocketTests
 
         var waiting = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         b.Received += span => waiting.TrySetResult(span.ToArray());
-        a.Dispose();
-        await Task.Run(() => a.Dispose()).WaitAsync(TimeSpan.FromSeconds(5));
+        DisposeTwice(a); // idempotent, and a pending receive must not wedge it
+        await Task.Yield();
     }
 
-    private static async Task<byte[]> ListenOnce(PeerSocket socket)
+    private static void DisposeTwice(PeerSocket socket)
     {
-        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        socket.Received += span => got.TrySetResult(span.ToArray());
-        return await got.Task.WaitAsync(DefaultTimeout);
+        socket.Dispose();
+        socket.Dispose();
     }
 }

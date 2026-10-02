@@ -1,7 +1,5 @@
 using System.Net;
 using System.Text;
-using Pinhole;
-using Pinhole.Turn;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -46,7 +44,7 @@ public sealed class ConnectionStringTests
         Assert.Throws<FormatException>(() => ConnectionString.Parse(bad));
         Assert.False(ConnectionString.TryParse("pinhole1:AAAA", out _));
         Assert.True(ConnectionString.TryParse(encoded, out ConnectionString? good));
-        Assert.Equal(1UL, good!.PeerId);
+        Assert.Equal(1UL, good.PeerId);
     }
 
     [Fact]

@@ -12,13 +12,20 @@ namespace Pinhole;
 internal enum FrameType : byte
 {
     Punc = 0x50, // punch probe; body = the sender's handshake token (u32 LE)
-    Pack = 0x51, // punch ack; body echoes the received PUNC token
-    Data = 0x52,
-    Ping = 0x53,
-    Pong = 0x54,
-    Announce = 0x55, // full candidate-list refresh; body = candidate TLV stream
-    Bye = 0x56,
+    Pack = 0x51, // punch ack; body = [echo of the received PUNC token][sender's own token]
+    Data = 0x52,  // body = [sender's token][payload]
+    Ping = 0x53,  // body = [sender's token][timestamp:8]
+    Pong = 0x54,  // body = [sender's token][timestamp:8]
+    Announce = 0x55, // body = [sender's token][count][candidate TLV stream]
+    Bye = 0x56,   // body = [sender's token]
 }
+
+// Wire authentication model: every frame carries the sender's per-connection token at
+// offset HeaderSize. Punc teaches the receiver the dialer's token, Pack delivers the
+// responder's, and every later frame must echo the token the receiver learned. The token
+// is random per connection and never appears in the connection string, so holding the
+// string (public by design) lets a stranger dial, but not spoof, hijack, or kill an
+// established session.
 
 /// <summary>Per-peer state. One node multiplexes many of these over its single UDP socket;
 /// every frame carries the sender's peer ID so the receiver demuxes without a socket pair per
@@ -45,6 +52,7 @@ internal sealed class ConnState
     public DateTimeOffset LastKick = DateTimeOffset.UtcNow;
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
     public int PunchGeneration;
+    public int PermitInFlight;               // single-flight guard for TURN permission round trips
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
 
     public readonly TaskCompletionSource Connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -65,7 +73,15 @@ internal sealed class NodeEngine : IDisposable
 {
     public const int MaxPayload = 1200;
     private const int HeaderSize = 9;
-    private const int RecvBufferSize = 4096;
+
+    /// <summary>Upper bound on connections a stranger flood can materialize. Applications
+    /// dialing peers themselves are not bounded by this — only unknown-peer PUNCs are.</summary>
+    internal const int MaxConnections = 1024;
+
+    // Must exceed the largest legit announce: HeaderSize + token + count + 32 fat relay
+    // candidates (~170 bytes each) lands near 5.5 KB; a smaller buffer would truncate and
+    // silently drop exactly the relay-heavy announces that matter most.
+    private const int RecvBufferSize = 8192;
     private const uint StunCookie = 0x2112A442;
 
     private static readonly TimeSpan PunchPace = TimeSpan.FromMilliseconds(200);
@@ -186,7 +202,12 @@ internal sealed class NodeEngine : IDisposable
             udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
         }
 
-        udp.Bind(bind ?? new IPEndPoint(IPAddress.IPv6Any, 0));
+        // A dual-mode socket cannot bind a bare IPv4 address; map it so a caller's
+        // IPAddress.Loopback/Any bind option works instead of throwing.
+        IPEndPoint? bindV6 = bind is { Address.AddressFamily: AddressFamily.InterNetwork }
+            ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
+            : bind;
+        udp.Bind(bindV6 ?? new IPEndPoint(IPAddress.IPv6Any, 0));
         return udp;
     }
 
@@ -372,6 +393,11 @@ internal sealed class NodeEngine : IDisposable
         {
             ushort attrType = BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(pos));
             int attrLen = BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(pos + 2));
+            if (pos + 4 + attrLen > end)
+            {
+                break; // a hostile or broken server claims an attribute past the message end
+            }
+
             if ((attrType is 0x0020 or 0x0001) && attrLen >= 8
                 && TryDecodeAddress(buf.AsSpan(pos + 4, attrLen), buf.AsSpan(8, 12), attrType == 0x0020, out IPEndPoint? ep))
             {
@@ -524,20 +550,14 @@ internal sealed class NodeEngine : IDisposable
 
     private void HandleRelayData(IPEndPoint from, byte[] data)
     {
+        // Length gate only: TurnClient already guards its handlers, and Dispatch's own
+        // guarantees make a malformed frame cost nothing.
         if (data.Length < HeaderSize)
         {
             return;
         }
 
-        try
-        {
-            // An exception here would kill the TURN client's receive loop; a malformed or
-            // unroutable frame must cost only itself.
-            Dispatch(data, data.Length, new Arrival(from));
-        }
-        catch (Exception)
-        {
-        }
+        Dispatch(data, data.Length, new Arrival(from));
     }
 
     // ------------------------------------------------------------------ connections
@@ -558,19 +578,8 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    public async Task<ConnState> ConnectAsync(ConnectionString cs, CancellationToken ct)
+    public ConnState ConnectAsync(ConnectionString cs, CancellationToken ct)
     {
-        ConnState? existing = Lookup(cs.PeerId);
-        if (existing is { State: PinholeConnectionState.Open or PinholeConnectionState.Degraded })
-        {
-            return existing; // idempotent dials return the live connection
-        }
-
-        if (existing is not null)
-        {
-            await CloseAsync(existing).ConfigureAwait(false);
-        }
-
         var c = new ConnState
         {
             PeerId = cs.PeerId,
@@ -579,10 +588,27 @@ internal sealed class NodeEngine : IDisposable
         };
         c.PuncFrame = BuildPunc(c.Token);
         c.Public = new PinholeConnection(this, c);
+
+        ConnState? husk;
         lock (_gate)
         {
+            // Atomic check-and-insert: two concurrent dials at the same target must share
+            // one connection, not silently overwrite each other's entry.
+            if (_conns.TryGetValue(cs.PeerId, out ConnState? existing)
+                && existing.State is not (PinholeConnectionState.Dead or PinholeConnectionState.Closed))
+            {
+                return existing; // idempotent dials (and in-flight dials) return the live connection
+            }
+
+            husk = existing; // a dead husk from an earlier attempt: replaced below
             _conns[cs.PeerId] = c;
             c.PeerCandidates.AddRange(cs.Candidates);
+        }
+
+        if (husk is not null)
+        {
+            Transition(husk, PinholeConnectionState.Closed);
+            husk.Dead.Cancel();
         }
 
         if (cs.Candidates.Any(x => x.Kind == CandidateKind.Relay))
@@ -614,12 +640,13 @@ internal sealed class NodeEngine : IDisposable
                 KickPunch(c);
             }
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {
+            // Warming is best-effort: the dial proceeds on whatever paths it can reach.
         }
     }
 
-    private ConnState CreateIncoming(ulong peerId, uint token, in Arrival arrival)
+    private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival)
     {
         var c = new ConnState
         {
@@ -635,6 +662,11 @@ internal sealed class NodeEngine : IDisposable
             if (_conns.TryGetValue(peerId, out ConnState? first))
             {
                 return first; // two PUNCs raced; keep the first
+            }
+
+            if (_conns.Count >= MaxConnections)
+            {
+                return null; // stranger flood: refuse to materialize more state
             }
 
             _conns[peerId] = c;
@@ -657,11 +689,17 @@ internal sealed class NodeEngine : IDisposable
     {
         lock (_gate)
         {
-            _conns.Remove(c.PeerId);
+            // Identity check: a concurrent re-dial may have replaced this entry, and the
+            // loser's close must not tear down the winner's live connection.
+            if (_conns.TryGetValue(c.PeerId, out ConnState? registered) && registered == c)
+            {
+                _conns.Remove(c.PeerId);
+            }
         }
 
-        Span<byte> bye = stackalloc byte[HeaderSize];
+        Span<byte> bye = stackalloc byte[HeaderSize + 4];
         WriteHeader(bye, FrameType.Bye);
+        BinaryPrimitives.WriteUInt32LittleEndian(bye[HeaderSize..], c.Token);
         try
         {
             RouteFrame(c, bye);
@@ -769,6 +807,7 @@ internal sealed class NodeEngine : IDisposable
 
     public void Send(ConnState c, ReadOnlySpan<byte> payload)
     {
+        ArgumentOutOfRangeException.ThrowIfZero(payload.Length); // a zero-length Data frame is undeliverable by definition
         ArgumentOutOfRangeException.ThrowIfGreaterThan(payload.Length, MaxPayload);
         switch (c.State)
         {
@@ -780,10 +819,11 @@ internal sealed class NodeEngine : IDisposable
                 throw new ObjectDisposedException(nameof(PinholeConnection));
         }
 
-        int n = payload.Length + HeaderSize;
+        int n = payload.Length + HeaderSize + 4;
         Span<byte> frame = stackalloc byte[n];
         WriteHeader(frame, FrameType.Data);
-        payload.CopyTo(frame[HeaderSize..]);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
+        payload.CopyTo(frame[(HeaderSize + 4)..]);
         try
         {
             RouteFrame(c, frame);
@@ -810,10 +850,19 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        Span<byte> frame = stackalloc byte[HeaderSize + 8];
+        Span<byte> frame = stackalloc byte[HeaderSize + 4 + 8];
         WriteHeader(frame, FrameType.Ping);
-        BitConverter.TryWriteBytes(frame[HeaderSize..], Environment.TickCount64);
-        RouteFrame(c, frame);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
+        BitConverter.TryWriteBytes(frame[(HeaderSize + 4)..], Environment.TickCount64);
+        try
+        {
+            RouteFrame(c, frame);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+        {
+            return; // a probe that cannot leave simply goes unanswered
+        }
+
         Interlocked.Increment(ref c.PingsSent);
     }
 
@@ -935,7 +984,14 @@ internal sealed class NodeEngine : IDisposable
             }
             else if (n >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) == StunCookie)
             {
-                OnStunResponse(buf, n);
+                try
+                {
+                    OnStunResponse(buf, n);
+                }
+                catch (Exception)
+                {
+                    // A malformed STUN response must cost its probe, never the receive loop.
+                }
             }
         }
     }
@@ -979,6 +1035,15 @@ internal sealed class NodeEngine : IDisposable
             }
 
             c = CreateIncoming(BitConverter.ToUInt64(buf, 1), BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]), arrival);
+            if (c is null)
+            {
+                return; // connection table full: a stranger flood gets no more objects
+            }
+        }
+
+        if (type is not (FrameType.Punc or FrameType.Pack) && !TokenOk(c, frame))
+        {
+            return; // post-handshake frame without the connection token: spoofed, drop it
         }
 
         switch (type)
@@ -1013,6 +1078,15 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    /// <summary>Post-handshake frames must prove the per-connection token the peer learned
+    /// during the Punc/Pack exchange. Without it, anyone holding the connection string
+    /// (which carries the peer ID but never the token) could close a session with a forged
+    /// Bye or re-point its direct path with a forged Data from their own address.</summary>
+    private static bool TokenOk(ConnState c, ReadOnlySpan<byte> frame) =>
+        c.RemoteTokenKnown
+        && frame.Length >= HeaderSize + 4
+        && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.RemoteToken;
+
     private void OnPunc(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
         if (frame.Length < HeaderSize + 4)
@@ -1034,10 +1108,11 @@ internal sealed class NodeEngine : IDisposable
             }
         }
 
-        Span<byte> pack = stackalloc byte[HeaderSize + 4];
+        Span<byte> pack = stackalloc byte[HeaderSize + 8];
         WriteHeader(pack, FrameType.Pack);
-        BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);
-        SendOnArrival(c, arrival, pack);
+        BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
+        BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
+        SendOnArrival(arrival, pack);
 
         if (arrival.ViaRelay)
         {
@@ -1057,9 +1132,17 @@ internal sealed class NodeEngine : IDisposable
 
     private void OnPack(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length < HeaderSize + 4 || BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
+        // body = [echo of our PUNC token][the responder's own token]
+        if (frame.Length < HeaderSize + 8
+            || BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
         {
             return; // not an echo of our handshake token
+        }
+
+        lock (c.Gate)
+        {
+            c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + 4)..]);
+            c.RemoteTokenKnown = true;
         }
 
         if (arrival.ViaRelay)
@@ -1074,7 +1157,7 @@ internal sealed class NodeEngine : IDisposable
 
     private void OnData(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length < HeaderSize + 1)
+        if (frame.Length < HeaderSize + 4 + 1)
         {
             return;
         }
@@ -1091,13 +1174,13 @@ internal sealed class NodeEngine : IDisposable
         }
 
         Interlocked.Increment(ref c.ReceivedCount);
-        Interlocked.Add(ref c.BytesReceived, frame.Length - HeaderSize);
-        c.Received?.Invoke(frame[HeaderSize..]);
+        Interlocked.Add(ref c.BytesReceived, frame.Length - HeaderSize - 4);
+        c.Received?.Invoke(frame[(HeaderSize + 4)..]);
     }
 
     private void OnPing(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length < HeaderSize + 8)
+        if (frame.Length < HeaderSize + 4 + 8)
         {
             return;
         }
@@ -1107,20 +1190,21 @@ internal sealed class NodeEngine : IDisposable
             DirectPathConfirmed(c, arrival.Direct!);
         }
 
-        Span<byte> pong = stackalloc byte[HeaderSize + 8];
+        Span<byte> pong = stackalloc byte[HeaderSize + 4 + 8];
         WriteHeader(pong, FrameType.Pong);
-        frame.Slice(HeaderSize, 8).CopyTo(pong[HeaderSize..]);
-        SendOnArrival(c, arrival, pong);
+        BinaryPrimitives.WriteUInt32LittleEndian(pong[HeaderSize..], c.Token);
+        frame.Slice(HeaderSize + 4, 8).CopyTo(pong[(HeaderSize + 4)..]);
+        SendOnArrival(arrival, pong);
     }
 
     private void OnPong(ConnState c, ReadOnlySpan<byte> frame)
     {
-        if (frame.Length < HeaderSize + 8)
+        if (frame.Length < HeaderSize + 4 + 8)
         {
             return;
         }
 
-        long rttTicks = (Environment.TickCount64 - BitConverter.ToInt64(frame[HeaderSize..])) * TimeSpan.TicksPerMillisecond;
+        long rttTicks = (Environment.TickCount64 - BitConverter.ToInt64(frame[(HeaderSize + 4)..])) * TimeSpan.TicksPerMillisecond;
         Interlocked.Exchange(ref c.LastRttTicks, rttTicks);
         Interlocked.Increment(ref c.PongsReceived);
         lock (c.Gate)
@@ -1131,12 +1215,12 @@ internal sealed class NodeEngine : IDisposable
 
     private void OnAnnounce(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length <= HeaderSize)
+        if (frame.Length <= HeaderSize + 4)
         {
             return;
         }
 
-        byte[] body = frame[HeaderSize..].ToArray();
+        byte[] body = frame[(HeaderSize + 4)..].ToArray();
         try
         {
             var reader = new CandidateCodec.Reader(body, 0);
@@ -1169,7 +1253,7 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private void SendOnArrival(ConnState c, in Arrival arrival, ReadOnlySpan<byte> frame)
+    private void SendOnArrival(in Arrival arrival, ReadOnlySpan<byte> frame)
     {
         try
         {
@@ -1184,6 +1268,7 @@ internal sealed class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
+            // The reply path was momentary; its loss costs one frame, nothing more.
         }
     }
 
@@ -1191,6 +1276,9 @@ internal sealed class NodeEngine : IDisposable
     {
         IReadOnlyList<PinholeCandidate> candidates = LocalCandidatesSnapshot();
         var payload = new MemoryStream(32 + candidates.Count * 32);
+        Span<byte> token = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(token, c.Token);
+        payload.Write(token);
         payload.WriteByte((byte)candidates.Count);
         foreach (PinholeCandidate candidate in candidates)
         {
@@ -1201,6 +1289,7 @@ internal sealed class NodeEngine : IDisposable
             catch (InvalidOperationException)
             {
                 payload.SetLength(0); // a malformed candidate list must not kill the announce
+                payload.Write(token);
                 payload.WriteByte(0);
                 break;
             }
@@ -1215,7 +1304,7 @@ internal sealed class NodeEngine : IDisposable
             // Right after a rebind no path is confirmed live, but the PEER's own addresses
             // are still valid targets: the announce carries our new candidates to wherever
             // the peer currently is, and its reply frames teach us the newest path back.
-            SendOnArrival(c, CurrentArrival(c), frame);
+            SendOnArrival(CurrentArrival(c), frame);
             PinholeCandidate[] targets;
             lock (_gate)
             {
@@ -1226,7 +1315,15 @@ internal sealed class NodeEngine : IDisposable
             {
                 if (target.Kind == CandidateKind.Relay)
                 {
-                    SendViaRelayTo(frame, target.Address);
+                    try
+                    {
+                        SendViaRelayTo(frame, target.Address);
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+                    {
+                        // Right after a rebind the relay slots are cold; the announce must
+                        // still reach the direct candidates rather than abort the recovery.
+                    }
                 }
                 else
                 {
@@ -1243,7 +1340,7 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        SendOnArrival(c, CurrentArrival(c), frame);
+        SendOnArrival(CurrentArrival(c), frame);
     }
 
     private Arrival CurrentArrival(ConnState c)
@@ -1344,7 +1441,12 @@ internal sealed class NodeEngine : IDisposable
 
         c.RelayRemote = peerRelayed;
         c.RelayReady = false;
-        _ = PermitRelayAsync(c, peerRelayed);
+        if (Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
+        {
+            // Single-flight: a relayed frame burst must not spawn one permission round
+            // trip per frame while the first is still in the air.
+            _ = PermitRelayAsync(c, peerRelayed);
+        }
     }
 
     private async Task PermitRelayAsync(ConnState c, IPEndPoint peer)
@@ -1360,6 +1462,11 @@ internal sealed class NodeEngine : IDisposable
             bool kick = false;
             lock (c.Gate)
             {
+                if (c.RelayRemote is { } current && !current.Address.Equals(peer.Address))
+                {
+                    return; // a newer relay address superseded this permit mid-flight
+                }
+
                 c.RelayReady = true;
                 if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
                 {
@@ -1377,8 +1484,13 @@ internal sealed class NodeEngine : IDisposable
                 KickPunch(c); // relay is confirmed usable; direct upgrade probing continues
             }
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {
+            // The permission round trip failed; the next relayed frame will retry.
+        }
+        finally
+        {
+            Volatile.Write(ref c.PermitInFlight, 0);
         }
     }
 

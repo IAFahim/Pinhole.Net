@@ -148,7 +148,11 @@ internal static class PeerEngine
             udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
         }
 
-        udp.Bind(bind ?? new IPEndPoint(IPAddress.IPv6Any, 0));
+        udp.Bind(bind is null
+            ? new IPEndPoint(IPAddress.IPv6Any, 0)
+            : bind.Address.AddressFamily == AddressFamily.InterNetwork
+                ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port) // dual-mode cannot bind a bare IPv4 address
+                : bind);
         return new PeerState { Udp = udp, NodeId = nodeId, Magic = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) };
     }
 
@@ -311,6 +315,11 @@ internal static class PeerEngine
         {
             ushort attrType = BinaryPrimitives.ReadUInt16BigEndian(frame[pos..]);
             int attrLen = BinaryPrimitives.ReadUInt16BigEndian(frame[(pos + 2)..]);
+            if (pos + 4 + attrLen > end)
+            {
+                return; // a hostile or broken server claims an attribute past the message end
+            }
+
             if ((attrType is 0x0020 or 0x0001) && attrLen >= 8)
             {
                 if (TryDecodeAddress(frame.Slice(pos + 4, attrLen), txid, attrType == 0x0020, out IPEndPoint? ep))

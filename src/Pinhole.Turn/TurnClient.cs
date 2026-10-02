@@ -36,7 +36,6 @@ public sealed class TurnClient : IAsyncDisposable
     private const ushort AttrNonce = 0x0015;
     private const ushort AttrXorRelayedAddress = 0x0016;
     private const ushort AttrRequestedTransport = 0x0019;
-    private const ushort AttrXorMappedAddress = 0x0020;
 
     private static readonly TimeSpan TransactTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan PermissionRefreshEvery = TimeSpan.FromSeconds(240);
@@ -267,8 +266,10 @@ public sealed class TurnClient : IAsyncDisposable
             {
                 return;
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is SocketException or InvalidOperationException or TimeoutException or ObjectDisposedException)
             {
+                // A failed refresh tick must not stop the loop; three in a row close the
+                // socket inside RefreshAllocationAsync so the failure surfaces visibly.
             }
         }
     }
@@ -471,7 +472,15 @@ public sealed class TurnClient : IAsyncDisposable
 
                 if (from is not null && data is not null)
                 {
-                    Received?.Invoke(from, data);
+                    try
+                    {
+                        Received?.Invoke(from, data);
+                    }
+                    catch (Exception)
+                    {
+                        // A throwing handler must cost only its own indication: this thread
+                        // also completes every permission and refresh transaction.
+                    }
                 }
             }
             else

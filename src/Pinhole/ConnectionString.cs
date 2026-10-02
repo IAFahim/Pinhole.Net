@@ -53,8 +53,9 @@ public sealed class ConnectionString
     /// <summary>The most candidates one string may carry; the constructor throws above this.</summary>
     public const int MaxCandidates = 32;
 
-    /// <summary>The hard cap on encoded length accepted by <see cref="Parse"/> — longer strings are rejected as malformed, not parsed.</summary>
-    public const int MaxEncodedLength = 4096;
+    /// <summary>The hard cap on encoded length accepted by <see cref="Parse"/> — longer strings are rejected as malformed, not parsed.
+    /// Sized so the worst legal string (32 fat relay candidates) fits: encoding one may reach ~7.4k characters.</summary>
+    public const int MaxEncodedLength = 8192;
 
     /// <summary>The peer's stable ID — the only part that survives roaming while every candidate address churns.</summary>
     public ulong PeerId { get; }
@@ -249,7 +250,7 @@ internal static class CandidateCodec
         {
             if (_pos >= _data.Length)
             {
-                throw truncated();
+                throw Truncated();
             }
 
             return _data[_pos++];
@@ -259,7 +260,7 @@ internal static class CandidateCodec
         {
             if (_pos + 8 > _data.Length)
             {
-                throw truncated();
+                throw Truncated();
             }
 
             ulong value = BitConverter.ToUInt64(_data, _pos);
@@ -277,7 +278,7 @@ internal static class CandidateCodec
 
             if (_pos + family + 2 > _data.Length)
             {
-                throw truncated();
+                throw Truncated();
             }
 
             var ep = new IPEndPoint(new IPAddress(_data.AsSpan(_pos, family)), BinaryPrimitives.ReadUInt16BigEndian(_data.AsSpan(_pos + family)));
@@ -290,7 +291,7 @@ internal static class CandidateCodec
             int len = ReadByte();
             if (len > MaxText || _pos + len > _data.Length)
             {
-                throw truncated();
+                throw Truncated();
             }
 
             string s = Encoding.ASCII.GetString(_data, _pos, len);
@@ -298,7 +299,7 @@ internal static class CandidateCodec
             return s;
         }
 
-        private static FormatException truncated() => new("payload is truncated");
+        private static FormatException Truncated() => new("payload is truncated");
     }
 }
 
@@ -308,6 +309,16 @@ internal static class Base64Url
 
     public static byte[] Decode(string text)
     {
+        // Strict charset: Convert.FromBase64String silently skips whitespace, and a
+        // connection string that tolerates "AA BB" is one that round-trips ambiguously.
+        foreach (char c in text)
+        {
+            if (!(c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '='))
+            {
+                throw new FormatException("payload is not valid base64url");
+            }
+        }
+
         int pad = (4 - text.Length % 4) % 4;
         string base64 = text.Replace('-', '+').Replace('_', '/') + new string('=', pad);
         try

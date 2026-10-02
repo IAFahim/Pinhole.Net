@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using Pinhole;
-using Pinhole.Providers;
 using Pinhole.Turn;
 
 if (args.Length == 0)
@@ -92,7 +91,21 @@ static async Task<int> NodeChat(string? connectionString)
 
     conn.Received += d => Console.WriteLine($"peer: {Encoding.UTF8.GetString(d)}");
     conn.StateChanged += s => Console.WriteLine($"  path state -> {s}");
-    _ = Task.Run(async () =>
+    _ = PingLoopAsync(conn);
+
+    while (Console.ReadLine() is { Length: > 0 } line)
+    {
+        conn.Send(Encoding.UTF8.GetBytes(line));
+    }
+
+    return 0;
+}
+
+// Diagnostic ping loops as parameter-taking helpers: the socket/connection arrives as an
+// argument, not a captured using-variable, and the loop retires when the target is disposed.
+static async Task PingLoopAsync(PinholeConnection conn)
+{
+    try
     {
         while (true)
         {
@@ -103,14 +116,29 @@ static async Task<int> NodeChat(string? connectionString)
                 Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F1} ms via {conn.Path.Kind}");
             }
         }
-    });
-
-    while (Console.ReadLine() is { Length: > 0 } line)
-    {
-        conn.Send(Encoding.UTF8.GetBytes(line));
     }
+    catch (ObjectDisposedException)
+    {
+    }
+}
 
-    return 0;
+static async Task PeerPingLoopAsync(PeerSocket peer)
+{
+    try
+    {
+        while (true)
+        {
+            peer.Ping();
+            await Task.Delay(5000);
+            if (peer.LastRtt is { } rtt)
+            {
+                Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F0} ms");
+            }
+        }
+    }
+    catch (ObjectDisposedException)
+    {
+    }
 }
 
 // The 1:1 rendezvous introducer flow over the raw PeerSocket engine (pre-session layer).
@@ -142,18 +170,7 @@ static async Task<int> RendezvousChat(string[] args)
     await peer.Connected;
     Console.WriteLine($"pinhole open to {peer.Peer} — type lines to send, Ctrl-C quits");
 
-    _ = Task.Run(async () =>
-    {
-        while (true)
-        {
-            peer.Ping();
-            await Task.Delay(5000);
-            if (peer.LastRtt is { } rtt)
-            {
-                Console.WriteLine($"  rtt {rtt.TotalMilliseconds:F0} ms");
-            }
-        }
-    });
+    _ = PeerPingLoopAsync(peer);
 
     while (Console.ReadLine() is { Length: > 0 } line)
     {

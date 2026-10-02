@@ -1,4 +1,5 @@
 using System.Net;
+using System.Threading.Channels;
 
 namespace Pinhole;
 
@@ -58,7 +59,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>Every live connection this node is part of, keyed by nothing — a snapshot list.</summary>
     public IReadOnlyList<PinholeConnection> Connections =>
-        _engine.ConnectionsSnapshot().Select(c => c.Public!).Where(c => c is not null).ToArray();
+        _engine.ConnectionsSnapshot().Select(c => c.Public!).ToArray();
 
     /// <summary>Waits for a peer to dial this node's connection string and returns the
     /// connection. Multiple waiters each get their own incoming connection.</summary>
@@ -69,7 +70,16 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw new InvalidOperationException("node is not listening (Listen=false)");
         }
 
-        ConnState c = await incoming.Reader.ReadAsync(ct).ConfigureAwait(false);
+        ConnState c;
+        try
+        {
+            c = await incoming.Reader.ReadAsync(ct).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException)
+        {
+            throw new ObjectDisposedException(nameof(PinholeNode), "the node was disposed while waiting");
+        }
+
         await c.Connected.Task.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
         return c.Public!;
     }
@@ -85,7 +95,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw new ArgumentException("connection string points at this node itself", nameof(connectionString));
         }
 
-        ConnState c = await _engine.ConnectAsync(cs, ct).ConfigureAwait(false);
+        ConnState c = _engine.ConnectAsync(cs, ct);
         try
         {
             await c.Connected.Task.WaitAsync(_options.ConnectTimeout, ct).ConfigureAwait(false);

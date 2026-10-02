@@ -18,10 +18,10 @@
 // MESH_FORCE_RELAY=1 strips the direct candidates from announced tickets, forcing every
 // connection onto the TURN relay path.
 
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -164,10 +164,11 @@ internal static class MeshNode
 
             // Lower index listens, higher index dials: every pair forms exactly one
             // connection; ConnectAsync runs the direct->relay chain internally.
+            CancellationToken roundToken = roundCts.Token;
             IEnumerable<Task<PinholeConnection>> pending = Enumerable.Range(0, index)
-                .Select(j => node.ConnectAsync(roundTickets[j]).WaitAsync(roundCts.Token))
+                .Select(j => node.ConnectAsync(roundTickets[j]).WaitAsync(roundToken))
                 .Concat(Enumerable.Repeat(0, count - 1 - index)
-                    .Select(_ => node.AcceptAsync(roundCts.Token).WaitAsync(roundCts.Token)));
+                    .Select(_ => node.AcceptAsync(roundToken).WaitAsync(roundToken)));
 
             // Attach the receive handler the instant each connection resolves: a datagram
             // that lands before the handler exists is gone (no reliability to lean on),
@@ -198,11 +199,15 @@ internal static class MeshNode
                 {
                     foreach (ConnContext context in contexts)
                     {
-                        try { context.Conn.Send(body); } catch { }
+                        try { context.Conn.Send(body); }
+                        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
+                        {
+                            // a dead member costs its own datagram; the round retransmits next tick
+                        }
                     }
                 }
 
-                bool allHeard = false;
+                bool allHeard;
                 lock (contexts)
                 {
                     allHeard = contexts.All(c => c.Peer >= 0);
@@ -219,8 +224,6 @@ internal static class MeshNode
             ConnContext[] heard = contexts.Where(c => c.Peer >= 0).ToArray();
             return new RoundReport
             {
-                Round = round,
-                Index = index,
                 Ok = heard.Count() == count - 1,
                 Sent = mySecret,
                 Received = new Dictionary<int, string>(heard.Select(c => KeyValuePair.Create(c.Peer, c.Secret))),
@@ -230,7 +233,7 @@ internal static class MeshNode
         catch (Exception exception)
         {
             Console.WriteLine($"[node {index}] round {round} error: {exception.Message}");
-            return new RoundReport { Round = round, Index = index, Ok = false, Sent = mySecret };
+            return new RoundReport { Ok = false, Sent = mySecret };
         }
         finally
         {
@@ -243,7 +246,11 @@ internal static class MeshNode
 
             foreach (ConnContext context in snapshot)
             {
-                try { await context.Conn.CloseAsync().ConfigureAwait(false); } catch { }
+                try { await context.Conn.CloseAsync().ConfigureAwait(false); }
+                catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
+                {
+                    // teardown is best-effort; the peer sees silence either way
+                }
             }
         }
     }
@@ -303,14 +310,22 @@ internal static class MeshNode
                 }
 
                 // Bounded teardown; a pathological guest session must not stall the hosting loop.
-                try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
+                try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException or TimeoutException)
+                {
+                    // teardown is best-effort; the peer sees silence either way
+                }
             }
             catch (Exception exception)
             {
                 Console.WriteLine($"[node 0] guest session ended: {exception.Message}");
                 if (conn is not null)
                 {
-                    try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { }
+                    try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException or TimeoutException)
+                {
+                    // teardown is best-effort; the peer sees silence either way
+                }
                 }
             }
         }
@@ -341,7 +356,11 @@ internal static class Guest
         var guestSw = Stopwatch.StartNew();
         while (!answered.Task.IsCompleted && guestSw.Elapsed < TimeSpan.FromSeconds(15))
         {
-            try { conn.Send(hello); } catch { }
+            try { conn.Send(hello); }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
+            {
+                // the welcome answer is retried on the next tick
+            }
             await Task.Delay(300);
         }
 
@@ -365,8 +384,6 @@ internal sealed record TicketAnnounce
 
 internal sealed record RoundReport
 {
-    public int Round { get; init; }
-    public int Index { get; init; }
     public bool Ok { get; init; }
     public string Sent { get; init; } = "";
     public Dictionary<int, string> Received { get; init; } = new();

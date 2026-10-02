@@ -16,7 +16,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
-**Non-goals, stated loudly**: no encryption/authentication — traffic is readable and peer identity is unauthenticated **by design**; encrypt and authenticate above this layer. No delivery guarantees, ordering, retransmission, or keepalive scheduling. No signaling transport, storage, or coordination services.
+**Non-goals, stated loudly**: no encryption/authentication — traffic is readable and peer identity is unauthenticated **by design**; encrypt and authenticate above this layer. (Anti-spoofing exists below that line: every frame carries a per-connection token that never appears in the connection string, so a string holder can dial you but cannot forge, hijack, or kill an established session.) No delivery guarantees, ordering, retransmission, or keepalive scheduling. No signaling transport, storage, or coordination services.
 
 ## Install
 

@@ -107,16 +107,16 @@ public sealed class FakeTurnServer : IDisposable
             switch (type)
             {
                 case TypeAllocate:
-                    HandleAllocate(remote!, msg, txid, attrs);
+                    HandleAllocate(remote, msg, txid, attrs);
                     break;
                 case TypeRefresh:
-                    HandleRefresh(remote!, msg, txid, attrs);
+                    HandleRefresh(remote, msg, txid, attrs);
                     break;
                 case TypeCreatePerm:
-                    HandlePermission(remote!, msg, txid, attrs);
+                    HandlePermission(remote, msg, txid, attrs);
                     break;
                 case TypeSendInd:
-                    HandleSendIndication(remote!, txid, attrs);
+                    HandleSendIndication(remote, attrs);
                     break;
             }
         }
@@ -126,21 +126,21 @@ public sealed class FakeTurnServer : IDisposable
     {
         if (attrs.All(a => a.Type != AttrUsername))
         {
-            ReplyError(remote, (ushort)(TypeAllocate | ClassError), txid, 401, "Unauthorized");
+            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized");
             return;
         }
 
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, (ushort)(TypeAllocate | ClassError), txid, 401, "Unauthorized");
+            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized");
             return;
         }
 
         if (presentedNonce != CurrentNonce)
         {
             StaleNonceReplies++;
-            ReplyError(remote, (ushort)(TypeAllocate | ClassError), txid, 438, "Stale Nonce");
+            ReplyError(remote, TypeAllocate | ClassError, txid, 438, "Stale Nonce");
             return;
         }
 
@@ -158,7 +158,7 @@ public sealed class FakeTurnServer : IDisposable
         lock (_byControl) _byControl[remote] = alloc;
         lock (_byRelayed) _byRelayed[relayed] = alloc;
 
-        Reply(remote, Build((ushort)(TypeAllocate | 0x0100), txid,
+        Reply(remote, Build(TypeAllocate | 0x0100, txid,
             Attr(AttrXorRelayed, Xor(relayed)),
             Attr(AttrXorMapped, Xor((IPEndPoint)remote)),
             Attr(AttrLifetime, U32((uint)_lifetimeSeconds))));
@@ -169,14 +169,14 @@ public sealed class FakeTurnServer : IDisposable
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, (ushort)(TypeRefresh | ClassError), txid, 401, "Unauthorized");
+            ReplyError(remote, TypeRefresh | ClassError, txid, 401, "Unauthorized");
             return;
         }
 
         if (presentedNonce != CurrentNonce)
         {
             StaleNonceReplies++;
-            ReplyError(remote, (ushort)(TypeRefresh | ClassError), txid, 438, "Stale Nonce");
+            ReplyError(remote, TypeRefresh | ClassError, txid, 438, "Stale Nonce");
             return;
         }
 
@@ -185,13 +185,13 @@ public sealed class FakeTurnServer : IDisposable
         if (alloc is null || alloc.ExpiresAt < DateTimeOffset.UtcNow)
         {
             ExpiredRejections++;
-            ReplyError(remote, (ushort)(TypeRefresh | ClassError), txid, 437, "Allocation Mismatch");
+            ReplyError(remote, TypeRefresh | ClassError, txid, 437, "Allocation Mismatch");
             return;
         }
 
         alloc.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(_lifetimeSeconds);
         RefreshSuccesses++;
-        Reply(remote, Build((ushort)(TypeRefresh | 0x0100), txid, Attr(AttrLifetime, U32((uint)_lifetimeSeconds))));
+        Reply(remote, Build(TypeRefresh | 0x0100, txid, Attr(AttrLifetime, U32((uint)_lifetimeSeconds))));
     }
 
     private void HandlePermission(EndPoint remote, byte[] msg, byte[] txid, List<(ushort Type, byte[] Value)> attrs)
@@ -199,14 +199,14 @@ public sealed class FakeTurnServer : IDisposable
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, (ushort)(TypeCreatePerm | ClassError), txid, 401, "Unauthorized");
+            ReplyError(remote, TypeCreatePerm | ClassError, txid, 401, "Unauthorized");
             return;
         }
 
         if (presentedNonce != CurrentNonce)
         {
             StaleNonceReplies++;
-            ReplyError(remote, (ushort)(TypeCreatePerm | ClassError), txid, 438, "Stale Nonce");
+            ReplyError(remote, TypeCreatePerm | ClassError, txid, 438, "Stale Nonce");
             return;
         }
 
@@ -215,7 +215,7 @@ public sealed class FakeTurnServer : IDisposable
         if (alloc is null || alloc.ExpiresAt < DateTimeOffset.UtcNow)
         {
             ExpiredRejections++;
-            ReplyError(remote, (ushort)(TypeCreatePerm | ClassError), txid, 437, "Allocation Mismatch");
+            ReplyError(remote, TypeCreatePerm | ClassError, txid, 437, "Allocation Mismatch");
             return;
         }
 
@@ -226,10 +226,10 @@ public sealed class FakeTurnServer : IDisposable
         }
 
         PermissionsGranted++;
-        Reply(remote, Build((ushort)(TypeCreatePerm | 0x0100), txid));
+        Reply(remote, Build(TypeCreatePerm | 0x0100, txid));
     }
 
-    private void HandleSendIndication(EndPoint remote, byte[] txid, List<(ushort Type, byte[] Value)> attrs)
+    private void HandleSendIndication(EndPoint remote, List<(ushort Type, byte[] Value)> attrs)
     {
         Allocation? alloc;
         lock (_byControl) _byControl.TryGetValue(remote, out alloc);
@@ -400,6 +400,13 @@ public sealed class FakeTurnServer : IDisposable
     {
         _running = false;
         _main.Dispose();
+        lock (_byControl)
+        {
+            foreach (Allocation alloc in _byControl.Values)
+            {
+                alloc.RelayPortHolder.Dispose();
+            }
+        }
     }
 }
 

@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text;
-using Pinhole;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -28,8 +27,10 @@ public sealed class NatDetectorTests
     {
         // Each fake reports its own fictional mapping for the same client socket —
         // exactly what a symmetric NAT looks like from the inside.
-        using FakeStunServer s1 = new() { ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.10"), 40000) };
-        using FakeStunServer s2 = new() { ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.10"), 40001) };
+        using FakeStunServer s1 = new();
+        using FakeStunServer s2 = new();
+        s1.ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.10"), 40000);
+        s2.ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.10"), 40001);
 
         NatType type = await NatDetector.DetectAsync([s1.LocalEndPoint, s2.LocalEndPoint]).WaitAsync(Timeout);
 
@@ -122,6 +123,8 @@ public sealed class PathStatsTests
         Assert.True(sent.DatagramsSent >= 10, $"sent {sent.DatagramsSent}");
         Assert.Equal(10, recv.DatagramsReceived);
         Assert.Equal(body.Length * sent.DatagramsSent, sent.BytesSent);
+        Assert.Equal(body.Length * recv.DatagramsReceived, recv.BytesReceived);
+        Assert.True(sent.DatagramsSendFailed >= 0, "send failures are counted, and loopback has none");
 
         // Ping is a tool: one ping, one pong, a real RTT — never a background nanny.
         atB.Ping();
@@ -147,7 +150,7 @@ internal static class TestWait
     public static async Task<TimeSpan> UntilRttAsync(TimeSpan budget, Func<TimeSpan?> read)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (read() is not { } rtt)
+        while (read() is null)
         {
             Assert.True(sw.Elapsed < budget, $"rtt not produced within {budget}");
             await Task.Delay(50);

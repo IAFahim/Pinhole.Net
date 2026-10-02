@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
-using Pinhole;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -15,14 +14,12 @@ public sealed class FakeStunServer : IDisposable
     private readonly Socket _udp;
     private readonly byte[] _buf = new byte[1500];
     private volatile bool _running = true;
-    private Task? _loop;
-
     public FakeStunServer(bool ipv6 = false)
     {
         _udp = new Socket(ipv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _udp.Bind(new IPEndPoint(ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback, 0));
         LocalEndPoint = (IPEndPoint)_udp.LocalEndPoint!;
-        _loop = Task.Run(RunAsync);
+        _ = Task.Run(RunAsync);
     }
 
     public IPEndPoint LocalEndPoint { get; }

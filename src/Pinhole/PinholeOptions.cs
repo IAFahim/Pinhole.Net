@@ -23,7 +23,9 @@ public sealed record PinholeOptions
     public IReadOnlyList<TurnServerConfig>? Relays { get; init; }
 
     /// <summary>Accept connections dialed by unknown peers (default true). When false, only
-    /// peers this node dials itself can establish a connection.</summary>
+    /// peers this node dials itself can establish a connection. Strangers are bounded: a
+    /// flood of handshakes from unknown peer IDs stops materializing new state after 1024
+    /// connections, so a hostile scan cannot exhaust memory.</summary>
     public bool Listen { get; init; } = true;
 
     /// <summary>React to OS network-configuration changes (default true): re-probe STUN and,

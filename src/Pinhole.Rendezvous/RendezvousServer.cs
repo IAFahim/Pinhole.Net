@@ -87,59 +87,76 @@ public sealed class RendezvousServer : IAsyncDisposable
             }
 
             IPEndPoint remote = (IPEndPoint)res.RemoteEndPoint;
-            string[] parts = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            switch (parts)
+            try
             {
-                case ["REG", var idText] when ulong.TryParse(idText, NumberStyles.HexNumber, null, out ulong id):
-                    _nodes[id] = (remote, DateTimeOffset.UtcNow);
-                    if (_nodes.Count > MaxNodes)
-                    {
-                        EvictOldestNode();
-                    }
+                await HandleDatagram(remote, buffer, res.ReceivedBytes).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+            {
+                if (_shutdown.IsCancellationRequested)
+                {
+                    return;
+                }
 
-                    await Say(remote, $"OBS {remote}").ConfigureAwait(false);
-                    if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>? waiters))
+                // One undeliverable reply must not stop the introducer for everyone else.
+            }
+        }
+    }
+
+    private async Task HandleDatagram(IPEndPoint remote, byte[] buffer, int n)
+    {
+        string[] parts = Encoding.ASCII.GetString(buffer, 0, n).Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        switch (parts)
+        {
+            case ["REG", var idText] when ulong.TryParse(idText, NumberStyles.HexNumber, null, out ulong id):
+                _nodes[id] = (remote, DateTimeOffset.UtcNow);
+                if (_nodes.Count > MaxNodes)
+                {
+                    EvictOldestNode();
+                }
+
+                await Say(remote, $"OBS {remote}").ConfigureAwait(false);
+                if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>? waiters))
+                {
+                    foreach ((ulong waiterId, IPEndPoint waiterEp, _) in waiters)
                     {
-                        foreach ((ulong waiterId, IPEndPoint waiterEp, _) in waiters)
+                        await Say(waiterEp, $"INTRO {id:x16} {remote}").ConfigureAwait(false);
+                        await Say(remote, $"INTRO {waiterId:x16} {waiterEp}").ConfigureAwait(false);
+                    }
+                }
+
+                break;
+            case ["WANT", var meText, var targetText]
+                when ulong.TryParse(meText, NumberStyles.HexNumber, null, out ulong me)
+                     && ulong.TryParse(targetText, NumberStyles.HexNumber, null, out ulong target):
+                if (_nodes.TryGetValue(target, out (IPEndPoint Ep, DateTimeOffset Seen) entry)
+                    && entry.Seen > DateTimeOffset.UtcNow - _ttl)
+                {
+                    await Say(remote, $"INTRO {target:x16} {entry.Ep}").ConfigureAwait(false);
+                    await Say(entry.Ep, $"INTRO {me:x16} {remote}").ConfigureAwait(false);
+                }
+                else
+                {
+                    _wants.AddOrUpdate(target,
+                        _ => new List<(ulong, IPEndPoint, DateTimeOffset)> { (me, remote, DateTimeOffset.UtcNow) },
+                        (_, list) =>
                         {
-                            await Say(waiterEp, $"INTRO {id:x16} {remote}").ConfigureAwait(false);
-                            await Say(remote, $"INTRO {waiterId:x16} {waiterEp}").ConfigureAwait(false);
-                        }
-                    }
-
-                    break;
-                case ["WANT", var meText, var targetText]
-                    when ulong.TryParse(meText, NumberStyles.HexNumber, null, out ulong me)
-                         && ulong.TryParse(targetText, NumberStyles.HexNumber, null, out ulong target):
-                    if (_nodes.TryGetValue(target, out (IPEndPoint Ep, DateTimeOffset Seen) entry)
-                        && entry.Seen > DateTimeOffset.UtcNow - _ttl)
-                    {
-                        await Say(remote, $"INTRO {target:x16} {entry.Ep}").ConfigureAwait(false);
-                        await Say(entry.Ep, $"INTRO {me:x16} {remote}").ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        _wants.AddOrUpdate(target,
-                            _ => new List<(ulong, IPEndPoint, DateTimeOffset)> { (me, remote, DateTimeOffset.UtcNow) },
-                            (_, list) =>
+                            lock (list)
                             {
-                                lock (list)
+                                if (list.Count >= MaxWaitersPerTarget)
                                 {
-                                    if (list.Count >= MaxWaitersPerTarget)
-                                    {
-                                        list.RemoveAt(0);
-                                    }
-
-                                    list.Add((me, remote, DateTimeOffset.UtcNow));
+                                    list.RemoveAt(0);
                                 }
 
-                                return list;
-                            });
-                        await Say(remote, $"WAIT {target:x16}").ConfigureAwait(false);
-                    }
+                                list.Add((me, remote, DateTimeOffset.UtcNow));
+                            }
 
-                    break;
-            }
+                            return list;
+                        });
+                    await Say(remote, $"WAIT {target:x16}").ConfigureAwait(false);
+                }
+
+                break;
         }
     }
 

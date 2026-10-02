@@ -1,7 +1,5 @@
 using System.Diagnostics;
-using System.Net;
 using System.Text;
-using Pinhole;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -65,6 +63,7 @@ public sealed class RoamingTests
         Assert.Same(conn, b.Connections.Single(c => c.PeerId == a.PeerId));
 
         // And datagrams flow in both directions on the rebound path.
+        Assert.True(conn.Path.Since > DateTimeOffset.UnixEpoch, "the path snapshot carries its timestamp");
         await AssertExchangeAsync(conn, atA, "after rebind, B -> A");
         await AssertExchangeAsync(atA, conn, "after rebind, A -> B");
 
