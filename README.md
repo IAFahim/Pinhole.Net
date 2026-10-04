@@ -400,6 +400,7 @@ carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 | Symmetric NAT | Symmetric NAT | No | Relay |
 | UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
 | TURN credentials configured | Firewall allows only relayed UDP | — | TURN relayed address (RFC 5766) |
+| Both behind the same NAT (CGNAT hairpin) | Each other | Usually fails — hairpinning is router-dependent and rarely works on CGNAT | Relay automatically; direct is expected-not-guaranteed |
 | Path dies mid-session | Any | Re-punched in the background | Survives on the relay until the punch lands |
 
 Two deliberate decisions from the same audit, stated so nobody re-litigates them blind:
