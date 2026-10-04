@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.4.0 — blobs: sendme-parity file transfer
+
+One ticket moves a file or a whole directory between machines — the
+[sendme](https://github.com/n0-computer/sendme) model on Pinhole connections
+([#14](https://github.com/IAFahim/Pinhole.Net/issues/14),
+[#15](https://github.com/IAFahim/Pinhole.Net/issues/15)). New package `Pinhole.Blobs`
+(net8.0 + net10.0, AOT-compatible), new sample `samples/Pinhole.Send`, full wire
+spec in `docs/BLOBS.md`.
+
+### Serving and downloading
+
+- `BlobServer.ServeAsync(path)` hashes once and serves until disposed — file or
+  directory tree; `server.Ticket` re-mints per read so a ticket grabbed after a roam
+  carries live candidates. `BlobClient.DownloadAsync(ticket, dir, progress?)` connects
+  anywhere the core does and returns `(Path, Bytes, Resumed)`.
+- Every 1 KiB chunk is BLAKE3-verified on arrival against the provider's outboard
+  chunk values, and the full tree root is checked at completion — no unverified byte
+  ever reaches the output file. Our BLAKE3 tree is oracle-tested against BouncyCastle
+  across 0 B to ~100 kB sizes and piecewise feeding.
+- Receiver-driven ARQ: range requests anchored at the lowest unapplied chunk (a hostile
+  sender cannot balloon the receive buffer), 900 ms stale re-requests, 30 s honest
+  stall failure. Interrupted downloads resume from a `*.pinhole-part` checkpoint —
+  prefix-only, because a hash tree cannot skip.
+- Directories ship as a binary manifest plus one blob per entry, path-sanitized on
+  download so a hostile manifest cannot escape the destination directory.
+
+### Encryption by default
+
+- Tickets carry a fresh pre-shared key; every frame in both directions is
+  ChaCha20-Poly1305 under `HKDF-SHA256(psk, salt = root)` with per-direction role
+  nonces and per-connection monotonic counters — replays and regressions are refused,
+  and the relays forward ciphertext only (there is a test with a tap on the fake relay
+  proving no file byte crosses it in the clear). `Encrypt = false` opts out for
+  trusted LANs.
+
+### Audit deliverables
+
+- README gained the "when does it connect" matrix — every NAT pairing and which path
+  carries it — plus two decisions on record: PMTUD stays a non-goal (1200-byte budget,
+  QUIC's conservative initial) and discovery stays a non-goal.
+
 ## 1.3.0 — iroh parity pass
 
 Studied n0-computer/iroh end to end and ported the practices that were missing here.

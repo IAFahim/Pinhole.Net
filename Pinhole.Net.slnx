@@ -1,11 +1,13 @@
 <Solution>
   <Project Path="src/Pinhole/Pinhole.csproj" />
+  <Project Path="src/Pinhole.Blobs/Pinhole.Blobs.csproj" />
   <Project Path="src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" />
   <Project Path="src/Pinhole.Turn/Pinhole.Turn.csproj" />
   <Project Path="src/Pinhole.Providers/Pinhole.Providers.csproj" />
   <Project Path="samples/Pinhole.Bench/Pinhole.Bench.csproj" />
   <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />
   <Project Path="samples/Pinhole.Mesh/Pinhole.Mesh.csproj" />
+  <Project Path="samples/Pinhole.Send/Pinhole.Send.csproj" />
   <Project Path="samples/Pinhole.Tiny/Pinhole.Tiny.csproj" />
   <Project Path="tests/Pinhole.Tests/Pinhole.Tests.csproj" />
 </Solution>

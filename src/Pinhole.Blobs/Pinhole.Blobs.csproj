@@ -5,8 +5,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
-		<Description>Connection library for .NET: NAT traversal over free STUN and public iroh HTTPS relays, optional TURN, connection strings, and roaming. One UDP socket, zero allocations on the direct path, no native dependencies</Description>
-		<PackageId>Pinhole.Net</PackageId>
+		<Description>Verified, resumable file and directory transfer for Pinhole.Net — BLAKE3 content addressing, chunked ARQ over pinhole connections, optional end-to-end encryption, resumable downloads</Description>
+		<PackageId>Pinhole.Blobs</PackageId>
 		<IsPackable>true</IsPackable>
 		<IsAotCompatible>true</IsAotCompatible>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -17,13 +17,11 @@
 
 	<ItemGroup>
 		<PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
-		<ProjectReference Include="..\Pinhole.Turn\Pinhole.Turn.csproj" />
-		<ProjectReference Include="..\Pinhole.Providers\Pinhole.Providers.csproj" />
+		<ProjectReference Include="..\Pinhole\Pinhole.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<InternalsVisibleTo Include="Pinhole.Tests" />
-		<InternalsVisibleTo Include="Pinhole.Blobs" />
 	</ItemGroup>
 
 </Project>

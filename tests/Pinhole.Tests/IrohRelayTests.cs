@@ -208,12 +208,17 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     private readonly ConcurrentDictionary<string, Client> _clients = new();
     private readonly ConcurrentBag<Task> _sessions = [];
     private readonly Task _accept;
+    private readonly ConcurrentQueue<byte[]> _forwarded = new();
     private int _authentications;
     private int _pongs;
     private int _authGate; // 1 = refuse new authentications, deterministically
     public int Authentications => Volatile.Read(ref _authentications);
     public int Pongs => Volatile.Read(ref _pongs);
     public Uri Url { get; }
+
+    /// <summary>Payload bytes of every datagram this relay forwarded (addressing stripped),
+    /// in order — lets tests prove a relayed transfer is opaque end to end.</summary>
+    public IReadOnlyList<byte[]> Forwarded => _forwarded.ToArray();
 
     /// <summary>While paused, new relay connections are refused at the websocket level —
     /// reconnecting clients keep failing until Resume, so tests can observe the
@@ -290,6 +295,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
                 {
                     frame[0] = 6;
                     key.CopyTo(frame, 1);
+                    _forwarded.Enqueue(frame.AsSpan(34).ToArray());
                     await target.Send(frame, _stop.Token);
                 }
             }

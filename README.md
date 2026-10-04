@@ -8,7 +8,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 - **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
 - **Bring your own protocol on top.** UDP, TCP, QUIC, your own — with your own libraries. Pinhole doesn't provide those and never will. It does the hard bottom part only.
-- **Unauthenticated, unencrypted, unreliable — by design.** Do encryption, authentication, and reliability above this layer.
+- **Unauthenticated, unencrypted, unreliable — by design.** Do encryption, authentication, and reliability above this layer. [`Pinhole.Blobs`](#moving-files-pinholeblobs) is the shipped example of exactly that: verified, encrypted, resumable file transfer built strictly on top.
 
 ## Scope contract
 
@@ -21,7 +21,8 @@ One job: **get a connection between two machines, then keep it open until the ap
 ## Install
 
 ```
-dotnet add package Pinhole.Net
+dotnet add package Pinhole.Net          # the connection core
+dotnet add package Pinhole.Blobs        # verified, encrypted, resumable file transfer
 ```
 
 `Pinhole.Net` pulls in `Pinhole.Turn` (RFC 5766 relay client), `Pinhole.Providers` (the
@@ -97,6 +98,37 @@ The demo prints your own connection string first. One person presses Enter to li
 the other pastes the listener's string. Type messages after it says `Connected`, or
 `/quit` to exit. Run the updated build on both PCs and share fresh strings so they include
 the new HTTPS relay candidates. A code pasted without the `pinhole1:` prefix is accepted.
+
+## Moving files: Pinhole.Blobs
+
+The connection layer is deliberately raw. `Pinhole.Blobs` is the file-transfer layer
+above it — the [sendme](https://github.com/n0-computer/sendme) model: one ticket moves a
+file or a whole directory between machines, chunk-verified while streaming (BLAKE3,
+1 KiB chunks), resumable across restarts, healed through datagram loss, and encrypted
+end to end with a ticket-borne key so the public relays forward nothing but ciphertext.
+It connects anywhere the connection layer does — that's the point.
+
+```csharp
+using Pinhole.Blobs;
+
+// PC A: serve until disposed; the ticket is the whole capability.
+await using var server = await BlobServer.ServeAsync(@"C:\photos");
+Console.WriteLine(server.Ticket);   // pinholeblob1:...
+
+// PC B: verified, resumable download with progress.
+var result = await BlobClient.DownloadAsync(ticket, @"D:\downloads",
+    progress: new Progress<BlobProgress>(p => Console.WriteLine($"{p.VerifiedBytes}/{p.TotalBytes}")));
+```
+
+Or from the shell — `samples/Pinhole.Send`:
+
+```bash
+dotnet run --project samples/Pinhole.Send -- send ~/photos.tar    # prints ticket, serves until Ctrl-C
+dotnet run --project samples/Pinhole.Send -- recv <ticket> ~/dl   # downloads into ~/dl, resumable
+```
+
+The wire format, ticket layout, ARQ, encryption, and resume format are documented in
+[docs/BLOBS.md](docs/BLOBS.md), precisely enough to re-implement either side.
 
 ## Usage
 
@@ -354,6 +386,28 @@ while (running)
 Connections are identified by stable peer ID, never by IP — that's what makes roaming
 invisible. Late joins don't disturb existing pairs.
 
+## When does it connect?
+
+Every row of this matrix ends in a connection — the table is only about *which path*
+carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
+
+| Dialer side | Publisher side | Direct punch | Path used |
+|---|---|---|---|
+| Any (IPv6) | Any (IPv6) | Yes | Direct IPv6 |
+| Cone/EIM NAT | Cone/EIM NAT | Yes — simultaneous open, both sides punch at each other | Direct UDP |
+| Cone NAT | Symmetric NAT | Skipped — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` says so, so the dialer doesn't waste the attempt | Relay |
+| Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
+| Symmetric NAT | Symmetric NAT | No | Relay |
+| UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
+| TURN credentials configured | Firewall allows only relayed UDP | — | TURN relayed address (RFC 5766) |
+| Path dies mid-session | Any | Re-punched in the background | Survives on the relay until the punch lands |
+
+Two deliberate decisions from the same audit, stated so nobody re-litigates them blind:
+**PMTUD is a non-goal for now** — frames are capped at a 1200-byte payload budget (QUIC's
+conservative initial) because path-MTU discovery is measurable perf work, not a safety
+gap; and **discovery stays a non-goal** — the connection string is the only discovery
+artifact, and how it travels remains the application's concern.
+
 ## Failure modes, honestly
 
 | What dies | What the connection does |
@@ -371,6 +425,7 @@ invisible. Late joins don't disturb existing pairs.
 ## The libraries
 
 - `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
+- `src/Pinhole.Blobs` — file & directory transfer above the core (`Pinhole.Blobs` package, net8.0 + net10.0, AOT-compatible): one-ticket serving/downloading, BLAKE3 verified streaming, receiver-driven loss healing, resume sidecars, per-ticket ChaCha20-Poly1305; wire format documented in [docs/BLOBS.md](docs/BLOBS.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
@@ -378,7 +433,8 @@ invisible. Late joins don't disturb existing pairs.
 - `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
 - `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
-- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), silent-path-failure detection, periodic STUN refresh, reconnect backoff pacing, buffered receiving, options resolution, NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
+- `samples/Pinhole.Send` — sendme-style CLI: `send <path>` prints a ticket and serves until Ctrl-C, `recv <ticket> [dir]` downloads with console progress
+- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), silent-path-failure detection, periodic STUN refresh, reconnect backoff pacing, buffered receiving, options resolution, NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds, BLAKE3 oracle-tested against BouncyCastle, and the full blobs matrix (roundtrips at every boundary size, directory trees, loss healing, corruption aborts, interrupt/resume, relay-forwarded-bytes-are-ciphertext)
 
 ## Build & test
 
