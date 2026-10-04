@@ -174,7 +174,7 @@ public sealed class IrohRelayTests
         // Deterministic fault injection: gate new authentications FIRST so the clients'
         // reconnect attempts cannot win the race against observing the disconnected state.
         server.PauseNewAuthentications();
-        server.DisconnectAll();
+        await server.DisconnectAllAsync();
         await TestPoll.UntilAsync(Timeout, () => !a.HasRelay && !b.HasRelay);
         Assert.False(atA.Closed.IsCompleted);
 
@@ -322,18 +322,36 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
         }
     }
 
-    public void DisconnectAll()
+    public async Task DisconnectAllAsync()
     {
-        foreach (Client client in _clients.Values) client.Socket.Abort();
+        // A bare Abort() on the managed (unix) HttpListener websocket frequently leaves the
+        // loopback client completely uninformed — no FIN, no RST — so the client sits on its
+        // pending receive until its own keepalive ladder fires, far beyond any test budget.
+        // CloseOutputAsync flushes a CLOSE frame the client observes instantly without
+        // joining the session's pending receive (a full CloseAsync handshake would); the
+        // Abort backstop then covers sessions that were mid-write.
+        foreach (Client client in _clients.Values)
+        {
+            try
+            {
+                await client.Socket.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable, "killed",
+                    CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+            }
+            catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException
+                or InvalidOperationException or OperationCanceledException or TimeoutException)
+            {
+            }
+            client.Socket.Abort();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
-        // Abort the sockets before stopping the listener: HttpListener.Stop disposes response
+        // Close the sockets before stopping the listener: HttpListener.Stop disposes response
         // streams that a session mid-write is still using, and that race throws from inside
         // the runtime's own cleanup. The listener is going away either way.
-        DisconnectAll();
+        await DisconnectAllAsync();
         try { _listener.Stop(); }
         catch (ObjectDisposedException) { }
         await _accept;
