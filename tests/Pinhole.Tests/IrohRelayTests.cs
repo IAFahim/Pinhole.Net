@@ -170,8 +170,15 @@ public sealed class IrohRelayTests
         int before = server.Authentications;
         Assert.True(a.HasRelay);
         Assert.True(b.HasRelay);
+
+        // Deterministic fault injection: gate new authentications FIRST so the clients'
+        // reconnect attempts cannot win the race against observing the disconnected state.
+        server.PauseNewAuthentications();
         server.DisconnectAll();
         await TestPoll.UntilAsync(Timeout, () => !a.HasRelay && !b.HasRelay);
+        Assert.False(atA.Closed.IsCompleted);
+
+        server.ResumeNewAuthentications();
         await TestPoll.UntilAsync(Timeout, () => server.Authentications >= before + 2
             && atA.State == PinholeConnectionState.Degraded && atB.State == PinholeConnectionState.Degraded);
         Assert.True(a.HasRelay);
@@ -203,9 +210,17 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     private readonly Task _accept;
     private int _authentications;
     private int _pongs;
+    private int _authGate; // 1 = refuse new authentications, deterministically
     public int Authentications => Volatile.Read(ref _authentications);
     public int Pongs => Volatile.Read(ref _pongs);
     public Uri Url { get; }
+
+    /// <summary>While paused, new relay connections are refused at the websocket level —
+    /// reconnecting clients keep failing until Resume, so tests can observe the
+    /// disconnected state without racing the retry loop.</summary>
+    public void PauseNewAuthentications() => Volatile.Write(ref _authGate, 1);
+
+    public void ResumeNewAuthentications() => Volatile.Write(ref _authGate, 0);
 
     public FakeIrohRelay()
     {
@@ -239,6 +254,12 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
         {
             var accepted = await context.AcceptWebSocketAsync("iroh-relay-v2");
             using WebSocket socket = accepted.WebSocket;
+            if (Volatile.Read(ref _authGate) == 1)
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "gated", CancellationToken.None);
+                return;
+            }
+
             client = new Client(socket);
             byte[] challenge = new byte[17];
             RandomNumberGenerator.Fill(challenge.AsSpan(1));

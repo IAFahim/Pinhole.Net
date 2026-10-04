@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.2.0 — honest about silent death, and green again
+
+Four fixes from the first real-world pass: options that stopped dropping defaults,
+path death you cannot see, a receive race the event API cannot close, and CI that
+stopped trusting an interactive demo.
+
+### Options customization no longer drops the free infrastructure (#11)
+
+- Customizing any single `PinholeOptions` setting silently disabled STUN probing and
+  the public relays: a fresh options object resolved nothing, and `BindAsync` only
+  applied defaults when the whole argument was null. `BindAsync` now resolves the
+  effective options first, filling in only what was left unspecified.
+- Tri-state precedence per infrastructure setting, documented and tested: `null`
+  takes the free defaults, an empty list disables that provider, explicit entries
+  replace the defaults. Scalars (timeouts, listen, watch flags) are never touched.
+- All-infrastructure-off options perform no DNS/catalog lookups at all; TURN catalog
+  warming is skipped when no TURN relay is configured. Cancellation halts resolution
+  before any engine resource exists. Offline test helpers and the bench now disable
+  infrastructure explicitly instead of relying on the old null-list accident.
+
+### Opt-in buffered receiving (#13)
+
+- `ReceiveBufferCapacity` (default 0 = off): a bounded per-connection queue that
+  exists from handshake time, closing the accept/subscribe race where a datagram
+  arriving between `AcceptAsync` and the first `Received +=` was simply dropped.
+- New `ReceiveAsync` (null at EOF) and `ReadAllAsync` on `PinholeConnection`, with
+  single-reader enforcement, drop-oldest overflow counted in `DroppedDatagrams`,
+  cancellation that ends only the pending read, and drain-before-EOF on close.
+  Local queueing over the same unreliable transport — no reliability is added.
+- Default callback mode is unchanged, zero allocations included.
+
+### Silent direct-path death is detected (#12)
+
+- UDP sends succeed into a dead NAT mapping or firewall; the direct path used to stay
+  "Open" until something errored. The engine now validates the path itself: after
+  5 s with nothing *received* on the direct path (only receipts prove anything), the
+  per-node maintenance scheduler probes with the existing token-checked ping
+  protocol; three consecutive unanswered probes mark the path suspect and the normal
+  machinery takes over — relay fallback as `Degraded`, or an honest `Dead`, with
+  upgrade-back when UDP returns.
+- Probes correlate with the outstanding nonce *and* the endpoint that probe was sent
+  to: caller pings, relay traffic, and replies re-pointed mid-flight by the peer's own
+  frames never certify a path. Monitoring counters are separate from `Ping`/RTT stats.
+  One scheduler per node, monotonic deadlines, nothing on the send path, dead on
+  dispose. Opt out with `EnablePathValidation = false`.
+
+### CI green again (#10)
+
+- The bench canary moved out of the now-interactive demo into `samples/Pinhole.Bench`:
+  non-interactive, two loopback nodes, no stdin, no public infrastructure, warm-up
+  then measure on the sending thread. Gates unchanged: 25k dps floor, <0.1 B/datagram.
+- Relay fault injection is deterministic: the fake relay gates new authentications
+  before dropping connections, so `RelayReconnect` observes the disconnected state
+  without racing the clients' reconnect loop.
+- The token-spoofing tests dial through a loopback-only connection string so
+  `Path.Remote` cannot legitimately migrate between the multi-homed interfaces CI
+  runners have — the anti-spoofing assertions themselves are unchanged and still
+  fail if the token gate is removed.
+
 ## 1.1.0 — red-team hardening
 
 A full adversarial pass over 1.0.0 (`tests/Pinhole.Tests/AttackTests.cs` locks every

@@ -81,9 +81,10 @@ jobs:
           dotnet-version: 10.0.x
       - name: Throughput and allocation canary
         run: |
-          # The dps floor is runner-calibrated (2 shared vCPUs reach ~60k; real
-          # hardware does 600k+); the strict zero-allocation gate is the real signal.
-          OUT=$(dotnet run --project samples/Pinhole.Demo -c Release -- bench 300000 64)
+          # Noninteractive, offline (loopback pair, no STUN/relays). The dps floor is
+          # runner-calibrated (2 shared vCPUs reach ~60k; real hardware does 600k+); the
+          # strict zero-allocation gate is the real signal.
+          OUT=$(dotnet run --project samples/Pinhole.Bench -c Release -- 300000 64)
           echo "$OUT"
           DPS=$(echo "$OUT" | grep -oP '\d+(?= dps)')
           BPD=$(echo "$OUT" | grep -oP '[\d.]+(?= B/dgram)')

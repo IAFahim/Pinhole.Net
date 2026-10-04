@@ -27,13 +27,22 @@ public sealed class AttackTests
     };
 
     private static async Task<(PinholeConnection AtDialer, PinholeConnection AtListener)> ConnectPairAsync(
-        PinholeNode listener, PinholeNode dialer)
+        PinholeNode listener, PinholeNode dialer, string? listenerString = null)
     {
         Task<PinholeConnection> accept = listener.AcceptAsync();
-        PinholeConnection dialerSide = await dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout);
+        PinholeConnection dialerSide = await dialer.ConnectAsync(listenerString ?? listener.ConnectionString).WaitAsync(Timeout);
         PinholeConnection listenerSide = await accept.WaitAsync(Timeout);
         return (dialerSide, listenerSide);
     }
+
+    /// <summary>A connection string carrying only the listener's loopback candidate: on a
+    /// multi-homed machine (CI runners have several interfaces), the legitimate peer's
+    /// source address stays 127.0.0.1 for the whole test instead of following whichever
+    /// interface the OS picked last. The spoofing assertions below compare against exactly
+    /// that stable remote endpoint.</summary>
+    private static string LoopbackString(PinholeNode listener) => new ConnectionString(
+        listener.PeerId,
+        [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))]).ToString();
 
     private static byte[] Frame(byte type, ulong sender, uint token, ReadOnlySpan<byte> payload = default)
     {
@@ -97,7 +106,7 @@ public sealed class AttackTests
     {
         await using PinholeNode a = await PinholeNode.BindAsync(Opts());
         await using PinholeNode b = await PinholeNode.BindAsync(Opts());
-        (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
+        (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b, LoopbackString(a));
         Assert.Equal(PinholeConnectionState.Open, atB.State);
 
         using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -121,8 +130,12 @@ public sealed class AttackTests
     {
         await using PinholeNode a = await PinholeNode.BindAsync(Opts());
         await using PinholeNode b = await PinholeNode.BindAsync(Opts());
-        (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
+        // Loopback-only dial: Path.Remote must stay the peer's loopback endpoint on every
+        // OS (multi-homed Windows runners otherwise legitimately migrate the direct path
+        // between interfaces mid-test, which is roaming working, not spoofing).
+        (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b, LoopbackString(a));
         IPEndPoint realRemote = atB.Path.Remote!;
+        Assert.Equal(IPAddress.Loopback, realRemote.Address);
 
         using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));

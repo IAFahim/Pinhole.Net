@@ -16,7 +16,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
-**Non-goals, stated loudly**: no encryption/authentication — traffic is readable and peer identity is unauthenticated **by design**; encrypt and authenticate above this layer. (Anti-spoofing exists below that line: every frame carries a per-connection token that never appears in the connection string, so a string holder can dial you but cannot forge, hijack, or kill an established session.) No delivery guarantees, ordering, retransmission, or keepalive scheduling. No signaling transport, storage, or coordination services.
+**Non-goals, stated loudly**: no encryption/authentication — traffic is readable and peer identity is unauthenticated **by design**; encrypt and authenticate above this layer. (Anti-spoofing exists below that line: every frame carries a per-connection token that never appears in the connection string, so a string holder can dial you but cannot forge, hijack, or kill an established session.) No delivery guarantees, ordering, retransmission, or app-level keepalive scheduling — the engine's internal path validation keeps the *transport* honest, never your protocol alive. No signaling transport, storage, or coordination services.
 
 ## Install
 
@@ -127,6 +127,30 @@ conn.Received += dgram =>
 };
 ```
 
+The event has one race it cannot close: a datagram arriving between `AcceptAsync` and
+the first `+=` is dropped. Opt into a bounded receive buffer at bind — the queue exists
+before the handshake completes, so the first read delivers everything that arrived early:
+
+```csharp
+await using PinholeNode node = await PinholeNode.BindAsync(new PinholeOptions
+{
+    ReceiveBufferCapacity = 64,   // 0 (default) keeps the callback-only behavior
+});
+await using PinholeConnection peer = await node.AcceptAsync();
+
+// One datagram at a time (null = closed and drained), or an endless stream:
+ReadOnlyMemory<byte>? datagram = await peer.ReceiveAsync();
+await foreach (ReadOnlyMemory<byte> dgram in peer.ReadAllAsync(ct))
+    Handle(dgram.Span);
+
+peer.DroppedDatagrams;   // how many the full queue threw away (drop-oldest, never blocks)
+```
+
+Buffering is local queueing only: datagrams are copied to owned arrays, a full queue
+drops the oldest, and nothing about the network becomes reliable. One reader at a time;
+cancellation ends a pending read without closing the connection; roaming and relay
+fallback never end the stream — only closing does, after the buffer drains.
+
 ### Watching the connection
 
 States are honest at all times, and `Path` tells you what is physically carrying traffic:
@@ -194,7 +218,9 @@ await node.RoamNowAsync();   // re-probe STUN, rebind if needed, re-announce, re
 
 ### Tools: ping, RTT, stats
 
-`Ping()` is a tool you call — Pinhole never schedules keepalives for you.
+`Ping()` is a tool you call — Pinhole never schedules keepalives for your protocol.
+(Separately, and invisibly to these counters, the engine validates the *transport path*
+itself — see the failure table below; that is network maintenance, not app liveness.)
 
 ```csharp
 conn.Ping();
@@ -235,11 +261,20 @@ and reconnect automatically after a disconnect. This is the iroh relay transport
 Pinhole's own datagram protocol; it does not implement iroh QUIC or interoperate with Rust
 iroh application endpoints. Pinhole payloads remain unencrypted end to end, as described above.
 
-Everything is overridable:
+Everything is overridable — and every infrastructure setting is tri-state: `null`
+(default) takes the free defaults, an empty list disables that provider, explicit
+entries replace the defaults. Customizing one setting never silently drops the rest,
+so there is no need to fetch `DefaultAsync` first anymore:
 
 ```csharp
-PinholeOptions defaults = await PinholeOptions.DefaultAsync();
-var node = await PinholeNode.BindAsync(defaults with
+// A scalar tweak only — free STUN and the public iroh relays stay enabled:
+var node = await PinholeNode.BindAsync(new PinholeOptions
+{
+    ConnectTimeout = TimeSpan.FromSeconds(30),
+});
+
+// Full form, every knob at its default:
+var node = await PinholeNode.BindAsync(new PinholeOptions
 {
     // Optional TURN in addition to the default HTTPS relays:
     Relays = [new TurnServerConfig(
@@ -251,6 +286,8 @@ var node = await PinholeNode.BindAsync(defaults with
     StunServers = null,             // null = free catalog; [] = no reflexive stage
     Listen = true,                  // accept strangers dialing your string
     EnableNetworkWatch = true,      // auto-roam on OS network changes
+    EnablePathValidation = true,    // detect silent direct-path death (see failure table)
+    ReceiveBufferCapacity = 0,      // > 0 enables ReceiveAsync/ReadAllAsync
     ConnectTimeout = TimeSpan.FromSeconds(15),  // whole-chain dial budget
     BindProbeBudget = TimeSpan.FromSeconds(5),  // bind-time probe budget (failures tolerated)
 });
@@ -295,6 +332,7 @@ invisible. Late joins don't disturb existing pairs.
 | What dies | What the connection does |
 |---|---|
 | The direct path (NAT mapping expires, peer's IP changes) | Degrades to `Degraded` and keeps flowing on the relay; re-probes for a direct path and upgrades back to `Open` silently |
+| The direct path dies *silently* (firewall drops, NAT rebind — no send error, nothing comes back) | Detected, not assumed: after ~5 s with nothing received on the direct path, the engine probes it with the token-checked ping protocol; three unanswered probes mark it suspect and the normal handling kicks in (relay fallback, or honest death). One lost probe or live traffic never degrades a path, and relay traffic never certifies a direct one. Opt out with `EnablePathValidation = false` |
 | The peer's whole network (WiFi→mobile) | That peer's node rebinds (new socket/port/relay), re-announces, re-punches — the same connection object, datagrams resume in both directions |
 | Direct path dies and no relay is configured | Bounded re-punch, then honestly `Dead`; `Send` throws with a `RoamNowAsync()` hint; the object stays inspectable |
 | Every STUN server goes silent | Treated as network loss → full rebind; a single rate-limited probe is *not* network death |
@@ -310,8 +348,9 @@ invisible. Late joins don't disturb existing pairs.
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — basic interactive chat: prints your connection string, then listens or dials a pasted string
 - `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
+- `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
-- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
+- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), silent-path-failure detection, buffered receiving, options resolution, NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
 
 ## Build & test
 
@@ -319,6 +358,7 @@ invisible. Late joins don't disturb existing pairs.
 git clone https://github.com/IAFahim/Pinhole.Net
 cd Pinhole.Net
 dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo, nothing native
+dotnet run --project samples/Pinhole.Bench -c Release   # throughput/allocation canary (offline)
 ```
 
 ## Status — 1.0
@@ -331,6 +371,13 @@ Rust fully removed ([#8](https://github.com/IAFahim/Pinhole.Net/issues/8)),
 open-forever roaming ([#5](https://github.com/IAFahim/Pinhole.Net/issues/5)),
 NAT/path/payload tools ([#6](https://github.com/IAFahim/Pinhole.Net/issues/6)),
 this release ([#7](https://github.com/IAFahim/Pinhole.Net/issues/7)).
+
+Post-1.0: red-team hardening (1.1.0), then options defaults preserved under partial
+customization ([#11](https://github.com/IAFahim/Pinhole.Net/issues/11)),
+opt-in buffered receiving ([#13](https://github.com/IAFahim/Pinhole.Net/issues/13)),
+silent path-death detection ([#12](https://github.com/IAFahim/Pinhole.Net/issues/12)),
+and a green CI again — dedicated offline bench sample, deterministic relay-reconnect
+injection, loopback-stable spoof tests ([#10](https://github.com/IAFahim/Pinhole.Net/issues/10)).
 
 The mesh canary runs weekly on three independent GitHub runners that have never met:
 they find each other through tickets, connect with connection strings only, verify fresh
