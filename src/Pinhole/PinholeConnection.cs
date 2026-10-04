@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.CompilerServices;
 
 namespace Pinhole;
 
@@ -74,6 +75,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
 
     private readonly NodeEngine _engine;
     private readonly ConnState _c;
+    private int _readInFlight; // single-reader guard for the buffered API
 
     internal PinholeConnection(NodeEngine engine, ConnState c)
     {
@@ -94,12 +96,71 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         remove => _c.StateChanged -= value;
     }
 
-    /// <summary>Datagrams received from the peer (on a receive thread — keep handlers fast).</summary>
+    /// <summary>Datagrams received from the peer (on a receive thread — keep handlers fast).
+    /// The span is only valid during the call — copy it if it must outlive the handler.</summary>
     public event PinholeDatagramHandler? Received
     {
         add => _c.Received += value;
         remove => _c.Received -= value;
     }
+
+    /// <summary>Waits for the next buffered datagram and returns it, or null at end of
+    /// stream (the connection closed and the buffer drained). Requires
+    /// <see cref="PinholeOptions.ReceiveBufferCapacity"/> &gt; 0 at bind — the buffer must
+    /// exist before the handshake completes, which is exactly the race this API closes: a
+    /// datagram that arrived before the first read is returned by the first read. The
+    /// returned memory is owned by the connection until handed to you and stays valid after
+    /// later reads. One reader at a time: a concurrent receive throws
+    /// <see cref="InvalidOperationException"/>. Cancellation ends the pending read without
+    /// closing the connection; roaming and relay fallback never end the stream.</summary>
+    public async ValueTask<ReadOnlyMemory<byte>?> ReceiveAsync(CancellationToken ct = default)
+    {
+        DatagramBuffer? buffer = _c.Buffer;
+        if (buffer is null)
+        {
+            throw new InvalidOperationException(
+                "ReceiveAsync requires ReceiveBufferCapacity > 0 at bind; subscribe to the Received event instead.");
+        }
+
+        if (Interlocked.CompareExchange(ref _readInFlight, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("a receive is already in flight on this connection (single reader).");
+        }
+
+        try
+        {
+            byte[]? datagram = await buffer.ReadAsync(ct).ConfigureAwait(false);
+            // Branch, don't ternary: "cond ? null : struct" targeting a nullable struct
+            // compiles the null arm to default(struct) — an empty memory, not EOF.
+            if (datagram is null)
+            {
+                return null;
+            }
+
+            return new ReadOnlyMemory<byte>(datagram);
+        }
+        finally
+        {
+            Volatile.Write(ref _readInFlight, 0);
+        }
+    }
+
+    /// <summary>Enumerates buffered datagrams until the connection closes (end of stream).
+    /// Same contract as <see cref="ReceiveAsync"/>: needs buffering enabled at bind, one
+    /// reader at a time, cancellation stops the enumeration without closing anything, and
+    /// datagrams that arrived before the first iteration are still delivered.</summary>
+    public async IAsyncEnumerable<ReadOnlyMemory<byte>> ReadAllAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        while (await ReceiveAsync(ct).ConfigureAwait(false) is { } datagram)
+        {
+            yield return datagram;
+        }
+    }
+
+    /// <summary>Datagrams dropped by the receive buffer because it was full (drop-oldest).
+    /// Zero when buffering is disabled.</summary>
+    public long DroppedDatagrams => _c.Buffer?.Dropped ?? 0;
 
     /// <summary>Sends one unreliable datagram on the current path. The direct UDP path allocates nothing;
     /// empty payloads and payloads above <see cref="MaxPayload"/> throw before touching the

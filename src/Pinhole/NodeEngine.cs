@@ -57,6 +57,7 @@ internal sealed class ConnState
     public byte[]? IrohPeerKey;
     public bool IrohConfirmed;
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
+    public DatagramBuffer? Buffer;      // non-null only with ReceiveBufferCapacity > 0
 
     public readonly TaskCompletionSource Connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly TaskCompletionSource Closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -136,6 +137,9 @@ internal sealed class NodeEngine : IDisposable
     internal Channel<ConnState>? Incoming => _incoming;
 
     public void DisposeConnection(ConnState c) => _ = CloseAsync(c);
+
+    private DatagramBuffer? CreateBuffer() =>
+        _options.ReceiveBufferCapacity > 0 ? new DatagramBuffer(_options.ReceiveBufferCapacity) : null;
 
     public int LocalPort
     {
@@ -689,6 +693,7 @@ internal sealed class NodeEngine : IDisposable
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
         };
+        c.Buffer = CreateBuffer();
         c.PuncFrame = BuildPunc(c.Token);
         c.Public = new PinholeConnection(this, c);
 
@@ -759,6 +764,7 @@ internal sealed class NodeEngine : IDisposable
             RemoteToken = token,
             RemoteTokenKnown = true,
         };
+        c.Buffer = CreateBuffer();
         c.PuncFrame = BuildPunc(c.Token);
         c.Public = new PinholeConnection(this, c);
         lock (_gate)
@@ -1304,6 +1310,9 @@ internal sealed class NodeEngine : IDisposable
 
         Interlocked.Increment(ref c.ReceivedCount);
         Interlocked.Add(ref c.BytesReceived, frame.Length - HeaderSize - 4);
+        // Buffered mode queues first (the queue exists from handshake time), then the
+        // zero-copy event path fires for anyone still subscribed.
+        c.Buffer?.Enqueue(frame[(HeaderSize + 4)..]);
         c.Received?.Invoke(frame[(HeaderSize + 4)..]);
     }
 
@@ -1712,6 +1721,7 @@ internal sealed class NodeEngine : IDisposable
             {
                 c.Path = PathKind.None;
                 c.Closed.TrySetResult();
+                c.Buffer?.Complete(); // readers drain what is buffered, then see EOF
             }
 
             c.StateChanged?.Invoke(state);
