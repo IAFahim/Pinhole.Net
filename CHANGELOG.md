@@ -42,6 +42,27 @@ this release closes the gaps.
   subset, and the iroh relay handshake/framing — specified precisely enough to
   re-implement either side, iroh-style.
 
+### Profiled with Linux perf: the receive path stopped allocating
+
+- Baseline profile (`perf stat` + `perf record` with .NET perf maps) on a 20 M-datagram
+  loopback run: ~272 B allocated per datagram process-wide — a `SocketAddress` clone plus
+  `IPEndPoint` construction on every received frame — and the global engine lock taken on
+  both per-frame paths, ping-ponging one cache line between the send and receive threads.
+  The run is syscall-bound at its floor (one sendmsg/recvmsg per datagram); everything
+  above that floor was ours to remove.
+- The receive loop now reuses one scratch `SocketAddress`; the engine clones it only when
+  a connection adopts a *changed* endpoint (roaming), detected with a vectorized
+  `SequenceEqual` over the public buffer. Sending reads the socket as a volatile
+  reference instead of taking the engine lock (a rare rebind races into a caught send
+  error and the normal recovery path), and the connection table is a
+  `ConcurrentDictionary`, so per-frame demux is lock-free while dial/incoming/close keep
+  their exact atomic semantics (idempotent dials, first-PUNC-wins, identity-checked
+  closes).
+- Result, interleaved A/B on the same machine: +2–4% throughput and whole-process
+  allocations down from 272.005 to 0.005 B per datagram — the direct path allocates
+  nothing in either direction now. The bench prints the whole-process number alongside
+  the sender-thread number so both stay honest; the CI canary greps are unchanged.
+
 ### Test-infrastructure hardening
 
 - Two latent test-host crashers fixed, both exposed by timing shifts: the fake TURN

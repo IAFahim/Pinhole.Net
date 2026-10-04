@@ -110,7 +110,11 @@ internal sealed class NodeEngine : IDisposable
     private readonly ulong _peerId;
     private readonly PinholeOptions _options;
     private readonly object _gate = new();
-    private readonly Dictionary<ulong, ConnState> _conns = new();
+    // Hot path: every frame routes through Lookup, on the receive thread for arrivals and
+    // the caller's thread for sends. A ConcurrentDictionary keeps those reads lock-free so
+    // the two hot threads never ping-pong the old global lock's cache line. Mutations
+    // (dial, incoming, close) are rare and individually atomic.
+    private readonly ConcurrentDictionary<ulong, ConnState> _conns = new();
     private readonly Channel<ConnState>? _incoming;
     private readonly List<RelaySlot> _relays = new();
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
@@ -120,7 +124,11 @@ internal sealed class NodeEngine : IDisposable
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
 
-    private Socket _udp = null!;
+    // Volatile: sends and the receive loop read it per frame without taking _gate. A rebind
+    // swaps in a fresh socket; a sender briefly racing the swap gets the old socket and a
+    // caught ObjectDisposedException — the same send-failure handling a dead path already
+    // triggers, and rebinds are rare.
+    private volatile Socket _udp = null!;
     private long _recovering; // single-flight guard for recovery
     private volatile bool _disposed;
     private int _networkWatchHooked;
@@ -371,13 +379,7 @@ internal sealed class NodeEngine : IDisposable
         _stunPending[key] = tcs;
         try
         {
-            Socket udp;
-            lock (_gate)
-            {
-                udp = _udp;
-            }
-
-            udp.SendTo(req, SocketFlags.None, ToWire(server));
+            _udp.SendTo(req, SocketFlags.None, ToWire(server));
             return await tcs.Task.WaitAsync(ProbeTimeout, ct).ConfigureAwait(false);
         }
         finally
@@ -718,18 +720,12 @@ internal sealed class NodeEngine : IDisposable
 
     public ConnState? Lookup(ulong peerId)
     {
-        lock (_gate)
-        {
-            return _conns.TryGetValue(peerId, out ConnState? c) ? c : null;
-        }
+        return _conns.TryGetValue(peerId, out ConnState? c) ? c : null;
     }
 
     public IReadOnlyList<ConnState> ConnectionsSnapshot()
     {
-        lock (_gate)
-        {
-            return _conns.Values.ToArray();
-        }
+        return _conns.Values.ToArray();
     }
 
     /// <summary>Monitoring/test accessor: the peer's latest advertised candidates, copied
@@ -753,28 +749,37 @@ internal sealed class NodeEngine : IDisposable
         c.Buffer = CreateBuffer();
         c.PuncFrame = BuildPunc(c.Token);
         c.Public = new PinholeConnection(this, c);
+        // Before publication: no other thread can see c through the table, so seeding the
+        // peer candidates needs no lock.
+        c.PeerCandidates.AddRange(cs.Candidates);
 
-        ConnState? husk;
-        lock (_gate)
+        if (_disposed) throw new ObjectDisposedException(nameof(PinholeNode));
+        // Atomic check-and-insert: two concurrent dials at the same target must share one
+        // connection, not silently overwrite each other's entry.
+        while (true)
         {
-            if (_disposed) throw new ObjectDisposedException(nameof(PinholeNode));
-            // Atomic check-and-insert: two concurrent dials at the same target must share
-            // one connection, not silently overwrite each other's entry.
-            if (_conns.TryGetValue(cs.PeerId, out ConnState? existing)
-                && existing.State is not (PinholeConnectionState.Dead or PinholeConnectionState.Closed))
+            if (_conns.TryGetValue(cs.PeerId, out ConnState? existing))
             {
-                return existing; // idempotent dials (and in-flight dials) return the live connection
+                if (existing.State is not (PinholeConnectionState.Dead or PinholeConnectionState.Closed))
+                {
+                    return existing; // idempotent dials (and in-flight dials) return the live connection
+                }
+
+                // A dead husk from an earlier attempt: remove it (only if still that husk)
+                // and loop to install ours — losing a race simply retries.
+                if (!_conns.TryRemove(new KeyValuePair<ulong, ConnState>(cs.PeerId, existing)))
+                {
+                    continue;
+                }
+
+                Transition(existing, PinholeConnectionState.Closed);
+                existing.Dead.Cancel();
             }
 
-            husk = existing; // a dead husk from an earlier attempt: replaced below
-            _conns[cs.PeerId] = c;
-            c.PeerCandidates.AddRange(cs.Candidates);
-        }
-
-        if (husk is not null)
-        {
-            Transition(husk, PinholeConnectionState.Closed);
-            husk.Dead.Cancel();
+            if (_conns.TryAdd(cs.PeerId, c))
+            {
+                break;
+            }
         }
 
         if (cs.Candidates.Any(x => x.Kind == CandidateKind.Relay))
@@ -824,19 +829,19 @@ internal sealed class NodeEngine : IDisposable
         c.Buffer = CreateBuffer();
         c.PuncFrame = BuildPunc(c.Token);
         c.Public = new PinholeConnection(this, c);
-        lock (_gate)
+        // Two PUNCs raced: the first entry wins, the second becomes nothing.
+        if (!_conns.TryAdd(peerId, c))
         {
-            if (_conns.TryGetValue(peerId, out ConnState? first))
-            {
-                return first; // two PUNCs raced; keep the first
-            }
+            return _conns.TryGetValue(peerId, out ConnState? first) ? first : null;
+        }
 
-            if (_conns.Count >= MaxConnections)
-            {
-                return null; // stranger flood: refuse to materialize more state
-            }
-
-            _conns[peerId] = c;
+        if (_conns.Count > MaxConnections)
+        {
+            // Stranger flood: refuse to materialize more state. The tiny race window with a
+            // concurrent dial is fine — applications dialing peers themselves are not the
+            // population this bound protects against.
+            _conns.TryRemove(new KeyValuePair<ulong, ConnState>(peerId, c));
+            return null;
         }
 
         if (arrival.ViaRelay)
@@ -854,15 +859,9 @@ internal sealed class NodeEngine : IDisposable
 
     public async Task CloseAsync(ConnState c)
     {
-        lock (_gate)
-        {
-            // Identity check: a concurrent re-dial may have replaced this entry, and the
-            // loser's close must not tear down the winner's live connection.
-            if (_conns.TryGetValue(c.PeerId, out ConnState? registered) && registered == c)
-            {
-                _conns.Remove(c.PeerId);
-            }
-        }
+        // Identity check: a concurrent re-dial may have replaced this entry, and the
+        // loser's close must not tear down the winner's live connection.
+        _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
 
         Span<byte> bye = stackalloc byte[HeaderSize + 4];
         WriteHeader(bye, FrameType.Bye);
@@ -1186,15 +1185,9 @@ internal sealed class NodeEngine : IDisposable
             return false;
         }
 
-        for (int i = 0; i < left.Size; i++)
-        {
-            if (left[i] != right[i])
-            {
-                return false;
-            }
-        }
-
-        return true;
+        // Vectorized over the public buffer: a per-byte indexer loop here was the top
+        // managed cost on the receive thread once the allocation fix landed.
+        return left.Buffer.Span[..left.Size].SequenceEqual(right.Buffer.Span[..right.Size]);
     }
 
     // ------------------------------------------------------------------ sending
@@ -1223,7 +1216,10 @@ internal sealed class NodeEngine : IDisposable
             RouteFrame(c, frame);
             Interlocked.Increment(ref c.Sent);
             Interlocked.Add(ref c.BytesSent, payload.Length);
-            Interlocked.Exchange(ref c.ConsecutiveSendFailures, 0);
+            if (Volatile.Read(ref c.ConsecutiveSendFailures) != 0)
+            {
+                Interlocked.Exchange(ref c.ConsecutiveSendFailures, 0);
+            }
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
@@ -1286,24 +1282,14 @@ internal sealed class NodeEngine : IDisposable
 
     private void SendToWire(IPEndPoint ep, ReadOnlySpan<byte> frame)
     {
-        Socket udp;
-        lock (_gate)
-        {
-            udp = _udp;
-        }
-
-        udp.SendTo(frame, SocketFlags.None, ToWire(ep));
+        // Volatile read, no lock: this runs once per sent frame, and the rebind that swaps
+        // the socket is rare enough to pay for itself with a caught send error.
+        _udp.SendTo(frame, SocketFlags.None, ToWire(ep));
     }
 
     private void SendToWire(SocketAddress sa, ReadOnlySpan<byte> frame)
     {
-        Socket udp;
-        lock (_gate)
-        {
-            udp = _udp;
-        }
-
-        udp.SendTo(frame, SocketFlags.None, sa);
+        _udp.SendTo(frame, SocketFlags.None, sa);
     }
 
     private void SendViaRelayTo(ReadOnlySpan<byte> frame, IPEndPoint peer)
@@ -1339,6 +1325,9 @@ internal sealed class NodeEngine : IDisposable
     private void RecvLoop()
     {
         byte[] buf = new byte[RecvBufferSize];
+        // One scratch address, reused for every receive: the recvmsg writes into it, the
+        // frame handlers only read it, and the engine clones it exactly when a connection
+        // adopts the endpoint as its own (a per-datagram copy was 8% of the receive thread).
         var remote = new SocketAddress(AddressFamily.InterNetworkV6);
         while (!_shutdown.IsCancellationRequested)
         {
@@ -1367,15 +1356,9 @@ internal sealed class NodeEngine : IDisposable
 
             if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Bye && n >= HeaderSize)
             {
-                ulong sender = BitConverter.ToUInt64(buf, 1);
-                if (Lookup(sender) is { BlackholeDirect: true })
-                {
-                    continue; // test hook: the direct path to this peer is a black hole
-                }
-
                 try
                 {
-                    Dispatch(buf, n, new Arrival(Clone(remote)));
+                    Dispatch(buf, n, new Arrival(remote));
                 }
                 catch (Exception)
                 {
@@ -1431,6 +1414,11 @@ internal sealed class NodeEngine : IDisposable
         FrameType type = (FrameType)buf[0];
         ReadOnlySpan<byte> frame = buf.AsSpan(0, n);
         ConnState? c = Lookup(BitConverter.ToUInt64(buf, 1));
+        if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
+        {
+            return; // test hook: the direct path to this peer is a black hole; relayed frames still pass
+        }
+
         if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
         {
             TraceLine($"recv {type} from {BitConverter.ToUInt64(buf, 1):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
@@ -1476,11 +1464,9 @@ internal sealed class NodeEngine : IDisposable
                 OnAnnounce(c, frame, arrival);
                 break;
             case FrameType.Bye:
-                lock (_gate)
-                {
-                    _conns.Remove(c.PeerId);
-                }
-
+                // Remove only this connection's entry: a Bye from a replaced husk must not
+                // tear down the re-dial winner registered under the same peer ID.
+                _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
                 Transition(c, PinholeConnectionState.Closed);
                 c.Dead.Cancel();
                 break;
@@ -1862,9 +1848,21 @@ internal sealed class NodeEngine : IDisposable
                 return; // test hook: this direct path is dead; nothing can confirm it
             }
 
-            TracePath(c, source);
-            c.DirectRemote = source;
-            c.DirectRemoteEp = ToEndpoint(source);
+            if (SameEndPoint(c.DirectRemote, source))
+            {
+                // Fast path, taken for every ordinary datagram: the endpoint is already the
+                // connection's truth, so the frame only refreshes direct-path activity.
+                Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
+                return;
+            }
+
+            // The receive loop reuses its scratch SocketAddress; an adopted endpoint must be
+            // private to the connection. Cloning only on change keeps the per-datagram
+            // receive path allocation-free while endpoint churn still pays one copy.
+            SocketAddress adopted = Clone(source);
+            TracePath(c, adopted);
+            c.DirectRemote = adopted;
+            c.DirectRemoteEp = ToEndpoint(adopted);
             Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
             if (c.State != PinholeConnectionState.Open)
             {

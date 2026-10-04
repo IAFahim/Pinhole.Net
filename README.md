@@ -370,7 +370,7 @@ invisible. Late joins don't disturb existing pairs.
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the direct path, no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
@@ -388,6 +388,12 @@ cd Pinhole.Net
 dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo, nothing native
 dotnet run --project samples/Pinhole.Bench -c Release   # throughput/allocation canary (offline)
 ```
+
+The bench prints two numbers: throughput in datagrams per second with the *sending
+thread's* allocation cost per datagram (the zero-allocation contract for `Send`), and a
+second line with *whole-process* allocations per datagram — the receive path and any GC
+work included, so neither direction can quietly regress. The CI canary gates on the
+throughput floor and the sender-side zero.
 
 ## Status — 1.0
 
