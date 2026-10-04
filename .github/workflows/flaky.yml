@@ -1,0 +1,64 @@
+name: Flake hunter
+
+# iroh's flaky policy, adapted: required CI never retries — a flake there is a bug.
+# Instead this scheduled job hunts flakes when nobody is waiting: three differently-
+# shaped runs per OS (default parallelism, fully sequential, and a fresh-process
+# repeat), with every failing test collected into the job summary. A test that only
+# fails here is a quarantine candidate ([Trait("Category", "Flaky")] + a filter in
+# ci.yml) until it is fixed — never silently retried away.
+
+on:
+  schedule:
+    - cron: '30 4 * * *' # 04:30 UTC daily, like iroh's Flaky CI
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hunt:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build once
+        run: dotnet build tests/Pinhole.Tests -c Release
+
+      # Each run continues on error; the verdict comes from the summary step below so
+      # one flaky test cannot hide a different one that fails in another shape.
+      - name: Run 1 — default parallelism
+        continue-on-error: true
+        run: dotnet test tests/Pinhole.Tests -c Release --no-build > run1.log 2>&1 || true
+      - name: Run 2 — sequential (ordering flakes)
+        continue-on-error: true
+        run: dotnet test tests/Pinhole.Tests -c Release --no-build -- xUnit.MaxParallelThreads=1 > run2.log 2>&1 || true
+      - name: Run 3 — fresh process repeat
+        continue-on-error: true
+        run: dotnet test tests/Pinhole.Tests -c Release --no-build > run3.log 2>&1 || true
+
+      - name: Collect failures into the summary
+        run: |
+          {
+            echo "## Flake hunt — ${{ matrix.os }}"
+            echo '```'
+            grep -hE "^  Failed " run1.log run2.log run3.log | sort -u || echo "no failures in any of the three runs"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        run: |
+          if grep -hE "^  Failed " run1.log run2.log run3.log > /dev/null; then
+            echo "flaky failures found on ${{ matrix.os }}" >&2
+            exit 1
+          fi
+          echo "clean: three runs, zero failures on ${{ matrix.os }}"

@@ -195,7 +195,9 @@ internal static class Manifest
             var reader = new Reader(data);
             string name = Encoding.UTF8.GetString(reader.ReadBytes(reader.ReadU16()));
             uint count = reader.ReadU32();
-            var entries = new List<Entry>((int)count);
+            // The count is hostile input: pre-allocate a sliver and let the list grow —
+            // the loop terminates on the first truncated entry regardless of the claim.
+            var entries = new List<Entry>((int)Math.Min(count, 64));
             for (int i = 0; i < count; i++)
             {
                 string path = Encoding.UTF8.GetString(reader.ReadBytes(reader.ReadU16()));

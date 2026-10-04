@@ -154,6 +154,104 @@ public sealed class BlobsTests
     }
 
     [Fact]
+    public async Task FailedDownload_DoesNotPoisonTheServer_OrTheNextAttempt()
+    {
+        // The iroh-net-bindings "process stays healthy" pattern: a failed transfer must
+        // leave both sides fully usable — the server serves the next stranger, and a
+        // retry from the same downloader resumes past the checkpoint instead of starting
+        // over poisoned by the aborted attempt's part state.
+        string dir = TempDir();
+        try
+        {
+            byte[] data = TestDispose.Pattern(300_000, 0x5A);
+            string src = Path.Combine(dir, "poison.bin");
+            await File.WriteAllBytesAsync(src, data);
+
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+            var droppedOnce = new HashSet<long>();
+            server.CorruptChunk = (idx, bytes) =>
+            {
+                if (idx == 10 && droppedOnce.Add(idx))
+                {
+                    bytes[0] ^= 0xFF; // lie exactly once, then serve honestly
+                }
+            };
+
+            string outDir = Path.Combine(dir, "out");
+            await Assert.ThrowsAsync<InvalidDataException>(() => BlobClient.DownloadAsync(server.Ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() })).WaitAsync(Timeout);
+            Assert.True(server.ConnectionsAccepted >= 1, "the failed attempt did reach the server");
+
+            // A fresh downloader (new connection, new node) completes over the same server.
+            BlobDownloadResult fresh = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "fresh"),
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "fresh", "poison.bin")));
+
+            // And the ORIGINAL destination finishes too: its part state is honest (the
+            // corrupt chunk never passed CV verification, so it was never applied) and
+            // the second pass re-requests chunk 10 from a now-honest provider.
+            BlobDownloadResult retried = await BlobClient.DownloadAsync(server.Ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+            Assert.True(retried.Resumed, "the retry continued from the aborted attempt's checkpoint");
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "poison.bin")));
+            Assert.False(Directory.Exists(Path.Combine(outDir, "poison.bin") + ".pinhole-part"));
+            _ = fresh;
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProviderDisposedMidTransfer_FailsFastAndHonestly()
+    {
+        // The sendme Ctrl-C contract: when the provider goes away, the downloader must
+        // surface a real error quickly — not spin its re-request machinery for the full
+        // stall budget. The pump notices the closed connection and the run loop
+        // converts quiet into an exception.
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "big.bin");
+            await File.WriteAllBytesAsync(src, TestDispose.Pattern(2_000_000, 0xC3));
+
+            var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+            server.DropChunk = idx => idx >= 4; // head flows, tail never arrives: the transfer cannot finish
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var failed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
+                        options: new BlobDownloadOptions { NodeOptions = Offline() });
+                    failed.TrySetResult(null!);
+                }
+                catch (Exception ex)
+                {
+                    failed.TrySetResult(ex);
+                }
+            });
+
+            // Wait until the transfer is actually in flight, then pull the provider's plug.
+            await TestPoll.UntilAsync(Timeout, () => server.ConnectionsAccepted >= 1 && server.ChunksServed >= 4);
+            await TestDispose.BoundedAsync(server, "blob server mid-transfer");
+            Exception? ex = await failed.Task.WaitAsync(TestBudget.Scenario);
+            watch.Stop();
+
+            Assert.NotNull(ex);
+            Assert.False(ex is TimeoutException, $"the downloader only noticed the dead provider via the 30s stall: {ex.Message}");
+            Assert.True(watch.Elapsed < TestBudget.Scenario, $"failure took {watch.Elapsed.TotalSeconds:0.0}s to surface");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task InterruptedDownload_ResumesFromTheCheckpoint()
     {
         string dir = TempDir();

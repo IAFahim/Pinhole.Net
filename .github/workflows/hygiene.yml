@@ -1,0 +1,44 @@
+name: Hygiene
+
+# The iroh quality gates that cost nothing to run: warnings are errors everywhere
+# (their RUSTFLAGS=-Dwarnings equivalent), and the dependency tree must be free of
+# known vulnerabilities (their cargo-deny equivalent, via the NuGet audit). This
+# workflow is additive — ci.yml stays the required gate; make these jobs required
+# once the tree has stayed clean on them for a while.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '20 5 * * 1' # weekly Monday — new CVEs land without any PR
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  warnings-are-errors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build the whole solution with warnings as errors
+        run: dotnet build Pinhole.Net.slnx -c Release -warnaserror
+
+  vulnerable-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore (audits run on restore in .NET 10)
+        run: dotnet restore Pinhole.Net.slnx
+      - name: List vulnerable packages (transitive included)
+        # Exits non-zero when anything vulnerable is found — the tree stays at zero.
+        run: dotnet list Pinhole.Net.slnx package --vulnerable --include-transitive
