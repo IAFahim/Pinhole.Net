@@ -5,7 +5,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
-		<Description>Connection library for .NET — the bottom layer, nothing else: NAT-traversal connections over free STUN and free TURN relays, connection strings, open-forever roaming. One UDP socket, zero allocations on the hot path, no native dependencies</Description>
+		<Description>Connection library for .NET: NAT traversal over free STUN and public iroh HTTPS relays, optional TURN, connection strings, and roaming. One UDP socket, zero allocations on the direct path, no native dependencies</Description>
 		<PackageId>Pinhole.Net</PackageId>
 		<IsPackable>true</IsPackable>
 		<IsAotCompatible>true</IsAotCompatible>
@@ -16,6 +16,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
 		<ProjectReference Include="..\Pinhole.Turn\Pinhole.Turn.csproj" />
 		<ProjectReference Include="..\Pinhole.Providers\Pinhole.Providers.csproj" />
 	</ItemGroup>

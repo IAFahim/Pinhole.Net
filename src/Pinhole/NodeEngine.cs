@@ -53,6 +53,9 @@ internal sealed class ConnState
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
     public int PunchGeneration;
     public int PermitInFlight;               // single-flight guard for TURN permission round trips
+    public IrohRelay? Iroh;
+    public byte[]? IrohPeerKey;
+    public bool IrohConfirmed;
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
 
     public readonly TaskCompletionSource Connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -97,6 +100,8 @@ internal sealed class NodeEngine : IDisposable
     private readonly Dictionary<ulong, ConnState> _conns = new();
     private readonly Channel<ConnState>? _incoming;
     private readonly List<RelaySlot> _relays = new();
+    private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
+    private readonly RelayIdentity? _relayIdentity;
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
@@ -109,7 +114,9 @@ internal sealed class NodeEngine : IDisposable
 
     public NodeEngine(PinholeOptions options)
     {
-        _peerId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        if ((options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
+            _relayIdentity = new RelayIdentity();
+        _peerId = _relayIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
     }
@@ -150,7 +157,7 @@ internal sealed class NodeEngine : IDisposable
 
         try
         {
-            await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct)).WaitAsync(_options.BindProbeBudget, ct).ConfigureAwait(false);
+            await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).WaitAsync(_options.BindProbeBudget, ct).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -217,7 +224,7 @@ internal sealed class NodeEngine : IDisposable
     {
         lock (_gate)
         {
-            return _localCandidates.ToArray();
+            return _localCandidates.Take(ConnectionString.MaxCandidates).ToArray();
         }
     }
 
@@ -252,6 +259,13 @@ internal sealed class NodeEngine : IDisposable
                 {
                     _localCandidates.Add(new PinholeCandidate(CandidateKind.Relay, relayed, client.Server, client.Username, client.Credential));
                 }
+            }
+
+            if (_relayIdentity is not null)
+            {
+                foreach (IrohRelay relay in _irohRelays.Values.Where(r => r.IsAlive))
+                    _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
+                        new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _relayIdentity.PublicKey));
             }
         }
     }
@@ -458,6 +472,78 @@ internal sealed class NodeEngine : IDisposable
     }
 
     // ------------------------------------------------------------------ relays
+
+    private IrohRelay? IrohRelayFor(Uri url)
+    {
+        if (_relayIdentity is null || _disposed) return null;
+        IrohRelay relay;
+        lock (_gate)
+        {
+            if (_irohRelays.TryGetValue(url, out relay!)) return relay;
+            if (_irohRelays.Count >= ConnectionString.MaxCandidates) return null;
+            relay = new IrohRelay(url, _relayIdentity);
+            relay.Received += HandleIrohData;
+            relay.Changed += IrohChanged;
+            _irohRelays.Add(url, relay);
+        }
+        _ = relay.StartAsync(_shutdown.Token);
+        return relay;
+    }
+
+    private async Task EnsureIrohRelaysAsync(CancellationToken ct)
+    {
+        var clients = (_options.IrohRelayUrls ?? _options.ResolvedIrohRelays)
+            .Select(IrohRelayFor).OfType<IrohRelay>().ToArray();
+        if (clients.Length > 0)
+            await Task.WhenAny(clients.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
+    }
+
+    private void IrohChanged(IrohRelay relay)
+    {
+        if (_disposed) return;
+        RefreshLocalCandidates();
+        foreach (ConnState c in ConnectionsSnapshot())
+        {
+            try
+            {
+                if (c.State == PinholeConnectionState.Closed) continue;
+                if (!relay.IsAlive && c.Path == PathKind.Relay && c.Iroh == relay)
+                    NotifyPathSuspect(c);
+                if (relay.IsAlive)
+                {
+                    AnnounceTo(c);
+                    PinholeCandidate[] targets;
+                    lock (_gate) targets = c.PeerCandidates.ToArray();
+                    foreach (PinholeCandidate target in targets.Where(t => t.Kind == CandidateKind.IrohRelay && t.RelayUrl == relay.Url))
+                        SendViaIroh(c.PuncFrame, target);
+                    KickPunch(c);
+                }
+            }
+            catch (Exception)
+            {
+                // A throwing state-change handler must not stop the shared relay or its other peers.
+            }
+        }
+    }
+
+    private void HandleIrohData(IrohRelay relay, byte[] source, byte[] frame)
+    {
+        if (_disposed || frame.Length < HeaderSize + 4
+            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Bye) return;
+        ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
+        if (sender != BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1))) return;
+        try { Dispatch(frame, frame.Length, new Arrival(relay, source)); }
+        catch (Exception)
+        {
+            // Match the UDP receive loop: one malformed frame or throwing handler costs one datagram.
+        }
+    }
+
+    private void SendViaIroh(ReadOnlySpan<byte> frame, PinholeCandidate candidate)
+    {
+        if (candidate.RelayUrl is { } url && candidate.RelayKey is { Length: 32 } key)
+            IrohRelayFor(url)?.Send(key, frame);
+    }
 
     // Relay client access MUST go through materialized snapshots: an iterator holding
     // _gate across a yield would keep the lock alive over the caller's awaits (permission
@@ -674,7 +760,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (arrival.ViaRelay)
         {
-            RelayPathConfirmed(c, arrival.Relay!);
+            RelayPathConfirmed(c, arrival);
         }
         else
         {
@@ -769,14 +855,18 @@ internal sealed class NodeEngine : IDisposable
                         return;
                     }
 
-                    if (c.SymmetricHint && candidate.Kind != CandidateKind.Relay)
+                    if (c.SymmetricHint && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay))
                     {
                         continue;
                     }
 
                     try
                     {
-                        if (candidate.Kind == CandidateKind.Relay)
+                        if (candidate.Kind == CandidateKind.IrohRelay)
+                        {
+                            SendViaIroh(c.PuncFrame, candidate);
+                        }
+                        else if (candidate.Kind == CandidateKind.Relay)
                         {
                             SendViaRelayTo(c.PuncFrame, candidate.Address);
                         }
@@ -872,6 +962,12 @@ internal sealed class NodeEngine : IDisposable
         if (c.Path == PathKind.Direct && c.DirectRemote is { } direct)
         {
             SendToWire(direct, frame);
+            return;
+        }
+
+        if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
+        {
+            if (!iro.Send(key, frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
             return;
         }
 
@@ -1001,6 +1097,8 @@ internal sealed class NodeEngine : IDisposable
         public readonly bool ViaRelay;
         public readonly SocketAddress? Direct;
         public readonly IPEndPoint? Relay;
+        public readonly IrohRelay? Iroh;
+        public readonly byte[]? IrohPeerKey;
 
         public Arrival(SocketAddress direct)
         {
@@ -1014,6 +1112,13 @@ internal sealed class NodeEngine : IDisposable
             ViaRelay = true;
             Direct = null;
             Relay = relay;
+        }
+
+        public Arrival(IrohRelay relay, byte[] key)
+        {
+            ViaRelay = true;
+            Iroh = relay;
+            IrohPeerKey = key;
         }
     }
 
@@ -1116,7 +1221,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (arrival.ViaRelay)
         {
-            RelayPathConfirmed(c, arrival.Relay!);
+            RelayPathConfirmed(c, arrival);
         }
         else
         {
@@ -1147,11 +1252,17 @@ internal sealed class NodeEngine : IDisposable
 
         if (arrival.ViaRelay)
         {
-            RelayPathConfirmed(c, arrival.Relay!);
+            RelayPathConfirmed(c, arrival);
         }
         else
         {
             DirectPathConfirmed(c, arrival.Direct!);
+        }
+
+        if (!c.Announced)
+        {
+            c.Announced = true;
+            AnnounceTo(c);
         }
     }
 
@@ -1166,7 +1277,7 @@ internal sealed class NodeEngine : IDisposable
         // the newest truth about where the peer lives (last-wins by peer ID — roaming).
         if (arrival.ViaRelay)
         {
-            RelayPathConfirmed(c, arrival.Relay!);
+            RelayPathConfirmed(c, arrival);
         }
         else
         {
@@ -1257,7 +1368,11 @@ internal sealed class NodeEngine : IDisposable
     {
         try
         {
-            if (arrival.ViaRelay)
+            if (arrival.Iroh is { } iro && arrival.IrohPeerKey is { } key)
+            {
+                iro.Send(key, frame);
+            }
+            else if (arrival.ViaRelay)
             {
                 SendViaRelayTo(frame, arrival.Relay!);
             }
@@ -1313,7 +1428,11 @@ internal sealed class NodeEngine : IDisposable
 
             foreach (PinholeCandidate target in targets)
             {
-                if (target.Kind == CandidateKind.Relay)
+                if (target.Kind == CandidateKind.IrohRelay)
+                {
+                    SendViaIroh(frame, target);
+                }
+                else if (target.Kind == CandidateKind.Relay)
                 {
                     try
                     {
@@ -1350,6 +1469,8 @@ internal sealed class NodeEngine : IDisposable
             return new Arrival(sa);
         }
 
+        if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
+            return new Arrival(iro, key);
         return c.RelayRemote is { } ep ? new Arrival(ep) : default;
     }
 
@@ -1421,6 +1542,34 @@ internal sealed class NodeEngine : IDisposable
                 c.StateChanged?.Invoke(c.State);
             }
         }
+    }
+
+    private void RelayPathConfirmed(ConnState c, in Arrival arrival)
+    {
+        if (arrival.Iroh is not { } relay)
+        {
+            RelayPathConfirmed(c, arrival.Relay!);
+            return;
+        }
+
+        bool kick = false;
+        lock (c.Gate)
+        {
+            if (c.State == PinholeConnectionState.Closed) return;
+            c.Iroh = relay;
+            c.IrohPeerKey = arrival.IrohPeerKey;
+            c.IrohConfirmed = true;
+            if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+            {
+                c.State = PinholeConnectionState.Degraded;
+                c.Path = PathKind.Relay;
+                c.PathSince = DateTimeOffset.UtcNow;
+                c.Connected.TrySetResult();
+                c.StateChanged?.Invoke(c.State);
+                kick = true;
+            }
+        }
+        if (kick) KickPunch(c);
     }
 
     private void RelayPathConfirmed(ConnState c, IPEndPoint peerRelayed)
@@ -1507,7 +1656,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (c.State == PinholeConnectionState.Open)
             {
-                if (c.RelayRemote is not null && c.RelayReady)
+                if ((c.Iroh is { IsAlive: true } && c.IrohConfirmed) || (c.RelayRemote is not null && c.RelayReady))
                 {
                     c.State = PinholeConnectionState.Degraded;
                     c.Path = PathKind.Relay;
@@ -1518,6 +1667,12 @@ internal sealed class NodeEngine : IDisposable
                     c.Path = PathKind.None;
                 }
 
+                c.StateChanged?.Invoke(c.State);
+            }
+            else if (c.Iroh is not { IsAlive: true } && !(c.RelayRemote is not null && c.RelayReady))
+            {
+                c.State = PinholeConnectionState.Punching;
+                c.Path = PathKind.None;
                 c.StateChanged?.Invoke(c.State);
             }
         }
@@ -1639,7 +1794,7 @@ internal sealed class NodeEngine : IDisposable
             _ = client.DisposeAsync();
         }
 
-        await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct)).ConfigureAwait(false);
+        await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
         ReannounceAndRepunch();
     }
@@ -1659,8 +1814,9 @@ internal sealed class NodeEngine : IDisposable
                 c.DirectRemoteEp = null;
                 if (c.State == PinholeConnectionState.Open)
                 {
-                    c.State = PinholeConnectionState.Punching;
-                    c.Path = PathKind.None;
+                    bool relayed = c.Iroh is { IsAlive: true } && c.IrohConfirmed;
+                    c.State = relayed ? PinholeConnectionState.Degraded : PinholeConnectionState.Punching;
+                    c.Path = relayed ? PathKind.Relay : PathKind.None;
                     c.StateChanged?.Invoke(c.State);
                 }
             }
@@ -1717,6 +1873,7 @@ internal sealed class NodeEngine : IDisposable
         lock (_gate)
         {
             _udp.Dispose();
+            foreach (IrohRelay relay in _irohRelays.Values) relay.Dispose();
             foreach (RelaySlot slot in _relays)
             {
                 if (slot.Client is { } client)

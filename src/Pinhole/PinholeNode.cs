@@ -21,8 +21,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     }
 
     /// <summary>Binds the UDP socket, probes the configured free STUN servers for the
-    /// reflexive candidate, and allocates the configured free TURN relays as the standing
-    /// fallback. Every stage is best-effort: unreachable infrastructure costs candidates,
+    /// reflexive candidate, connects to the configured iroh HTTPS relays, and allocates any
+    /// configured TURN relays as additional fallback paths. Unreachable infrastructure costs candidates,
     /// never the bind.</summary>
     public static async Task<PinholeNode> BindAsync(PinholeOptions? options = null, CancellationToken ct = default)
     {

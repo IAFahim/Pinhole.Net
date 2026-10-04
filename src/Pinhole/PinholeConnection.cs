@@ -33,13 +33,15 @@ public enum PathKind : byte
     /// <summary>Peer-to-peer across the public internet through the punched hole.</summary>
     Direct = 1,
 
-    /// <summary>Through a TURN relay.</summary>
+    /// <summary>Through an iroh HTTPS relay or a TURN relay.</summary>
     Relay = 2,
 }
 
 /// <summary>Snapshot of the current path.</summary>
 public sealed record PinholePath(PathKind Kind, IPEndPoint? Remote, DateTimeOffset Since)
 {
+    /// <summary>The HTTPS relay URL when the path uses an iroh relay.</summary>
+    public Uri? RelayUrl { get; init; }
     /// <summary>The "no path" sentinel: null remote, timestamp at the Unix epoch.</summary>
     public static readonly PinholePath None = new(PathKind.None, null, DateTimeOffset.UnixEpoch);
 }
@@ -99,7 +101,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         remove => _c.Received -= value;
     }
 
-    /// <summary>Sends one unreliable datagram on the current path. Zero-allocation hot path;
+    /// <summary>Sends one unreliable datagram on the current path. The direct UDP path allocates nothing;
     /// empty payloads and payloads above <see cref="MaxPayload"/> throw before touching the
     /// network (a zero-length datagram is undeliverable by definition).</summary>
     public void Send(ReadOnlySpan<byte> payload) => _engine.Send(_c, payload);
@@ -142,6 +144,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
                 return _c.Path switch
                 {
                     PathKind.Direct when _c.DirectRemoteEp is { } ep => new PinholePath(PathKind.Direct, ep, _c.PathSince),
+                    PathKind.Relay when _c.Iroh is { IsAlive: true } relay && _c.IrohConfirmed => new PinholePath(PathKind.Relay, null, _c.PathSince) { RelayUrl = relay.Url },
                     PathKind.Relay when _c.RelayRemote is { } ep => new PinholePath(PathKind.Relay, ep, _c.PathSince),
                     _ => PinholePath.None,
                 };

@@ -16,7 +16,7 @@
 // except the repo they were spawned from. The connection string each node announces is the
 // real discovery artifact: peer ID + direct/reflexive candidates + free-relay fallback.
 // MESH_FORCE_RELAY=1 strips the direct candidates from announced tickets, forcing every
-// connection onto the TURN relay path.
+// introductions onto an iroh HTTPS or TURN relay path.
 
 using System.Diagnostics;
 using System.Globalization;
@@ -128,7 +128,7 @@ internal static class MeshNode
     }
 
     // MESH_FORCE_RELAY=1 strips direct candidates from announced tickets: peers can then
-    // only meet through the TURN relay — the CI canary uses this to exercise relay paths.
+    // only meet through a relay — the CI canary uses this to exercise relay introductions.
     private static string TicketOf(PinholeNode node)
     {
         if (Environment.GetEnvironmentVariable("MESH_FORCE_RELAY") != "1")
@@ -137,7 +137,7 @@ internal static class MeshNode
         }
 
         ConnectionString full = ConnectionString.Parse(node.ConnectionString);
-        var relayOnly = full.Candidates.Where(c => c.Kind == CandidateKind.Relay).ToList();
+        var relayOnly = full.Candidates.Where(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay).ToList();
         return new ConnectionString(full.PeerId, relayOnly, full.NatHint).ToString();
     }
 

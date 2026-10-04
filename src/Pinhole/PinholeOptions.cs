@@ -7,8 +7,8 @@ namespace Pinhole;
 public sealed record TurnServerConfig(IPEndPoint Server, string Username, string Credential);
 
 /// <summary>Options for <see cref="PinholeNode.BindAsync(PinholeOptions?, CancellationToken)"/>.
-/// Defaults use the free public infrastructure: STUN probes against the free providers and a
-/// TURN allocation on the free OpenRelay server. Pass empty lists to disable a stage.</summary>
+/// Parameterless binding uses free STUN providers and public iroh HTTPS relays.
+/// Use DefaultAsync and a with-expression to customize those defaults.</summary>
 public sealed record PinholeOptions
 {
     /// <summary>Local UDP endpoint to bind. Default: any address, OS-assigned port.</summary>
@@ -18,9 +18,14 @@ public sealed record PinholeOptions
     /// resolves the free provider catalog; an empty list disables the reflexive stage.</summary>
     public IReadOnlyList<IPEndPoint>? StunServers { get; init; }
 
-    /// <summary>TURN relays allocated as the standing fallback path. Null (default) uses the
-    /// free OpenRelay preset; an empty list disables the relay stage (direct-only node).</summary>
+    /// <summary>Optional TURN relays allocated as additional fallback paths. Supply credentials
+    /// issued by the operator. The parameterless defaults use iroh relays instead.</summary>
     public IReadOnlyList<TurnServerConfig>? Relays { get; init; }
+
+    /// <summary>Iroh HTTPS relay URLs used for introductions and datagram fallback.
+    /// Parameterless BindAsync uses the public n0 relays; an empty list disables them.
+    /// Pass explicit URLs for a privately hosted iroh relay.</summary>
+    public IReadOnlyList<Uri>? IrohRelayUrls { get; init; }
 
     /// <summary>Accept connections dialed by unknown peers (default true). When false, only
     /// peers this node dials itself can establish a connection. Strangers are bounded: a
@@ -44,30 +49,27 @@ public sealed record PinholeOptions
 
     internal IReadOnlyList<IPEndPoint> ResolvedStun { get; init; } = Array.Empty<IPEndPoint>();
     internal IReadOnlyList<TurnServerConfig> ResolvedRelays { get; init; } = Array.Empty<TurnServerConfig>();
+    internal IReadOnlyList<Uri> ResolvedIrohRelays { get; init; } = Array.Empty<Uri>();
 
-    /// <summary>Default options: the free STUN catalog for the reflexive candidate and the
-    /// free OpenRelay TURN server as the fallback relay. Every stage is best-effort — DNS or
-    /// allocation failures simply contribute fewer candidates.</summary>
+    /// <summary>Default options: free STUN for reflexive candidates and the public n0 iroh
+    /// HTTPS relays for introductions and fallback. No TURN account or native library is needed.
+    /// Unreachable infrastructure simply contributes fewer candidates.</summary>
     public static async Task<PinholeOptions> DefaultAsync(CancellationToken ct = default)
     {
         Task<IPEndPoint[]> stun = TryCall(
             () => Providers.Resolver.FreeStunAsync(ct),
             Array.Empty<IPEndPoint>());
 
-        TurnServerConfig? openRelay = null;
-        try
-        {
-            IPEndPoint ep = await ResolveAsync("openrelay.metered.ca", 80, ct).ConfigureAwait(false);
-            openRelay = new TurnServerConfig(ep, "openrelayproject", "openrelayproject");
-        }
-        catch (Exception ex) when (ex is SocketException or OperationCanceledException)
-        {
-        }
-
         return new PinholeOptions
         {
             ResolvedStun = Dedupe((await stun.ConfigureAwait(false)).Take(8)),
-            ResolvedRelays = openRelay is null ? [] : [openRelay],
+            ResolvedIrohRelays =
+            [
+                new Uri("https://aps1-1.relay.n0.iroh.link/"),
+                new Uri("https://euc1-1.relay.n0.iroh.link/"),
+                new Uri("https://use1-1.relay.n0.iroh.link/"),
+                new Uri("https://usw1-1.relay.n0.iroh.link/"),
+            ],
         };
     }
 
@@ -81,17 +83,6 @@ public sealed record PinholeOptions
         {
             return fallback;
         }
-    }
-
-    private static async Task<IPEndPoint> ResolveAsync(string host, int port, CancellationToken ct)
-    {
-        if (IPAddress.TryParse(host, out IPAddress? ip))
-        {
-            return new IPEndPoint(ip, port);
-        }
-
-        IPAddress[] addrs = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
-        return addrs.Length > 0 ? new IPEndPoint(addrs[0], port) : throw new SocketException((int)SocketError.HostNotFound);
     }
 
     private static IReadOnlyList<IPEndPoint> Dedupe(IEnumerable<IPEndPoint> endpoints)

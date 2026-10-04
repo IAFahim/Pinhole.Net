@@ -4,7 +4,7 @@ A connection library for .NET. The bottom layer — nothing else.
 
 One job: **get a connection between two machines, then keep it open until the app closes it.**
 
-- **All free infrastructure.** Every free STUN server and every free relay — Google, Cloudflare, OpenRelay, any standard TURN server. Consumed as protocols from pure C#, never as wrapped libraries.
+- **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
 - **Bring your own protocol on top.** UDP, TCP, QUIC, your own — with your own libraries. Pinhole doesn't provide those and never will. It does the hard bottom part only.
@@ -24,10 +24,10 @@ One job: **get a connection between two machines, then keep it open until the ap
 dotnet add package Pinhole.Net
 ```
 
-`Pinhole.Net` pulls in `Pinhole.Turn` (RFC 5766 relay client) and `Pinhole.Providers` (the
-free STUN/TURN catalog) — parameterless `BindAsync()` gets all free infrastructure by
-default. `dotnet test` from a fresh clone needs nothing else: no submodules, no Rust, no
-native toolchain — pure C# end to end.
+`Pinhole.Net` pulls in `Pinhole.Turn` (RFC 5766 relay client), `Pinhole.Providers` (the
+free STUN/TURN catalog), and managed BouncyCastle cryptography. Parameterless `BindAsync()`
+gets the free STUN catalog and public iroh relays by default. `dotnet test` from a fresh
+clone needs no submodules, Rust, or native toolchain — pure C# end to end.
 
 ## The two-PC program
 
@@ -39,7 +39,7 @@ using Pinhole;
 
 // ---------- PC A (listener) ----------
 await using PinholeNode a = await PinholeNode.BindAsync();
-// binds the UDP socket, allocates the free relay as the standing fallback,
+// binds UDP and registers with public iroh HTTPS relays as the standing fallback,
 // probes free STUN (Google/Cloudflare) for the reflexive candidate.
 
 string cs = a.ConnectionString;
@@ -49,7 +49,7 @@ string cs = a.ConnectionString;
 await using PinholeConnection conn = await a.AcceptAsync();
 
 conn.Received += dgram => Console.WriteLine(Encoding.UTF8.GetString(dgram));
-conn.Send("hello from A"u8);          // unreliable datagram, hot path, zero-alloc
+conn.Send("hello from A"u8);          // unreliable datagram, zero-alloc on direct UDP
 await conn.Closed;                    // roaming never fires it
 
 // ---------- PC B (dialer) ----------
@@ -71,10 +71,14 @@ Or run it with no code at all:
 dotnet run --project samples/Pinhole.Tiny                   # machine A
 dotnet run --project samples/Pinhole.Tiny <ticket>          # machine B, anywhere on earth
 
-# The fuller version — RTT display, path states, plus stun/nat/turn probes and bench.
-dotnet run --project samples/Pinhole.Demo -- node           # prints the connection string, listens
-dotnet run --project samples/Pinhole.Demo -- node <string>  # dials it from any machine
+# The basic interactive demo — run the same command on both PCs.
+dotnet run --project samples/Pinhole.Demo
 ```
+
+The demo prints your own connection string first. One person presses Enter to listen;
+the other pastes the listener's string. Type messages after it says `Connected`, or
+`/quit` to exit. Run the updated build on both PCs and share fresh strings so they include
+the new HTTPS relay candidates. A code pasted without the `pinhole1:` prefix is accepted.
 
 ## Usage
 
@@ -110,6 +114,7 @@ conn.StateChanged += state => Console.WriteLine($"{DateTime.Now:T} -> {state}");
 Console.WriteLine(conn.State);            // PinholeConnectionState.Open
 Console.WriteLine(conn.Path.Kind);        // Direct or Relay
 Console.WriteLine(conn.Path.Remote);      // the peer endpoint in use right now
+Console.WriteLine(conn.Path.RelayUrl);    // HTTPS relay URL when using an iroh relay
 Console.WriteLine(conn.Path.Since);       // when this path became the one
 ```
 
@@ -194,20 +199,26 @@ node.SetNatHint(nat switch
 
 ### Configuration
 
-Parameterless `BindAsync()` uses all free infrastructure (free STUN catalog + free
-OpenRelay TURN). Everything is overridable:
+Parameterless `BindAsync()` probes free STUN and connects to n0's public iroh relays over
+HTTPS WebSockets. The managed C# relay client implements iroh's signed challenge and
+datagram framing; BouncyCastle supplies Ed25519 and BLAKE3. Relays introduce peers and
+carry Pinhole datagrams while both sides punch UDP, then remain available for fallback
+and reconnect automatically after a disconnect. This is the iroh relay transport with
+Pinhole's own datagram protocol; it does not implement iroh QUIC or interoperate with Rust
+iroh application endpoints. Pinhole payloads remain unencrypted end to end, as described above.
+
+Everything is overridable:
 
 ```csharp
-var node = await PinholeNode.BindAsync(new PinholeOptions
+PinholeOptions defaults = await PinholeOptions.DefaultAsync();
+var node = await PinholeNode.BindAsync(defaults with
 {
-    // Your own relay instead of (or as well as) the free one:
+    // Optional TURN in addition to the default HTTPS relays:
     Relays = [new TurnServerConfig(
         new IPEndPoint(IPAddress.Parse("203.0.113.10"), 3478), "user", "pass")],
 
-    // Or presets from Pinhole.Providers (DNS-resolved for you):
-    // Relays = (await Providers.TurnServers.OpenRelay.ResolveAsync())
-    //     .Select(ep => new TurnServerConfig(ep, "openrelayproject", "openrelayproject"))
-    //     .ToArray(),
+    // Or replace the public iroh relays with your own:
+    // IrohRelayUrls = [new Uri("https://relay.example.com/")],
 
     StunServers = null,             // null = free catalog; [] = no reflexive stage
     Listen = true,                  // accept strangers dialing your string
@@ -224,6 +235,7 @@ var local = await PinholeNode.BindAsync(new PinholeOptions
 {
     StunServers = [],
     Relays = [],
+    IrohRelayUrls = [],
 });
 ```
 
@@ -264,14 +276,14 @@ invisible. Late joins don't disturb existing pairs.
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net10.0): `PinholeNode`/`PinholeConnection` session API, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the hot path, no native dependencies
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the direct path, no native dependencies
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
-- `samples/Pinhole.Demo` — the README program (`node` chat over connection strings), rendezvous chat, throughput bench, stun/nat/turn probes
+- `samples/Pinhole.Demo` — basic interactive chat: prints your connection string, then listens or dials a pasted string
 - `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
-- `tests/Pinhole.Tests` — loopback xunit suite (45 tests): session API + punch/ping/data, roaming (rebind, degrade, honest death), NAT detection, STUN+TURN against in-process fake servers, rendezvous protocol + bounds
+- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
 
 ## Build & test
 
@@ -279,34 +291,6 @@ invisible. Late joins don't disturb existing pairs.
 git clone https://github.com/IAFahim/Pinhole.Net
 cd Pinhole.Net
 dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo, nothing native
-```
-
-## Tools
-
-```bash
-pinhole-demo stun stun.l.google.com:19302   # -> reflexive addr (verified live)
-pinhole-demo nat                            # -> cone / symmetric / unknown, with advice
-pinhole-demo turn <host:port> <user> <pass> # TURN allocate -> relayed addr, then relay datagrams
-```
-
-`NatDetector` compares what several STUN servers observe of the same socket: one mapping
-everywhere → cone (strangers can punch each other); a mapping per destination → symmetric
-(dial through a relay). Fewer than two answers → `Unknown`, because one mapping proves
-nothing.
-
-## Run it — own rendezvous
-
-```bash
-dotnet run --project src/Pinhole.Rendezvous -- 7777                        # signaling box
-dotnet run --project samples/Pinhole.Demo -- rendezvous 127.0.0.1:7777 aaaa        # listen
-dotnet run --project samples/Pinhole.Demo -- rendezvous 127.0.0.1:7777 bbbb aaaa   # dial
-```
-
-## Bench
-
-```bash
-pinhole-demo bench 100000 64
-# 299k datagrams/s, 0 B/datagram allocated, 0 GCs (loopback)
 ```
 
 ## Status — 1.0
