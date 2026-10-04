@@ -20,6 +20,7 @@ public sealed class AttackTests
     {
         StunServers = [],
         Relays = [],
+        IrohRelayUrls = [],
         Listen = true,
         ConnectTimeout = TimeSpan.FromSeconds(8),
         EnableNetworkWatch = false,
@@ -410,6 +411,7 @@ public sealed class AttackTests
             Bind = new IPEndPoint(IPAddress.Loopback, port),
             StunServers = [],
             Relays = [],
+            IrohRelayUrls = [],
             EnableNetworkWatch = false,
         });
         Assert.Equal(port, node.LocalPort);

@@ -625,10 +625,17 @@ internal sealed class NodeEngine : IDisposable
 
     /// <summary>A stranger's relayed traffic can only be delivered to our allocation if we
     /// permit its source IP. Strangers dial through the free relays, so pre-opening the
-    /// catalog's server IPs makes "connect from a connection string alone" work.</summary>
+    /// catalog's server IPs makes "connect from a connection string alone" work. With no
+    /// TURN relay configured there is no allocation to permit anything on, and the catalog
+    /// is never looked up.</summary>
     private async Task PermitCatalogRelaysAsync(CancellationToken ct)
     {
-        IPEndPoint[] servers = await Providers.Resolver.FreeRelayServersAsync(ct).ConfigureAwait(false);
+        if ((_options.Relays ?? _options.ResolvedRelays).Count == 0)
+        {
+            return;
+        }
+
+        IPEndPoint[] servers = await (_options.RelayCatalog ?? Providers.Resolver.FreeRelayServersAsync)(ct).ConfigureAwait(false);
         foreach (TurnClient client in AliveRelayClients())
         {
             foreach (IPEndPoint server in servers)

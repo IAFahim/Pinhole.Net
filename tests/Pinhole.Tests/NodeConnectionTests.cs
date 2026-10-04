@@ -65,6 +65,7 @@ public sealed class NodeConnectionTests
     {
         StunServers = [],
         Relays = relays ?? [],
+        IrohRelayUrls = [],
         Listen = listen,
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
         BindProbeBudget = TimeSpan.FromSeconds(5),

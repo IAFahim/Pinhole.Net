@@ -24,12 +24,14 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>Binds the UDP socket, probes the configured free STUN servers for the
     /// reflexive candidate, connects to the configured iroh HTTPS relays, and allocates any
-    /// configured TURN relays as additional fallback paths. Unreachable infrastructure costs candidates,
-    /// never the bind.</summary>
+    /// configured TURN relays as additional fallback paths. Infrastructure left unspecified
+    /// in <paramref name="options"/> gets the free defaults — customizing one setting never
+    /// drops the rest; explicit empty lists disable their provider. Unreachable
+    /// infrastructure costs candidates, never the bind.</summary>
     public static async Task<PinholeNode> BindAsync(PinholeOptions? options = null, CancellationToken ct = default)
     {
-        options ??= await PinholeOptions.DefaultAsync(ct).ConfigureAwait(false);
-        var engine = new NodeEngine(options);
+        PinholeOptions resolved = await PinholeOptions.ResolveAsync(options, ct).ConfigureAwait(false);
+        var engine = new NodeEngine(resolved);
         try
         {
             await engine.BindAsync(ct).ConfigureAwait(false);
@@ -40,7 +42,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw;
         }
 
-        return new PinholeNode(engine, options);
+        return new PinholeNode(engine, resolved);
     }
 
     /// <summary>This peer's stable ID (random per bind).</summary>

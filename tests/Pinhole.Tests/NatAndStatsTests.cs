@@ -57,6 +57,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
+            IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             EnableNetworkWatch = false,
         });
@@ -64,6 +65,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
+            IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             EnableNetworkWatch = false,
         });
@@ -91,6 +93,7 @@ public sealed class PathStatsTests
     {
         StunServers = [],
         Relays = [],
+        IrohRelayUrls = [],
         ConnectTimeout = TimeSpan.FromSeconds(8),
         EnableNetworkWatch = false,
     };
