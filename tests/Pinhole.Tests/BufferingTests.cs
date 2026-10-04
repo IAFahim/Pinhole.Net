@@ -17,7 +17,7 @@ public sealed class BufferingTests
         Relays = [],
         IrohRelayUrls = [],
         ReceiveBufferCapacity = capacity,
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
         ConnectTimeout = TimeSpan.FromSeconds(8),
     };
 

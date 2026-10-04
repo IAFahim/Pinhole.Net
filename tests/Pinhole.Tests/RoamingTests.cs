@@ -15,7 +15,7 @@ public sealed class RoamingTests
         IrohRelayUrls = [],
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
         BindProbeBudget = TimeSpan.FromSeconds(5),
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
     };
 
     private static async Task<(PinholeConnection DialerSide, PinholeConnection ListenerSide)> ConnectPairAsync(

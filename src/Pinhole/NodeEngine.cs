@@ -121,6 +121,9 @@ internal sealed class NodeEngine : IDisposable
     private readonly RelayIdentity? _relayIdentity;
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
+    private IPEndPoint? _mappedEndpoint;                              // router-granted mapping (UPnP/PMP/PCP), guarded by _gate
+    private NatHint _observedNatHint;                                 // derived from multi-server STUN observations, guarded by _gate
+    private PortMappingService? _portMap;
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
 
@@ -204,7 +207,17 @@ internal sealed class NodeEngine : IDisposable
         RefreshLocalCandidates();
         _ = PermitCatalogRelaysAsync(CancellationToken.None);
 
-        if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero)
+        // Router port mapping (UPnP/PMP/PCP): entirely background, entirely best-effort.
+        // A loopback bind can never be reached through a router, so it skips the chatter.
+        bool bindIsLoopback = _options.Bind is { } bound
+            && (bound.Address.Equals(IPAddress.Loopback) || bound.Address.Equals(IPAddress.IPv6Loopback));
+        if (_options.EnablePortMapping && !bindIsLoopback)
+        {
+            _portMap = new PortMappingService(_options, OnPortMappingChanged);
+            _portMap.Ensure(LocalPort);
+        }
+
+        if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero || _portMap is not null)
         {
             if (_options.StunRefreshInterval > TimeSpan.Zero)
             {
@@ -283,6 +296,57 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    /// <summary>The router-granted external endpoint (UPnP/NAT-PMP/PCP), or null. This is
+    /// already included in the advertised candidates; exposed for diagnostics and tests.</summary>
+    public IPEndPoint? MappedEndpointSnapshot()
+    {
+        lock (_gate)
+        {
+            return _mappedEndpoint;
+        }
+    }
+
+    /// <summary>NAT classification derived from multi-server STUN observations: servers
+    /// that observe divergent mappings mean per-destination (symmetric) NAT. Manual hints
+    /// set through <see cref="PinholeNode.SetNatHint"/> always win over this observation.</summary>
+    public NatHint ObservedNatHint
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _observedNatHint;
+            }
+        }
+    }
+
+    /// <summary>Port-mapping callback: swap the mapped candidate and gently re-announce to
+    /// every peer — the working paths keep working and only learn the new candidate.</summary>
+    private void OnPortMappingChanged(IPEndPoint? mapped)
+    {
+        lock (_gate)
+        {
+            if (Equals(_mappedEndpoint, mapped))
+            {
+                return;
+            }
+
+            _mappedEndpoint = mapped;
+            RefreshLocalCandidatesNoLock();
+        }
+
+        if (mapped is not null)
+        {
+            foreach (ConnState c in ConnectionsSnapshot())
+            {
+                if (c.State != PinholeConnectionState.Closed)
+                {
+                    AnnounceTo(c);
+                }
+            }
+        }
+    }
+
     private void RefreshLocalCandidates()
     {
         lock (_gate)
@@ -308,6 +372,14 @@ internal sealed class NodeEngine : IDisposable
         foreach (IPEndPoint ep in _reflexive)
         {
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, ep));
+        }
+
+        // A router-granted mapping is advertised as a reflexive candidate: it is an address
+        // the world can use to reach this socket, exactly like a STUN observation, and the
+        // peer needs no new wire semantics to punch it.
+        if (_mappedEndpoint is { } mapped && !_localCandidates.Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(mapped)))
+        {
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, mapped));
         }
 
         foreach (TurnClient client in AliveRelayClientsNoLock())
@@ -392,7 +464,9 @@ internal sealed class NodeEngine : IDisposable
     /// nothing because the whole batch is bounded by the bind budget.</summary>
     public async Task ProbeStunAllAsync(CancellationToken ct)
     {
-        foreach (IPEndPoint ep in await ProbeStunObservedAsync(ct).ConfigureAwait(false))
+        IPEndPoint[] observed = await ProbeStunObservedAsync(ct).ConfigureAwait(false);
+        ObserveNatHint(observed);
+        foreach (IPEndPoint ep in observed)
         {
             lock (_gate)
             {
@@ -404,6 +478,25 @@ internal sealed class NodeEngine : IDisposable
         }
 
         RefreshLocalCandidates();
+    }
+
+    /// <summary>Classifies the NAT from the raw multi-server observations: two servers
+    /// seeing the same mapping means endpoint-independent (cone) mapping, divergent ones
+    /// mean per-destination (symmetric) — the hint dialers use to skip a hopeless punch.
+    /// One observation can never distinguish the behaviors, and a pass where too few
+    /// servers answered never clears an earlier, better-informed classification.</summary>
+    private void ObserveNatHint(IPEndPoint[] observedPerServer)
+    {
+        if (observedPerServer.Length < 2)
+        {
+            return;
+        }
+
+        NatHint seen = observedPerServer.Distinct().Count() > 1 ? NatHint.Symmetric : NatHint.Cone;
+        lock (_gate)
+        {
+            _observedNatHint = seen;
+        }
     }
 
     /// <summary>The raw observation behind a probe pass: one task per configured server, the
@@ -1006,6 +1099,8 @@ internal sealed class NodeEngine : IDisposable
                 _ = RefreshReflexiveAsync(ct);
             }
 
+            _portMap?.Tick(Environment.TickCount64);
+
             if (validate)
             {
                 foreach (ConnState c in ConnectionsSnapshot())
@@ -1033,7 +1128,14 @@ internal sealed class NodeEngine : IDisposable
         {
             // Two servers can observe the same mapping (one NAT, same public port): dedupe
             // before comparing or every refresh would look like a change.
-            IPEndPoint[] observed = new HashSet<IPEndPoint>(await ProbeStunObservedAsync(ct).ConfigureAwait(false)).ToArray();
+            IPEndPoint[] perServer = await ProbeStunObservedAsync(ct).ConfigureAwait(false);
+            if (perServer.Length == 0)
+            {
+                return;
+            }
+
+            ObserveNatHint(perServer);
+            IPEndPoint[] observed = new HashSet<IPEndPoint>(perServer).ToArray();
             if (observed.Length == 0)
             {
                 return;
@@ -2128,6 +2230,7 @@ internal sealed class NodeEngine : IDisposable
             }
 
             _reflexive.Clear();
+            _mappedEndpoint = null; // the mapping points at the old port; rediscovery targets the new one
         }
 
         foreach (TurnClient client in oldClients)
@@ -2138,6 +2241,7 @@ internal sealed class NodeEngine : IDisposable
 
         await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
+        _portMap?.Rebind(((IPEndPoint)_udp.LocalEndPoint!).Port); // LocalPort takes _gate; we hold none here
         ReannounceAndRepunch();
     }
 
@@ -2235,6 +2339,7 @@ internal sealed class NodeEngine : IDisposable
             NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
         }
 
+        _portMap?.Shutdown(); // releases the router mapping in the background, bounded
         _shutdown.Cancel();
         foreach (ConnState c in ConnectionsSnapshot())
         {

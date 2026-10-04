@@ -5,6 +5,7 @@ A connection library for .NET. The bottom layer — nothing else.
 One job: **get a connection between two machines, then keep it open until the app closes it.**
 
 - **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
+- **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
 - **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
 - **Bring your own protocol on top.** UDP, TCP, QUIC, your own — with your own libraries. Pinhole doesn't provide those and never will. It does the hard bottom part only.
@@ -286,20 +287,39 @@ Console.WriteLine($"{s.DatagramsSent} sent, {s.DatagramsReceived} received, " +
 // pongs received) is the honest approximation. All counters are AOT-safe plain numbers.
 ```
 
-### Know your NAT
+### Know your NAT — automatically
 
-`NatDetector` compares what several STUN servers observe of the same socket. A symmetric
-NAT gets a hint embedded in future connection strings, so dialers skip the hopeless punch
-and go straight to relay:
+The node classifies its own NAT from its ordinary bind-time STUN probes: when two or
+more servers observe the same mapping the NAT is a cone (the reflexive candidate is
+punchable); when they observe different mappings it is symmetric, and the hint is
+embedded in future connection strings so dialers skip the hopeless punch and go
+straight to relay. The classification repeats on every STUN refresh, so a network
+change is picked up without re-dialing, and a manual override always wins:
 
 ```csharp
-NatType nat = await NatDetector.DetectAsync();       // free STUN catalog
-node.SetNatHint(nat switch
-{
-    NatType.Cone      => NatHint.Cone,       // punch away
-    NatType.Symmetric => NatHint.Symmetric,  // dialers will lean on the relay
-    _                 => NatHint.Unknown,
-});
+Console.WriteLine(node.NatHint);   // Unknown / Cone / Symmetric — already in the string
+node.SetNatHint(NatHint.Cone);     // only if the app knows better than the observations
+node.SetNatHint(NatHint.Unknown);  // back to automatic
+```
+
+`NatDetector` remains available for apps that want the standalone detection it
+performs.
+
+### Router port mappings — the direct-path head start
+
+At bind the node also asks the network's router for an explicit UDP mapping, trying
+PCP, then NAT-PMP, then UPnP (IGDv1/v2, `AddAnyPortMapping` with a `AddPortMapping`
+fallback) — the same strategy iroh's portmapper uses, implemented from the protocols
+in pure C#. A granted mapping is advertised as a reflexive candidate, which turns
+many hard home NATs into directly punchable ones *before* hole punching even starts;
+it is renewed at half its lease, recreated after a rebind, and released when the node
+closes. It is entirely background and best-effort — routers without these protocols
+cost nothing, and nothing about the bind ever waits on them.
+
+```csharp
+Console.WriteLine(node.PortMappedEndpoint);  // e.g. 203.0.113.7:55555, or null
+// Disable on networks where router control traffic is unwelcome:
+var node = await PinholeNode.BindAsync(new PinholeOptions { EnablePortMapping = false });
 ```
 
 ### Configuration
@@ -395,7 +415,7 @@ carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 |---|---|---|---|
 | Any (IPv6) | Any (IPv6) | Yes | Direct IPv6 |
 | Cone/EIM NAT | Cone/EIM NAT | Yes — simultaneous open, both sides punch at each other | Direct UDP |
-| Cone NAT | Symmetric NAT | Skipped — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` says so, so the dialer doesn't waste the attempt | Relay |
+| Cone NAT | Symmetric NAT | Skipped — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` (now derived automatically from the STUN observations) says so, so the dialer doesn't waste the attempt. Exception: a peer whose router granted a port mapping advertises a punch-anywhere endpoint and honestly hints cone | Relay (unless the peer holds a router mapping) |
 | Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
 | Symmetric NAT | Symmetric NAT | No | Relay |
 | UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
@@ -425,7 +445,7 @@ artifact, and how it travels remains the application's concern.
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, automatic NAT classification, PCP/NAT-PMP/UPnP router port mapping, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
 - `src/Pinhole.Blobs` — file & directory transfer above the core (`Pinhole.Blobs` package, net8.0 + net10.0, AOT-compatible): one-ticket serving/downloading, BLAKE3 verified streaming, receiver-driven loss healing, resume sidecars, per-ticket ChaCha20-Poly1305; wire format documented in [docs/BLOBS.md](docs/BLOBS.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets

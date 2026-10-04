@@ -39,6 +39,15 @@ public sealed record PinholeOptions
     /// <see cref="PinholeNode.RoamNowAsync(System.Threading.CancellationToken)"/> yourself.</summary>
     public bool EnableNetworkWatch { get; init; } = true;
 
+    /// <summary>Ask the network's router for an explicit UDP port mapping (PCP, then
+    /// NAT-PMP, then UPnP — the same strategy iroh's portmapper uses; default true). A
+    /// granted mapping is advertised as a reflexive candidate, which makes many hard home
+    /// NATs directly punchable and works even where hole punching alone would fail.
+    /// Discovery is entirely background and best-effort: routers without these protocols
+    /// simply contribute no mapping, and nothing about the bind ever waits on it. Disable
+    /// on networks where router control traffic is unwelcome.</summary>
+    public bool EnablePortMapping { get; init; } = true;
+
     /// <summary>How long <see cref="PinholeNode.ConnectAsync(string, CancellationToken)"/>
     /// keeps trying the chain (punch, then relay) before failing. Default 15 s.</summary>
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(15);
@@ -89,6 +98,13 @@ public sealed record PinholeOptions
     internal IReadOnlyList<IPEndPoint> ResolvedStun { get; init; } = Array.Empty<IPEndPoint>();
     internal IReadOnlyList<TurnServerConfig> ResolvedRelays { get; init; } = Array.Empty<TurnServerConfig>();
     internal IReadOnlyList<Uri> ResolvedIrohRelays { get; init; } = Array.Empty<Uri>();
+
+    // Test seams so port-mapping tests can aim PCP/PMP at an in-process fake gateway and
+    // SSDP at an in-process fake IGD instead of the real network, plus a fast lease for
+    // renewal observations.
+    internal IReadOnlyList<IPEndPoint>? GatewayOverride { get; init; }
+    internal IPEndPoint? SsdpUnicastOverride { get; init; }
+    internal TimeSpan PortMappingLease { get; init; } = TimeSpan.FromHours(2);
 
     // Test seams so resolution tests can observe catalog lookups without touching the network.
     internal Func<CancellationToken, Task<IPEndPoint[]>>? StunCatalog { get; init; }

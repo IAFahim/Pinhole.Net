@@ -49,7 +49,7 @@ public sealed class OptionsResolutionTests
             StunServers = [mine.LocalEndPoint],
             Relays = [],
             IrohRelayUrls = [],
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
             StunCatalog = _ => { Interlocked.Increment(ref lookedUp); return Task.FromResult(Array.Empty<IPEndPoint>()); },
         });
 
@@ -68,14 +68,14 @@ public sealed class OptionsResolutionTests
             StunServers = [stun.LocalEndPoint],
             Relays = [],
             IrohRelayUrls = [],
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using var withoutStun = await PinholeNode.BindAsync(new PinholeOptions
         {
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
         await TestPoll.UntilAsync(Timeout, () => withStun.PublicEndpoints.Count > 0);
@@ -93,7 +93,7 @@ public sealed class OptionsResolutionTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
             BindProbeBudget = TimeSpan.FromSeconds(1),
         }));
 
@@ -112,7 +112,7 @@ public sealed class OptionsResolutionTests
         stopped.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PinholeNode.BindAsync(new PinholeOptions
         {
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
             StunCatalog = Hanging,
         }, stopped.Token));
     }

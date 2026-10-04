@@ -24,7 +24,7 @@ public sealed class PathValidationTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = server is null ? [] : [server.Url],
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
         EnablePathValidation = validation,
         PathValidationIdle = Idle,
         PathValidationProbeInterval = Interval,

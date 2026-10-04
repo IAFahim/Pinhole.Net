@@ -69,7 +69,7 @@ public sealed class NodeConnectionTests
         Listen = listen,
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
         BindProbeBudget = TimeSpan.FromSeconds(5),
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
     };
 
     private static async Task<(PinholeConnection Dialer, PinholeConnection Listener)> ConnectPairAsync(PinholeNode listener, PinholeNode dialer)

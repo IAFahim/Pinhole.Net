@@ -23,7 +23,7 @@ public sealed class AttackTests
         IrohRelayUrls = [],
         Listen = true,
         ConnectTimeout = TimeSpan.FromSeconds(8),
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
     };
 
     private static async Task<(PinholeConnection AtDialer, PinholeConnection AtListener)> ConnectPairAsync(
@@ -425,7 +425,7 @@ public sealed class AttackTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
         });
         Assert.Equal(port, node.LocalPort);
     }

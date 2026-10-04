@@ -56,10 +56,26 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
-        _natHint).ToString();
+        NatHint).ToString();
 
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
+
+    /// <summary>The external endpoint the network's router granted this socket (UPnP,
+    /// NAT-PMP, or PCP), or null. It is already advertised as a reflexive candidate in
+    /// <see cref="ConnectionString"/>; this property exists for diagnostics.</summary>
+    public IPEndPoint? PortMappedEndpoint => _engine.MappedEndpointSnapshot();
+
+    /// <summary>The NAT classification embedded in future connection strings: a manual
+    /// <see cref="SetNatHint"/> override when one is set, otherwise the classification the
+    /// engine derives by itself from multi-server STUN observations — two servers observing
+    /// the same mapping is a cone NAT, divergent mappings a symmetric one whose reflexive
+    /// candidates are useless to dialers. One exception: while a router port mapping is
+    /// live, the advertised candidates include an endpoint that is punchable from anywhere,
+    /// so the honest hint is <see cref="NatHint.Cone"/> even behind a symmetric NAT.</summary>
+    public NatHint NatHint => _natHint != Pinhole.NatHint.Unknown
+        ? _natHint
+        : _engine.MappedEndpointSnapshot() is not null ? NatHint.Cone : _engine.ObservedNatHint;
 
     /// <summary>Whether this node currently has a live iroh or TURN relay available.
     /// This can change as relays disconnect or reconnect; it does not guarantee a peer is reachable.</summary>
@@ -176,8 +192,11 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     internal NodeEngine Engine => _engine;
 
-    /// <summary>Sets the NAT hint embedded in future connection strings (symmetric NATs tell
-    /// dialers to skip the hopeless punch). Set from <see cref="NatDetector"/> results.</summary>
+    /// <summary>Overrides the NAT hint embedded in future connection strings (symmetric
+    /// NATs tell dialers to skip the hopeless punch). The override beats the automatic
+    /// classification; passing <see cref="NatHint.Unknown"/> returns to automatic mode,
+    /// where the engine classifies from multi-server STUN observations by itself. Set from
+    /// <see cref="NatDetector"/> results when the app knows better than the observations.</summary>
     public void SetNatHint(NatHint hint) => _natHint = hint;
 
     /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer), relays are released, and the socket is disposed. Idempotent.</summary>

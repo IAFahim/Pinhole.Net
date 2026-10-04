@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.0 — router port mappings and automatic NAT classification
+
+The two techniques the iroh parity review found missing — both now spoken from pure C#,
+both enabled by default, both entirely background and best-effort.
+
+### Router port mappings (PCP / NAT-PMP / UPnP)
+
+The same strategy iroh's portmapper uses: at bind (and after every rebind) the node
+asks the network's gateway for an explicit UDP mapping to its socket, in order PCP
+(RFC 6887), NAT-PMP (RFC 6886), then UPnP IGDv1/v2 (SSDP discovery, device XML,
+`AddAnyPortMapping` with a `AddPortMapping` fallback). A granted mapping is
+advertised as a reflexive candidate — which turns many hard home NATs into directly
+punchable ones before hole punching even starts — renewed at half its lease
+(default 2 h), recreated after a rebind, released on close, and retried once a
+minute if a previously-working mapping dies. `EnablePortMapping = false` opts out;
+`node.PortMappedEndpoint` reports the live mapping. Gateway protocols ride test
+seams (in-process fakes for all three protocols) so the suite stays hermetic.
+
+### Automatic NAT classification
+
+The NAT hint in connection strings no longer waits for the app to call
+`SetNatHint`: the engine classifies from its ordinary multi-server STUN probes —
+identical observed mappings mean a cone NAT, divergent ones a symmetric NAT whose
+candidates are useless to dialers — and reclassifies on every STUN refresh as the
+network changes. A manual `SetNatHint` override still wins, and one refinement:
+while a router mapping is live, the hint is honestly `Cone` even behind a symmetric
+NAT, because the mapped endpoint is punchable from anywhere and "skip the punch"
+would throw away a working direct path.
+
 ## 1.4.0 — blobs: sendme-parity file transfer
 
 One ticket moves a file or a whole directory between machines — the

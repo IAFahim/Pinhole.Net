@@ -93,6 +93,10 @@ kind: TURN adds relay-server endpoint + two length-prefixed ASCII strings (usern
 credential, ≤64 bytes each); iroh adds a length-prefixed ASCII URL (HTTPS, ≤64
 bytes) + a 32-byte Ed25519 public relay identity key.
 
+Kind `2` (reflexive) covers both truths that make a public endpoint reachable:
+STUN-observed mappings and endpoints granted by [router port mapping](#router-port-mapping).
+A peer punches them identically; no wire semantics differ.
+
 ## Connection string
 
 `pinhole1:<base64url>` (unpadded). The payload:
@@ -104,6 +108,33 @@ candidateCount:u8  candidate TLVs...
 
 At most 32 candidates, at most 8192 encoded characters; parsers reject trailing
 bytes, unknown kinds, and non-strict base64url.
+
+`natHint` is derived automatically (a manual `SetNatHint` override wins): when two
+or more configured STUN servers answer, identical observed mappings classify a cone
+NAT (endpoint-independent mapping — the reflexive candidate is punchable) and
+divergent ones a symmetric NAT (per-destination mapping — dialers skip the punch and
+go straight to relay). A pass where fewer than two servers answer never overwrites
+an earlier, better-informed classification.
+
+## Router port mapping
+
+The same strategy iroh's portmapper uses, spoken from pure C#. At bind (and after
+every rebind) the node asks the network's gateway for an explicit UDP mapping to its
+socket, in order: **PCP** (RFC 6887), **NAT-PMP** (RFC 6886) — both UDP to the
+default gateway on port 5351, discovered from the OS routing table — then **UPnP
+IGD** (SSDP M-SEARCH multicast to 239.255.255.250:1900, device-description XML, and
+SOAP `AddAnyPortMapping` with `AddPortMapping` fallback, IGDv1/v2, on the control
+URL the device advertises). The first protocol that grants a mapping wins; a granted
+mapping is advertised as a reflexive candidate, renewed at half its granted lifetime
+(default lease 2 h), released with a zero-lifetime request / `DeletePortMapping` on
+close or rebind, and retried once a minute if a previously-working mapping dies.
+Everything is background and best-effort: a network with none of these protocols
+contributes no mapping, silently.
+
+PCP MAP requests carry a per-mapping random nonce; renewals reuse it so the gateway
+updates the existing mapping instead of allocating a second one. Responses are
+accepted only when the nonce is echoed, the result code is success, and the external
+address is IPv4 (or v4-mapped) — the candidate vocabulary is IPv4/IPv6 endpoints.
 
 ## STUN usage
 
@@ -148,5 +179,8 @@ into a synchronized retry storm. TURN allocation retries follow the same idea
 | Path-validation defaults | 5 s idle, 1 s interval, 3 unanswered |
 | STUN refresh | 60 s (0 = off) |
 | Relay reconnect backoff | 1 s → ×2 → 30 s cap, ±10% jitter |
+| Port-mapping lease | 2 h, renewed at half-life; discovery retries 60 s after a lost mapping |
+| PCP / NAT-PMP gateway port | UDP 5351, retries 0/250/500 ms |
+| SSDP | UDP 1900 multicast, M-SEARCH window 1 s, IGDv1+IGDv2 targets |
 | STRANGER flood bound | 1024 connections materialized by unknown PUNCs |
 | Frame receive buffer | 8192 B (fits 32 fat relay candidates of announce) |

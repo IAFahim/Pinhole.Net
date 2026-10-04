@@ -20,6 +20,7 @@ PinholeOptions options = new()
     IrohRelayUrls = [],
     EnableNetworkWatch = false,
     EnablePathValidation = false,
+    EnablePortMapping = false, // no router on loopback; keep the allocation counters pure
 };
 
 await using PinholeNode receiver = await PinholeNode.BindAsync(options);

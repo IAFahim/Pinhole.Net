@@ -59,7 +59,7 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
         {
@@ -67,7 +67,7 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
-            EnableNetworkWatch = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
         // Direct candidates exist and would even work on loopback — but the symmetric
@@ -95,7 +95,7 @@ public sealed class PathStatsTests
         Relays = [],
         IrohRelayUrls = [],
         ConnectTimeout = TimeSpan.FromSeconds(8),
-        EnableNetworkWatch = false,
+        EnableNetworkWatch = false, EnablePortMapping = false,
     };
 
     [Fact]
