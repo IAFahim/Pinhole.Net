@@ -63,6 +63,18 @@ internal sealed class ConnState
     public readonly TaskCompletionSource Closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly CancellationTokenSource Dead = new();
 
+    // Silent-death path validation (monotonic Environment.TickCount64 everywhere). Only
+    // frames RECEIVED on the direct path count as activity — a successful UDP send proves
+    // nothing, or a dead path that never errors would look alive forever.
+    public long LastDirectRxTicks;       // Volatile; written under Gate
+    public bool ProbeOutstanding;        // Gate
+    public long ProbeNonce;              // Gate; TickCount64 | ProbeMarker
+    public long ProbeDeadlineTicks;      // Gate
+    public SocketAddress? ProbeTarget;   // Gate; the endpoint the outstanding probe went to
+    public int UnansweredProbes;         // Gate
+    public long PathProbesSent;          // Interlocked; separate from caller ping stats
+    public long PathProbeReplies;        // Interlocked; only matched, direct-endpoint replies
+
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
     public Action<PinholeConnectionState>? StateChanged;
@@ -112,6 +124,7 @@ internal sealed class NodeEngine : IDisposable
     private long _recovering; // single-flight guard for recovery
     private volatile bool _disposed;
     private int _networkWatchHooked;
+    private Task? _maintenance; // one path-validation scheduler for the whole node
 
     public NodeEngine(PinholeOptions options)
     {
@@ -180,6 +193,11 @@ internal sealed class NodeEngine : IDisposable
 
         RefreshLocalCandidates();
         _ = PermitCatalogRelaysAsync(CancellationToken.None);
+
+        if (_options.EnablePathValidation)
+        {
+            _maintenance = MaintenanceLoopAsync(_shutdown.Token);
+        }
 
         if (_options.EnableNetworkWatch && Interlocked.CompareExchange(ref _networkWatchHooked, 1, 0) == 0)
         {
@@ -917,6 +935,159 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    // ------------------------------------------------------------------ path validation
+
+    // High bit of a probe's timestamp marks it as maintenance; caller pings keep their
+    // plain TickCount64 so RTT stats and monitoring counters never mix.
+    private const long ProbeMarker = unchecked((long)0x8000000000000000);
+
+    /// <summary>One scheduler for the whole node: no per-connection timers and nothing on
+    /// the send path. Dies with the node's shutdown token.</summary>
+    private async Task MaintenanceLoopAsync(CancellationToken ct)
+    {
+        double intervalMs = _options.PathValidationProbeInterval.TotalMilliseconds;
+        TimeSpan tick = TimeSpan.FromMilliseconds(Math.Clamp(intervalMs / 2, 20, 500));
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(tick, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            foreach (ConnState c in ConnectionsSnapshot())
+            {
+                ValidatePath(c);
+            }
+        }
+    }
+
+    /// <summary>Detects the silent direct-path death a send error never reports: NAT expiry,
+    /// a router, or a firewall dropping packets in both directions. After the idle window
+    /// with no direct-path RECEIVE, probes run until enough consecutive answers fail to
+    /// arrive, then the path is declared suspect exactly as a send failure would be.</summary>
+    private void ValidatePath(ConnState c)
+    {
+        long now = Environment.TickCount64;
+        bool suspect = false;
+        lock (c.Gate)
+        {
+            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null)
+            {
+                ResetPathProbesNoLock(c);
+                return;
+            }
+
+            long lastRx = Volatile.Read(ref c.LastDirectRxTicks);
+            if (lastRx > 0 && now - lastRx < _options.PathValidationIdle.TotalMilliseconds)
+            {
+                ResetPathProbesNoLock(c); // live traffic; any half-finished probe sequence is forgotten
+                return;
+            }
+
+            if (c.ProbeOutstanding)
+            {
+                if (now < c.ProbeDeadlineTicks)
+                {
+                    return; // this probe's reply may still land
+                }
+
+                c.ProbeOutstanding = false;
+                c.UnansweredProbes++;
+                if (c.UnansweredProbes >= _options.PathValidationMaxUnansweredProbes)
+                {
+                    c.UnansweredProbes = 0;
+                    suspect = true;
+                }
+                else
+                {
+                    return; // next tick sends the next probe
+                }
+            }
+        }
+
+        if (suspect)
+        {
+            NotifyPathSuspect(c); // outside the gate: it takes c.Gate itself
+            return;
+        }
+
+        SendPathProbe(c);
+    }
+
+    private void ResetPathProbesNoLock(ConnState c)
+    {
+        c.ProbeOutstanding = false;
+        c.ProbeTarget = null;
+        c.UnansweredProbes = 0;
+    }
+
+    private void SendPathProbe(ConnState c)
+    {
+        long now = Environment.TickCount64;
+        long nonce = now | ProbeMarker;
+        SocketAddress? target;
+        lock (c.Gate)
+        {
+            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct)
+            {
+                return;
+            }
+
+            target = c.DirectRemote;
+            if (target is null)
+            {
+                return;
+            }
+
+            c.ProbeOutstanding = true;
+            c.ProbeNonce = nonce;
+            c.ProbeTarget = target;
+            c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
+        }
+
+        Span<byte> frame = stackalloc byte[HeaderSize + 4 + 8];
+        WriteHeader(frame, FrameType.Ping);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
+        BitConverter.TryWriteBytes(frame[(HeaderSize + 4)..], nonce);
+        try
+        {
+            SendToWire(target, frame);
+            Interlocked.Increment(ref c.PathProbesSent);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            // An unsendable probe simply goes unanswered; the timeout accounting above
+            // handles it. Real send failures are surfaced by Send with its own trigger.
+        }
+    }
+
+    private static bool SameEndPoint(SocketAddress? left, SocketAddress? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left is null || right is null || left.Family != right.Family || left.Size != right.Size)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Size; i++)
+        {
+            if (left[i] != right[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     // ------------------------------------------------------------------ sending
 
     public void Send(ConnState c, ReadOnlySpan<byte> payload)
@@ -1190,7 +1361,7 @@ internal sealed class NodeEngine : IDisposable
                 OnPing(c, frame, arrival);
                 break;
             case FrameType.Pong:
-                OnPong(c, frame);
+                OnPong(c, frame, arrival);
                 break;
             case FrameType.Announce:
                 OnAnnounce(c, frame, arrival);
@@ -1335,14 +1506,47 @@ internal sealed class NodeEngine : IDisposable
         SendOnArrival(arrival, pong);
     }
 
-    private void OnPong(ConnState c, ReadOnlySpan<byte> frame)
+    private void OnPong(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
         if (frame.Length < HeaderSize + 4 + 8)
         {
             return;
         }
 
-        long rttTicks = (Environment.TickCount64 - BitConverter.ToInt64(frame[(HeaderSize + 4)..])) * TimeSpan.TicksPerMillisecond;
+        long echoed = BitConverter.ToInt64(frame[(HeaderSize + 4)..]);
+        if (echoed < 0)
+        {
+            // Maintenance probe reply: it certifies the direct path only when it matches
+            // the outstanding probe's nonce AND arrives from the endpoint that probe was
+            // sent to (ProbeTarget, snapshotted at send time — DirectRemote may since have
+            // been re-pointed by the peer's own frames). A caller ping's pong, relayed
+            // traffic, or a reply from anywhere else counts for nothing.
+            lock (c.Gate)
+            {
+                if (c.ProbeOutstanding && c.ProbeNonce == echoed
+                    && !arrival.ViaRelay && SameEndPoint(arrival.Direct, c.ProbeTarget))
+                {
+                    c.ProbeOutstanding = false;
+                    c.ProbeTarget = null;
+                    c.UnansweredProbes = 0;
+                    Interlocked.Increment(ref c.PathProbeReplies);
+                }
+            }
+
+            if (!arrival.ViaRelay && arrival.Direct is { } direct)
+            {
+                DirectPathConfirmed(c, direct);
+            }
+
+            return;
+        }
+
+        if (!arrival.ViaRelay && arrival.Direct is { } callerDirect)
+        {
+            DirectPathConfirmed(c, callerDirect); // an answered caller ping is direct-path activity too
+        }
+
+        long rttTicks = (Environment.TickCount64 - echoed) * TimeSpan.TicksPerMillisecond;
         Interlocked.Exchange(ref c.LastRttTicks, rttTicks);
         Interlocked.Increment(ref c.PongsReceived);
         lock (c.Gate)
@@ -1552,12 +1756,14 @@ internal sealed class NodeEngine : IDisposable
             TracePath(c, source);
             c.DirectRemote = source;
             c.DirectRemoteEp = ToEndpoint(source);
+            Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
             if (c.State != PinholeConnectionState.Open)
             {
                 c.State = PinholeConnectionState.Open;
                 c.Path = PathKind.Direct;
                 c.PathSince = DateTimeOffset.UtcNow;
                 Interlocked.Exchange(ref c.ConsecutiveSendFailures, 0);
+                ResetPathProbesNoLock(c);
                 c.Connected.TrySetResult();
                 c.StateChanged?.Invoke(c.State);
             }
@@ -1566,6 +1772,7 @@ internal sealed class NodeEngine : IDisposable
                 // A direct frame while relayed: newest-path-wins migration.
                 c.Path = PathKind.Direct;
                 c.PathSince = DateTimeOffset.UtcNow;
+                ResetPathProbesNoLock(c);
                 c.StateChanged?.Invoke(c.State);
             }
         }
@@ -1874,6 +2081,36 @@ internal sealed class NodeEngine : IDisposable
 
         c.BlackholeDirect = true;
         NotifyPathSuspect(c);
+    }
+
+    /// <summary>Test hook: the direct path to this peer becomes a silent black hole — frames
+    /// die in both directions with no send errors and no notifications. Exactly the failure
+    /// path validation exists to detect on its own.</summary>
+    internal void SimulateSilentDirectPathLoss(ulong peerId)
+    {
+        if (Lookup(peerId) is { } c)
+        {
+            c.BlackholeDirect = true;
+        }
+    }
+
+    /// <summary>Test hook: the direct path works again (NAT rebind recovered, firewall rule
+    /// lifted). The engine's own probing re-opens it; no notification is pushed.</summary>
+    internal void SimulateDirectPathRestore(ulong peerId)
+    {
+        if (Lookup(peerId) is { } c)
+        {
+            c.BlackholeDirect = false;
+        }
+    }
+
+    /// <summary>Test hook: restart the punch loop for a connection the budget gave up on.</summary>
+    internal void RetryPunch(ulong peerId)
+    {
+        if (Lookup(peerId) is { } c)
+        {
+            KickPunch(c);
+        }
     }
 
     // ------------------------------------------------------------------ dispose

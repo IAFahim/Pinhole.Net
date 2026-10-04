@@ -162,6 +162,13 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
     /// Zero when buffering is disabled.</summary>
     public long DroppedDatagrams => _c.Buffer?.Dropped ?? 0;
 
+    /// <summary>Path-validation probes sent by the maintenance scheduler (internal:
+    /// monitoring only, deliberately separate from caller Ping/RTT stats).</summary>
+    internal long PathProbesSent => Interlocked.Read(ref _c.PathProbesSent);
+
+    /// <summary>Maintenance probes that came back matched and from the probed endpoint.</summary>
+    internal long PathProbeReplies => Interlocked.Read(ref _c.PathProbeReplies);
+
     /// <summary>Sends one unreliable datagram on the current path. The direct UDP path allocates nothing;
     /// empty payloads and payloads above <see cref="MaxPayload"/> throw before touching the
     /// network (a zero-length datagram is undeliverable by definition).</summary>
