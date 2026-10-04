@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.3.0 — iroh parity pass
+
+Studied n0-computer/iroh end to end and ported the practices that were missing here.
+Everything iroh already had that we match — simultaneous-open punching, relay
+fallback, roaming survival, one-endpoint-per-app, documented wire formats — stays;
+this release closes the gaps.
+
+### Periodic re-discovery: `StunRefreshInterval` (default 1 minute)
+
+- iroh refreshes its network map on a timer because NAT mappings move with *no* OS
+  network event (DHCP renew, router reboot). Pinhole now re-probes its STUN servers
+  the same way; when the observed reflexive set moved, it is replaced, every peer is
+  re-advertised with a gentle announce, and the next `ConnectionString` read carries
+  the new candidates.
+- Working direct paths are never torn down by a refresh — their endpoints come from
+  the peer's own frames, not from STUN. A fully silent probe batch changes nothing;
+  full network loss remains the recover/rebind path's call. Zero disables the timer.
+
+### Reconnect pacing: capped exponential backoff with jitter
+
+- iroh relay reconnects no longer retry at a flat 1 s: ~1 s first, doubling per
+  consecutive failure up to 30 s, ±10% jitter, reset on the first successful
+  authentication — a relay outage never turns into a synchronized retry storm.
+  TURN allocation retries get the same jitter treatment (30 s ±20%). A relay that
+  answers garbage (rejected auth, malformed frames) now costs a reconnect cycle
+  instead of silently killing that relay's client loop forever.
+
+### All-platform reach
+
+- The shipped packages (`Pinhole.Net`, `Pinhole.Turn`, `Pinhole.Providers`) now
+  target **net8.0 and net10.0** — managed-only as always, so anything with a UDP
+  socket and .NET 8+ runs the library. CI still tests Linux/macOS/Windows; the
+  README gained a platforms section and the one net9+-only API
+  (`ClientWebSocketOptions.KeepAliveTimeout`) is version-guarded.
+
+### Protocol documentation
+
+- New `docs/PROTOCOL.md`: the full wire contract — frame layout, token
+  authentication, lifecycle, candidate TLVs, connection-string encoding, STUN
+  subset, and the iroh relay handshake/framing — specified precisely enough to
+  re-implement either side, iroh-style.
+
+### Test-infrastructure hardening
+
+- Two latent test-host crashers fixed, both exposed by timing shifts: the fake TURN
+  server's reply path now tolerates a client disposing mid-flight (one ICMP
+  unreachable used to kill the whole run), and the fake iroh relay aborts client
+  sockets *before* stopping its `HttpListener` (the stop raced in-flight response
+  writes inside the runtime's own cleanup).
+- Six new tests: moved-mapping refresh and replacement, refresh leaving working
+  direct paths alone while teaching peers the new candidates, disabled-by-zero,
+  interval floor validation, and the backoff ladder (near-1 s first retry,
+  strictly climbing, 30 s cap).
+
 ## 1.2.0 — honest about silent death, and green again
 
 Four fixes from the first real-world pass: options that stopped dropping defaults,

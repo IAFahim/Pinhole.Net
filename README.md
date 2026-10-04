@@ -29,6 +29,21 @@ free STUN/TURN catalog), and managed BouncyCastle cryptography. Parameterless `B
 gets the free STUN catalog and public iroh relays by default. `dotnet test` from a fresh
 clone needs no submodules, Rust, or native toolchain — pure C# end to end.
 
+## Platforms
+
+The packages target **net8.0 (LTS) and net10.0**, managed-only — no native dependencies,
+P/Invoke, or cgo-style baggage:
+
+| Where | Status |
+|---|---|
+| Linux, macOS, Windows | CI-tested on all three every push |
+| Any .NET-supported OS (FreeBSD, Android, iOS via .NET workloads, …) | Runs — anything with a UDP socket and .NET 8+ |
+| NativeAOT / trimming | Supported (`IsAotCompatible`, single-file publish); the rendezvous server ships as an AOT binary |
+| Browser/WASM | No — browsers do not expose UDP sockets |
+
+The wire protocol is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md), precisely enough
+to re-implement either side.
+
 ## The two-PC program
 
 This is the whole API surface a connection needs:
@@ -216,6 +231,10 @@ await node.RoamNowAsync();   // re-probe STUN, rebind if needed, re-announce, re
 // conn returns to Open (or Degraded) on its own; no re-dial, same object
 ```
 
+Two safety nets complement the OS network watch. The periodic STUN refresh catches the
+mapping moves that fire no OS event at all (see the failure table), and relay
+reconnects are backoff-paced so an infrastructure blip heals without a retry storm.
+
 ### Tools: ping, RTT, stats
 
 `Ping()` is a tool you call — Pinhole never schedules keepalives for your protocol.
@@ -287,11 +306,19 @@ var node = await PinholeNode.BindAsync(new PinholeOptions
     Listen = true,                  // accept strangers dialing your string
     EnableNetworkWatch = true,      // auto-roam on OS network changes
     EnablePathValidation = true,    // detect silent direct-path death (see failure table)
+    StunRefreshInterval = TimeSpan.FromMinutes(1), // re-probe STUN; 0 = off
     ReceiveBufferCapacity = 0,      // > 0 enables ReceiveAsync/ReadAllAsync
     ConnectTimeout = TimeSpan.FromSeconds(15),  // whole-chain dial budget
     BindProbeBudget = TimeSpan.FromSeconds(5),  // bind-time probe budget (failures tolerated)
 });
 ```
+
+`StunRefreshInterval` is the periodic re-discovery iroh also performs: NAT mappings move
+silently (DHCP renew, router reboot) with no OS network event, so the node re-probes its
+STUN servers on a timer. When the observed mapping changed, the reflexive candidates are
+replaced, every peer is re-advertised via a gentle announce, and the next
+`ConnectionString` read carries the new addresses — while working direct paths keep
+working, untouched.
 
 Deterministic test/offline node (no internet at all — what the test suite uses):
 
@@ -333,16 +360,17 @@ invisible. Late joins don't disturb existing pairs.
 |---|---|
 | The direct path (NAT mapping expires, peer's IP changes) | Degrades to `Degraded` and keeps flowing on the relay; re-probes for a direct path and upgrades back to `Open` silently |
 | The direct path dies *silently* (firewall drops, NAT rebind — no send error, nothing comes back) | Detected, not assumed: after ~5 s with nothing received on the direct path, the engine probes it with the token-checked ping protocol; three unanswered probes mark it suspect and the normal handling kicks in (relay fallback, or honest death). One lost probe or live traffic never degrades a path, and relay traffic never certifies a direct one. Opt out with `EnablePathValidation = false` |
+| The NAT mapping moves with no OS event (DHCP renew, router reboot) | The periodic STUN refresh (`StunRefreshInterval`, default 1 min) notices, replaces the reflexive candidates, and gently re-advertises to every peer; working direct paths are untouched — regenerate and re-share connection strings |
 | The peer's whole network (WiFi→mobile) | That peer's node rebinds (new socket/port/relay), re-announces, re-punches — the same connection object, datagrams resume in both directions |
 | Direct path dies and no relay is configured | Bounded re-punch, then honestly `Dead`; `Send` throws with a `RoamNowAsync()` hint; the object stays inspectable |
 | Every STUN server goes silent | Treated as network loss → full rebind; a single rate-limited probe is *not* network death |
-| A relay dies or is unreachable | Best-effort: the remaining configured relays carry the fallback; direct paths never notice |
+| A relay dies or is unreachable | Best-effort: the remaining configured relays carry the fallback; the dropped relay reconnects forever with capped exponential backoff (~1 s doubling to 30 s, ±10% jitter, reset on success — no synchronized retry storm); direct paths never notice |
 | A datagram is lost | Nothing. It's an unreliable datagram protocol — retransmit at the app layer if you care |
 | The peer closes (`CloseAsync`) | `Bye` frame, both sides end up `Closed`; `Closed` tasks complete |
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the direct path, no native dependencies
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations on the direct path, no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
@@ -350,7 +378,7 @@ invisible. Late joins don't disturb existing pairs.
 - `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
 - `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
-- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), silent-path-failure detection, buffered receiving, options resolution, NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
+- `tests/Pinhole.Tests` — loopback xunit suite: session API + punch/ping/data, roaming (rebind, degrade, honest death), silent-path-failure detection, periodic STUN refresh, reconnect backoff pacing, buffered receiving, options resolution, NAT detection, STUN+TURN and iroh relay authentication/reconnection against in-process fake servers, rendezvous protocol + bounds
 
 ## Build & test
 

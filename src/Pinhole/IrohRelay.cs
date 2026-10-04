@@ -64,6 +64,19 @@ internal sealed class IrohRelay : IDisposable
     public event Action<IrohRelay>? Changed;
     public string? LastError { get; private set; }
 
+    /// <summary>Reconnect delay after the given number of consecutive failed connections:
+    /// capped exponential backoff with ±10% jitter, the same practice iroh uses — a relay
+    /// outage must not produce a synchronized retry storm from every client. Brief blips
+    /// still heal fast: the first retry lands near one second, the delay doubles per
+    /// consecutive failure up to thirty, and the count resets on the first successful
+    /// authentication.</summary>
+    internal static TimeSpan RetryDelay(int failedAttempts)
+    {
+        long baseMs = Math.Min(1000L << Math.Min(failedAttempts, 5), 30_000);
+        double jitter = RandomNumberGenerator.GetInt32(-1000, 1001) / 10_000.0;
+        return TimeSpan.FromMilliseconds(baseMs * (1 + jitter));
+    }
+
     public IrohRelay(Uri url, RelayIdentity identity)
     {
         if (!url.IsAbsoluteUri || url.Scheme is not ("https" or "http")
@@ -96,6 +109,7 @@ internal sealed class IrohRelay : IDisposable
 
     private async Task RunAsync()
     {
+        int failures = 0;
         while (!_stop.IsCancellationRequested)
         {
             using var socket = new ClientWebSocket();
@@ -106,7 +120,9 @@ internal sealed class IrohRelay : IDisposable
                 socket.Options.AddSubProtocol("iroh-relay-v2");
                 socket.Options.AddSubProtocol("iroh-relay-v1");
                 socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+#if NET9_0_OR_GREATER // KeepAliveTimeout ships with .NET 9; older runtimes use the stack default
                 socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(15);
+#endif
                 var url = new UriBuilder(Url) { Scheme = Url.Scheme == "https" ? "wss" : "ws", Path = "/relay" };
                 using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(connection.Token))
                 {
@@ -123,6 +139,7 @@ internal sealed class IrohRelay : IDisposable
                         throw new InvalidDataException("relay rejected authentication");
                 }
 
+                failures = 0; // authenticated: the next drop starts the ladder from the bottom again
                 LastError = null;
                 Volatile.Write(ref _alive, 1);
                 _ready.TrySetResult();
@@ -134,8 +151,11 @@ internal sealed class IrohRelay : IDisposable
                 socket.Abort();
                 await Task.WhenAll(receive, send).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is WebSocketException or HttpRequestException or IOException or OperationCanceledException)
+            catch (Exception ex) when (ex is WebSocketException or HttpRequestException or IOException
+                or OperationCanceledException or InvalidDataException)
             {
+                // InvalidDataException included: a relay that answers garbage must cost a
+                // reconnect cycle, not silently kill this relay's loop forever.
                 LastError = ex.Message;
             }
             finally
@@ -147,7 +167,8 @@ internal sealed class IrohRelay : IDisposable
                 Changed?.Invoke(this);
             }
 
-            try { await Task.Delay(1000, _stop.Token).ConfigureAwait(false); }
+            TimeSpan pause = RetryDelay(failures++);
+            try { await Task.Delay(pause, _stop.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
         }
         _ready.TrySetCanceled(_stop.Token);

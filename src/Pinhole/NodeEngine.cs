@@ -124,7 +124,9 @@ internal sealed class NodeEngine : IDisposable
     private long _recovering; // single-flight guard for recovery
     private volatile bool _disposed;
     private int _networkWatchHooked;
-    private Task? _maintenance; // one path-validation scheduler for the whole node
+    private Task? _maintenance; // one scheduler for the whole node (path validation + STUN refresh)
+    private long _nextStunRefreshTicks; // maintenance deadline; 0 = refresh disabled
+    private int _stunRefreshing; // single-flight guard for reflexive refreshes
 
     public NodeEngine(PinholeOptions options)
     {
@@ -194,8 +196,13 @@ internal sealed class NodeEngine : IDisposable
         RefreshLocalCandidates();
         _ = PermitCatalogRelaysAsync(CancellationToken.None);
 
-        if (_options.EnablePathValidation)
+        if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero)
         {
+            if (_options.StunRefreshInterval > TimeSpan.Zero)
+            {
+                _nextStunRefreshTicks = Environment.TickCount64 + (long)_options.StunRefreshInterval.TotalMilliseconds;
+            }
+
             _maintenance = MaintenanceLoopAsync(_shutdown.Token);
         }
 
@@ -374,10 +381,29 @@ internal sealed class NodeEngine : IDisposable
     /// nothing because the whole batch is bounded by the bind budget.</summary>
     public async Task ProbeStunAllAsync(CancellationToken ct)
     {
+        foreach (IPEndPoint ep in await ProbeStunObservedAsync(ct).ConfigureAwait(false))
+        {
+            lock (_gate)
+            {
+                if (!_reflexive.Contains(ep))
+                {
+                    _reflexive.Add(ep);
+                }
+            }
+        }
+
+        RefreshLocalCandidates();
+    }
+
+    /// <summary>The raw observation behind a probe pass: one task per configured server, the
+    /// whole batch bounded by the bind budget, and the endpoints that answered. Late probes
+    /// (past the budget) are simply not part of the result.</summary>
+    private async Task<IPEndPoint[]> ProbeStunObservedAsync(CancellationToken ct)
+    {
         IReadOnlyList<IPEndPoint> servers = ResolvedStun();
         if (servers.Count == 0)
         {
-            return;
+            return Array.Empty<IPEndPoint>();
         }
 
         Task<IPEndPoint?>[] probes = servers.Select(s => TryProbe(s, ct)).ToArray();
@@ -389,21 +415,10 @@ internal sealed class NodeEngine : IDisposable
         {
         }
 
-        foreach (Task<IPEndPoint?> probe in probes)
-        {
-            if (probe.IsCompletedSuccessfully && probe.Result is { } ep)
-            {
-                lock (_gate)
-                {
-                    if (!_reflexive.Contains(ep))
-                    {
-                        _reflexive.Add(ep);
-                    }
-                }
-            }
-        }
-
-        RefreshLocalCandidates();
+        return probes
+            .Where(p => p.IsCompletedSuccessfully && p.Result is not null)
+            .Select(p => p.Result!)
+            .ToArray();
     }
 
     private async Task<IPEndPoint?> TryProbe(IPEndPoint server, CancellationToken ct)
@@ -641,9 +656,14 @@ internal sealed class NodeEngine : IDisposable
         }
         catch (Exception)
         {
-            slot.NextRetry = DateTimeOffset.UtcNow + RelayRetryBackoff;
+            // Servers see every client at once when an allocation expires or a relay restarts;
+            // jitter spreads that herd without meaningfully delaying anyone.
+            slot.NextRetry = DateTimeOffset.UtcNow + Jitter(RelayRetryBackoff);
         }
     }
+
+    private static TimeSpan Jitter(TimeSpan delay) =>
+        delay * (1 + (RandomNumberGenerator.GetInt32(0, 41) - 20) / 100.0); // ±20%
 
     /// <summary>A stranger's relayed traffic can only be delivered to our allocation if we
     /// permit its source IP. Strangers dial through the free relays, so pre-opening the
@@ -700,6 +720,16 @@ internal sealed class NodeEngine : IDisposable
         lock (_gate)
         {
             return _conns.Values.ToArray();
+        }
+    }
+
+    /// <summary>Monitoring/test accessor: the peer's latest advertised candidates, copied
+    /// under the engine gate (the live list is rebuilt by every announce).</summary>
+    internal PinholeCandidate[] PeerCandidatesSnapshot(ulong peerId)
+    {
+        lock (_gate)
+        {
+            return _conns.TryGetValue(peerId, out ConnState? c) ? c.PeerCandidates.ToArray() : [];
         }
     }
 
@@ -942,11 +972,15 @@ internal sealed class NodeEngine : IDisposable
     private const long ProbeMarker = unchecked((long)0x8000000000000000);
 
     /// <summary>One scheduler for the whole node: no per-connection timers and nothing on
-    /// the send path. Dies with the node's shutdown token.</summary>
+    /// the send path. Dies with the node's shutdown token. Carries both recurring chores:
+    /// direct-path validation and the periodic STUN refresh.</summary>
     private async Task MaintenanceLoopAsync(CancellationToken ct)
     {
         double intervalMs = _options.PathValidationProbeInterval.TotalMilliseconds;
         TimeSpan tick = TimeSpan.FromMilliseconds(Math.Clamp(intervalMs / 2, 20, 500));
+        long refreshMs = (long)_options.StunRefreshInterval.TotalMilliseconds;
+        bool refresh = refreshMs > 0;
+        bool validate = _options.EnablePathValidation;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -958,10 +992,76 @@ internal sealed class NodeEngine : IDisposable
                 break;
             }
 
+            if (refresh && Environment.TickCount64 >= Volatile.Read(ref _nextStunRefreshTicks))
+            {
+                Volatile.Write(ref _nextStunRefreshTicks, Environment.TickCount64 + refreshMs);
+                _ = RefreshReflexiveAsync(ct);
+            }
+
+            if (validate)
+            {
+                foreach (ConnState c in ConnectionsSnapshot())
+                {
+                    ValidatePath(c);
+                }
+            }
+        }
+    }
+
+    /// <summary>Periodic re-discovery (iroh performs the same refresh): NAT mappings move with
+    /// no OS event, so re-probe every STUN server and, when the observed reflexive set moved,
+    /// replace it and re-advertise the new candidates to every peer over its current path.
+    /// Open direct paths keep working — their endpoints come from the peer's own frames, not
+    /// from STUN — and a fully silent probe batch changes nothing: a lost network is
+    /// <see cref="RecoverAsync"/>'s call, not this timer's.</summary>
+    private async Task RefreshReflexiveAsync(CancellationToken ct)
+    {
+        if (_disposed || Interlocked.Exchange(ref _stunRefreshing, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            // Two servers can observe the same mapping (one NAT, same public port): dedupe
+            // before comparing or every refresh would look like a change.
+            IPEndPoint[] observed = new HashSet<IPEndPoint>(await ProbeStunObservedAsync(ct).ConfigureAwait(false)).ToArray();
+            if (observed.Length == 0)
+            {
+                return;
+            }
+
+            bool changed;
+            lock (_gate)
+            {
+                changed = observed.Length != _reflexive.Count || observed.Any(ep => !_reflexive.Contains(ep));
+                if (changed)
+                {
+                    _reflexive.Clear();
+                    _reflexive.AddRange(observed);
+                }
+            }
+
+            if (!changed)
+            {
+                return;
+            }
+
+            RefreshLocalCandidates();
             foreach (ConnState c in ConnectionsSnapshot())
             {
-                ValidatePath(c);
+                if (c.State != PinholeConnectionState.Closed)
+                {
+                    AnnounceTo(c); // gentle: the peer keeps its working path and only learns our new candidates
+                }
             }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            Volatile.Write(ref _stunRefreshing, 0);
         }
     }
 

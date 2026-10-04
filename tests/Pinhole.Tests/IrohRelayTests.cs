@@ -324,10 +324,15 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
-        _listener.Stop();
+        // Abort the sockets before stopping the listener: HttpListener.Stop disposes response
+        // streams that a session mid-write is still using, and that race throws from inside
+        // the runtime's own cleanup. The listener is going away either way.
         DisconnectAll();
+        try { _listener.Stop(); }
+        catch (ObjectDisposedException) { }
         await _accept;
         await Task.WhenAll(_sessions).WaitAsync(TimeSpan.FromSeconds(3));
-        _listener.Close();
+        try { _listener.Close(); }
+        catch (ObjectDisposedException) { }
     }
 }

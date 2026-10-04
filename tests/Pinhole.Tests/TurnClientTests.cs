@@ -103,21 +103,33 @@ public sealed class FakeTurnServer : IDisposable
             ushort type = BinaryPrimitives.ReadUInt16BigEndian(_buf);
             byte[] msg = _buf[..n];
             byte[] txid = msg[8..20];
-            List<(ushort Type, byte[] Value)> attrs = ParseAttrs(msg);
-            switch (type)
+            try
             {
-                case TypeAllocate:
-                    HandleAllocate(remote, msg, txid, attrs);
-                    break;
-                case TypeRefresh:
-                    HandleRefresh(remote, msg, txid, attrs);
-                    break;
-                case TypeCreatePerm:
-                    HandlePermission(remote, msg, txid, attrs);
-                    break;
-                case TypeSendInd:
-                    HandleSendIndication(remote, attrs);
-                    break;
+                List<(ushort Type, byte[] Value)> attrs = ParseAttrs(msg);
+                switch (type)
+                {
+                    case TypeAllocate:
+                        HandleAllocate(remote, msg, txid, attrs);
+                        break;
+                    case TypeRefresh:
+                        HandleRefresh(remote, msg, txid, attrs);
+                        break;
+                    case TypeCreatePerm:
+                        HandlePermission(remote, msg, txid, attrs);
+                        break;
+                    case TypeSendInd:
+                        HandleSendIndication(remote, attrs);
+                        break;
+                }
+            }
+            catch (SocketException)
+            {
+                // A reply to a client that disposed mid-flight (ICMP unreachable) must cost
+                // one datagram — an unhandled throw on this thread kills the test host.
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
             }
         }
     }

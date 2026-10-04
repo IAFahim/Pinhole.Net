@@ -47,6 +47,14 @@ public sealed record PinholeOptions
     /// tolerated: the node comes up with whatever candidates were observed. Default 5 s.</summary>
     public TimeSpan BindProbeBudget { get; init; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>How often the node re-probes its STUN servers to refresh the server-reflexive
+    /// candidates (the same periodic re-discovery iroh performs). NAT mappings move silently —
+    /// DHCP renews, router reboots — without any OS network event, so the node re-checks on a
+    /// timer and, when the observed mapping changed, re-advertises its candidates to every
+    /// peer; regenerate and re-share connection strings after a change. Working direct paths
+    /// are never torn down by a refresh. Default 1 minute; zero or negative disables.</summary>
+    public TimeSpan StunRefreshInterval { get; init; } = TimeSpan.FromMinutes(1);
+
     /// <summary>Validate silent direct-path death (default true). NAT mappings expire and
     /// firewalls drop packets without any send error, so a connection that has received
     /// nothing on its direct path for <see cref="PathValidationIdle"/> is probed with the
@@ -138,6 +146,8 @@ public sealed record PinholeOptions
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationMaxUnansweredProbes, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.ReceiveBufferCapacity, 0);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReceiveBufferCapacity, 65536);
+        if (options.StunRefreshInterval > TimeSpan.Zero && options.StunRefreshInterval < TimeSpan.FromMilliseconds(100))
+            throw new ArgumentOutOfRangeException(nameof(options), "StunRefreshInterval must be zero (off) or at least 100 ms");
     }
 
     private static async Task<IPEndPoint[]> ResolveStunCatalogAsync(PinholeOptions options, CancellationToken ct)
