@@ -168,9 +168,14 @@ public sealed class IrohRelayTests
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         int before = server.Authentications;
+        Assert.True(a.HasRelay);
+        Assert.True(b.HasRelay);
         server.DisconnectAll();
+        await TestPoll.UntilAsync(Timeout, () => !a.HasRelay && !b.HasRelay);
         await TestPoll.UntilAsync(Timeout, () => server.Authentications >= before + 2
             && atA.State == PinholeConnectionState.Degraded && atB.State == PinholeConnectionState.Degraded);
+        Assert.True(a.HasRelay);
+        Assert.True(b.HasRelay);
         Assert.Same(atA, a.Connections.Single());
         Assert.Same(atB, b.Connections.Single());
         Assert.False(atA.Closed.IsCompleted);

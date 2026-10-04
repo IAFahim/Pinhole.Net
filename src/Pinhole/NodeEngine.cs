@@ -123,6 +123,16 @@ internal sealed class NodeEngine : IDisposable
 
     public ulong PeerId => _peerId;
 
+    public bool HasRelay
+    {
+        get
+        {
+            lock (_gate)
+                return !_disposed && (_irohRelays.Values.Any(r => r.IsAlive)
+                    || AliveRelayClientsNoLock().Any(c => c.RelayedAddress is not null));
+        }
+    }
+
     internal Channel<ConnState>? Incoming => _incoming;
 
     public void DisposeConnection(ConnState c) => _ = CloseAsync(c);
@@ -678,6 +688,7 @@ internal sealed class NodeEngine : IDisposable
         ConnState? husk;
         lock (_gate)
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(PinholeNode));
             // Atomic check-and-insert: two concurrent dials at the same target must share
             // one connection, not silently overwrite each other's entry.
             if (_conns.TryGetValue(cs.PeerId, out ConnState? existing)

@@ -9,8 +9,7 @@ string myConnectionString = node.ConnectionString;
 Console.WriteLine("Your connection string (share this with your friend):");
 Console.WriteLine(myConnectionString);
 Console.WriteLine();
-bool hasRelay = ConnectionString.Parse(myConnectionString).Candidates.Any(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay);
-if (hasRelay)
+if (node.HasRelay)
 {
     Console.WriteLine("One person presses Enter to listen; the other pastes the listener's connection string.");
 }
@@ -33,38 +32,14 @@ while (true)
         break;
     }
 
-    // Accept the code on its own if the "pinhole1:" prefix wasn't copied.
-    if (!peerConnectionString.Contains(':'))
-    {
-        peerConnectionString = ConnectionString.Scheme + ":" + peerConnectionString;
-    }
-
-    if (!ConnectionString.TryParse(peerConnectionString, out ConnectionString? peer))
-    {
-        Console.WriteLine("Invalid connection string. Copy your friend's connection string and try again.");
-        continue;
-    }
-
-    if (peer.PeerId == node.PeerId)
-    {
-        Console.WriteLine("That is your own connection string. Paste your friend's, or press Enter to listen.");
-        continue;
-    }
-
     Console.WriteLine("Connecting to your friend...");
-    try
+    PinholeConnectResult result = await node.TryConnectAsync(peerConnectionString);
+    if (result.IsSuccess)
     {
-        connected = await node.ConnectAsync(peerConnectionString);
+        connected = result.Connection;
         break;
     }
-    catch (TimeoutException)
-    {
-        Console.WriteLine("Connection timed out. Keep both apps running and paste each other's current strings around the same time.");
-        if (!peer.Candidates.Any(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay))
-        {
-            Console.WriteLine("Your friend's string has no relay. If direct attempts keep failing, a working relay is needed.");
-        }
-    }
+    Console.WriteLine(result.ErrorMessage);
 }
 
 await using PinholeConnection connection = connected;

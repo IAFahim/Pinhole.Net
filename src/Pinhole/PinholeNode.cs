@@ -10,6 +10,8 @@ namespace Pinhole;
 /// two peers — clipboard, your server, your game lobby — is the application's concern.</summary>
 public sealed class PinholeNode : IAsyncDisposable, IDisposable
 {
+    private const string InvalidCodeMessage = "Invalid connection string. Copy your friend's current connection string and try again.";
+    private const string SelfConnectionMessage = "That is your own connection string. Use your friend's string, or listen for an incoming connection.";
     private readonly NodeEngine _engine;
     private readonly PinholeOptions _options;
     private volatile NatHint _natHint = NatHint.Unknown;
@@ -57,6 +59,10 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
 
+    /// <summary>Whether this node currently has a live iroh or TURN relay available.
+    /// This can change as relays disconnect or reconnect; it does not guarantee a peer is reachable.</summary>
+    public bool HasRelay => _engine.HasRelay;
+
     /// <summary>Every live connection this node is part of, keyed by nothing — a snapshot list.</summary>
     public IReadOnlyList<PinholeConnection> Connections =>
         _engine.ConnectionsSnapshot().Select(c => c.Public!).ToArray();
@@ -86,26 +92,70 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>Dials a peer from its connection string. The chain runs internally — direct
     /// punch first, relay as the standing fallback — and the task completes when connected on
-    /// either path. It fails only when the whole chain fails.</summary>
+    /// either path. Surrounding whitespace and codes without the pinhole1: prefix are accepted.
+    /// Malformed codes throw FormatException, self-dials throw ArgumentException, and failed
+    /// attempts throw TimeoutException. Use TryConnectAsync to get a result for these expected failures.</summary>
     public async Task<PinholeConnection> ConnectAsync(string connectionString, CancellationToken ct = default)
     {
-        ConnectionString cs = Pinhole.ConnectionString.Parse(connectionString);
+        ArgumentNullException.ThrowIfNull(connectionString);
+        ct.ThrowIfCancellationRequested();
+        if (!TryParseCode(connectionString, out ConnectionString? cs))
+            throw new FormatException(InvalidCodeMessage);
         if (cs.PeerId == PeerId)
-        {
-            throw new ArgumentException("connection string points at this node itself", nameof(connectionString));
-        }
+            throw new ArgumentException(SelfConnectionMessage, nameof(connectionString));
 
+        return await ConnectPeerAsync(cs, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Dials a pasted connection code and returns either a connection or a failure
+    /// with a reason and message. Accepts surrounding whitespace and an omitted pinhole1: prefix.
+    /// Cancellation still throws OperationCanceledException; unexpected errors are not hidden.</summary>
+    public async Task<PinholeConnectResult> TryConnectAsync(string? connectionString, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!TryParseCode(connectionString, out ConnectionString? cs))
+            return PinholeConnectResult.Failed(PinholeConnectFailure.InvalidConnectionString, InvalidCodeMessage);
+        if (cs.PeerId == PeerId)
+            return PinholeConnectResult.Failed(PinholeConnectFailure.SelfConnection, SelfConnectionMessage);
+
+        try
+        {
+            return PinholeConnectResult.Connected(await ConnectPeerAsync(cs, ct).ConfigureAwait(false));
+        }
+        catch (TimeoutException ex)
+        {
+            return PinholeConnectResult.Failed(PeerHasRelay(cs)
+                ? PinholeConnectFailure.TimedOut : PinholeConnectFailure.NoRelayFallback, ex.Message);
+        }
+    }
+
+    private static bool TryParseCode(string? text,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ConnectionString? cs)
+    {
+        cs = null;
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        text = text.Trim();
+        if (!text.Contains(':')) text = Pinhole.ConnectionString.Scheme + ":" + text;
+        return Pinhole.ConnectionString.TryParse(text, out cs);
+    }
+
+    private static bool PeerHasRelay(ConnectionString cs) =>
+        cs.Candidates.Any(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay);
+
+    private async Task<PinholeConnection> ConnectPeerAsync(ConnectionString cs, CancellationToken ct)
+    {
         ConnState c = _engine.ConnectAsync(cs, ct);
         try
         {
             await c.Connected.Task.WaitAsync(_options.ConnectTimeout, ct).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
             await _engine.CloseAsync(c).ConfigureAwait(false);
-            throw new TimeoutException(
-                "could not connect: the direct punch failed and no relay path was established " +
-                "(the peer's connection string carries no relay candidate, or the relay is unreachable)");
+            string message = PeerHasRelay(cs)
+                ? "Connection timed out. Keep both apps running and use your friend's current connection string. The peer may be offline, or a relay path could not be established."
+                : "Direct connection timed out and your friend's connection string has no relay fallback. Share a fresh string after their relay connects, or try connecting from both PCs at the same time.";
+            throw new TimeoutException(message, ex);
         }
         catch (OperationCanceledException)
         {

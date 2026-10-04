@@ -64,6 +64,9 @@ fallback — and returns when connected **on either path**; it never "fails beca
 failed". Both directions of a conversation ride the same connection object for its whole
 life, across every network change.
 
+`ConnectAsync` accepts surrounding whitespace and codes with or without `pinhole1:`.
+The library validates the code and rejects a self-dial; callers do not need to parse it first.
+
 Or run it with no code at all:
 
 ```bash
@@ -81,6 +84,31 @@ the other pastes the listener's string. Type messages after it says `Connected`,
 the new HTTPS relay candidates. A code pasted without the `pinhole1:` prefix is accepted.
 
 ## Usage
+
+### Connection errors and relay availability
+
+`node.HasRelay` reports whether a relay is currently connected or allocated. It updates
+after disconnects and reconnects; it does not guarantee the other peer is reachable.
+
+Use `ConnectAsync` for the shortest successful path, or `TryConnectAsync` when you want
+to display a failure and let the user try another code:
+
+```csharp
+PinholeConnectResult result = await node.TryConnectAsync(pastedCode);
+if (!result.IsSuccess)
+{
+    Console.WriteLine(result.ErrorMessage);
+    return;
+}
+await using PinholeConnection conn = result.Connection;
+```
+
+`result.Failure` distinguishes an invalid code, your own code, a failed direct attempt
+without an advertised relay fallback, and a timeout with relay candidates. Failed attempts
+are cleaned up so callers can retry. Cancellation still throws `OperationCanceledException`;
+unexpected errors, such as using a disposed node, still throw. `ConnectAsync` keeps its
+existing `FormatException`, `ArgumentException`, and `TimeoutException` categories and
+now includes an actionable failure message.
 
 ### Receiving datagrams
 
