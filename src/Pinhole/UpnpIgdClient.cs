@@ -46,9 +46,10 @@ internal sealed class UpnpIgdClient : IDisposable
     private static async Task<List<Uri>> DiscoverAsync(IPEndPoint? unicast, CancellationToken ct)
     {
         var locations = new List<Uri>();
+        TimeSpan window = unicast is null ? SsdpWindow : TimeSpan.FromMilliseconds(300); // unicast replies are immediate; multicast needs the full window
         using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
         {
-            ReceiveTimeout = (int)SsdpWindow.TotalMilliseconds,
+            ReceiveTimeout = (int)window.TotalMilliseconds,
         };
         udp.Bind(new IPEndPoint(IPAddress.Any, 0));
 
@@ -61,14 +62,14 @@ internal sealed class UpnpIgdClient : IDisposable
         // Responses are unicast to our ephemeral port; collect LOCATION headers until the
         // window closes. Duplicate locations across the two search targets are expected.
         var buf = new byte[2048];
-        long deadline = Environment.TickCount64 + (long)SsdpWindow.TotalMilliseconds;
+        long deadline = Environment.TickCount64 + (long)window.TotalMilliseconds;
         var seen = new HashSet<Uri>();
         while (Environment.TickCount64 < deadline)
         {
             int n;
             try
             {
-                if (!udp.Poll((int)Math.Max(1, deadline - Environment.TickCount64), SelectMode.SelectRead))
+                if (!udp.Poll((int)Math.Max(1, deadline - Environment.TickCount64) * 1000, SelectMode.SelectRead))
                 {
                     break;
                 }

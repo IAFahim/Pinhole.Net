@@ -912,6 +912,16 @@ internal sealed class NodeEngine : IDisposable
 
     private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival)
     {
+        // Stranger flood bound, checked BEFORE the insert: with the single receive thread
+        // as the only writer, the table then never crosses the bound at all, and no
+        // observer can catch the overshoot window an insert-then-remove would leave. The
+        // post-insert check below stays for the rare case of a concurrent dial landing
+        // between this read and the insert.
+        if (_conns.Count >= MaxConnections)
+        {
+            return null;
+        }
+
         var c = new ConnState
         {
             PeerId = peerId,
@@ -930,9 +940,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (_conns.Count > MaxConnections)
         {
-            // Stranger flood: refuse to materialize more state. The tiny race window with a
-            // concurrent dial is fine — applications dialing peers themselves are not the
-            // population this bound protects against.
+            // A concurrent dial won the race to the last slot; the stranger gives way.
             _conns.TryRemove(new KeyValuePair<ulong, ConnState>(peerId, c));
             return null;
         }

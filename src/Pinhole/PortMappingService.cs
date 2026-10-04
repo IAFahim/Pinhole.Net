@@ -23,6 +23,8 @@ internal interface IPortMapLease : IDisposable
 internal sealed class PortMappingService : IDisposable
 {
     private static readonly TimeSpan RetryDiscoveryAfter = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan FirstPassRetryAfter = TimeSpan.FromSeconds(4);
+    private const int MaxDiscoveryPasses = 3;
 
     private readonly PinholeOptions _options;
     private readonly Action<IPEndPoint?> _publish;
@@ -32,6 +34,7 @@ internal sealed class PortMappingService : IDisposable
     private long _nextActionTicks = long.MaxValue; // 0 = an action (renew) is in flight
     private bool _everMapped;
     private int _discovering;
+    private int _passes; // discovery attempts; a slow first pass gets a bounded retry
 
     public PortMappingService(PinholeOptions options, Action<IPEndPoint?> publish)
     {
@@ -77,6 +80,7 @@ internal sealed class PortMappingService : IDisposable
 
     private async Task DiscoverAsync(int internalPort)
     {
+        Interlocked.Increment(ref _passes);
         IPortMapLease? lease = null;
         try
         {
@@ -160,7 +164,7 @@ internal sealed class PortMappingService : IDisposable
                 _nextActionTicks = 0; // busy until the renewal lands
                 lease = live;
             }
-            else if (_everMapped)
+            else if (_everMapped || _nextActionTicks != long.MaxValue)
             {
                 _nextActionTicks = long.MaxValue; // due at most once: rediscovery sets its own schedule
                 rediscoverPort = _internalPort;
@@ -229,11 +233,15 @@ internal sealed class PortMappingService : IDisposable
             }
             else
             {
-                // Nothing mapped. Retry only if a mapping ever worked here — a network that
-                // never spoke UPnP/PMP/PCP must not be probed every minute forever.
+                // Nothing mapped. Retry a mapping that previously worked once a minute; a
+                // first pass that mapped nothing gets a few short retries (a busy moment
+                // must not cost the node its mapping forever) and then stops — a network
+                // that never spoke UPnP/PMP/PCP is not probed forever.
                 _nextActionTicks = _everMapped
                     ? Environment.TickCount64 + (long)RetryDiscoveryAfter.TotalMilliseconds
-                    : long.MaxValue;
+                    : _passes < MaxDiscoveryPasses
+                        ? Environment.TickCount64 + (long)FirstPassRetryAfter.TotalMilliseconds
+                        : long.MaxValue;
             }
         }
 
