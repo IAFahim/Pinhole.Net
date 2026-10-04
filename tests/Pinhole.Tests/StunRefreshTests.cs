@@ -49,13 +49,21 @@ public sealed class StunRefreshTests
 
         stun.ReportMappedOverride = Mapping(41000);
 
-        await TestPoll.UntilAsync(Timeout, () => node.PublicEndpoints.Any(ep => ep.Port == 41000));
-        Assert.DoesNotContain(node.PublicEndpoints, ep => ep.Port == 40000); // replaced, not accumulated
+        // Poll on the artifact the test ultimately asserts (the regenerated string), so the
+        // pass condition and the assertions below can never observe different generations.
+        await TestPoll.UntilAsync(Timeout, () =>
+        {
+            if (!Pinhole.ConnectionString.TryParse(node.ConnectionString, out Pinhole.ConnectionString? cs))
+            {
+                return false;
+            }
 
-        // The connection string regenerates from live candidates, so it carries the new mapping.
-        Assert.True(Pinhole.ConnectionString.TryParse(node.ConnectionString, out Pinhole.ConnectionString? cs));
-        Assert.Contains(cs.Candidates, c => c.Kind == CandidateKind.Reflexive && c.Address.Port == 41000);
-        Assert.DoesNotContain(cs.Candidates, c => c.Kind == CandidateKind.Reflexive && c.Address.Port == 40000);
+            IReadOnlyList<PinholeCandidate> reflexive = cs.Candidates.Where(c => c.Kind == CandidateKind.Reflexive).ToList();
+            return reflexive.Any(c => c.Address.Port == 41000) && reflexive.All(c => c.Address.Port != 40000);
+        });
+
+        Assert.Contains(node.PublicEndpoints, ep => ep.Port == 41000);
+        Assert.DoesNotContain(node.PublicEndpoints, ep => ep.Port == 40000); // replaced, not accumulated
     }
 
     [Fact]

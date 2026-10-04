@@ -277,35 +277,44 @@ internal sealed class NodeEngine : IDisposable
 
     private void RefreshLocalCandidates()
     {
-        int port = LocalPort;
         lock (_gate)
         {
-            _localCandidates.Clear();
-            _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, port)));
-            foreach (IPEndPoint ep in HostEndpoints(port))
-            {
-                _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
-            }
+            RefreshLocalCandidatesNoLock();
+        }
+    }
 
-            foreach (IPEndPoint ep in _reflexive)
-            {
-                _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, ep));
-            }
+    /// <summary>Caller must hold <see cref="_gate"/>. Split out so the STUN refresh can
+    /// swap the reflexive set and rebuild the advertised candidates as ONE critical
+    /// section — otherwise an observer can see the new <c>PublicEndpoints</c> while the
+    /// connection string still carries the old mapping.</summary>
+    private void RefreshLocalCandidatesNoLock()
+    {
+        int port = LocalPort;
+        _localCandidates.Clear();
+        _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, port)));
+        foreach (IPEndPoint ep in HostEndpoints(port))
+        {
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
+        }
 
-            foreach (TurnClient client in AliveRelayClientsNoLock())
-            {
-                if (client.RelayedAddress is { } relayed)
-                {
-                    _localCandidates.Add(new PinholeCandidate(CandidateKind.Relay, relayed, client.Server, client.Username, client.Credential));
-                }
-            }
+        foreach (IPEndPoint ep in _reflexive)
+        {
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, ep));
+        }
 
-            if (_relayIdentity is not null)
+        foreach (TurnClient client in AliveRelayClientsNoLock())
+        {
+            if (client.RelayedAddress is { } relayed)
             {
-                foreach (IrohRelay relay in _irohRelays.Values.Where(r => r.IsAlive))
-                    _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
-                        new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _relayIdentity.PublicKey));
+                _localCandidates.Add(new PinholeCandidate(CandidateKind.Relay, relayed, client.Server, client.Username, client.Credential));
             }
+        }
+
+        if (_relayIdentity is not null)
+        {
+            foreach (IrohRelay relay in _irohRelays.Values.Where(r => r.IsAlive))
+                _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
+                    new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _relayIdentity.PublicKey));
         }
     }
 
@@ -1039,6 +1048,7 @@ internal sealed class NodeEngine : IDisposable
                 {
                     _reflexive.Clear();
                     _reflexive.AddRange(observed);
+                    RefreshLocalCandidatesNoLock(); // same critical section: no torn state between the two views
                 }
             }
 
@@ -1047,7 +1057,6 @@ internal sealed class NodeEngine : IDisposable
                 return;
             }
 
-            RefreshLocalCandidates();
             foreach (ConnState c in ConnectionsSnapshot())
             {
                 if (c.State != PinholeConnectionState.Closed)
