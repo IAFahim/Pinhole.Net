@@ -93,7 +93,12 @@ internal readonly record struct Subnet(IPAddress Base, int PrefixLength)
 
 /// <summary>One shaping rule over a region of the virtual internet. First matching rule
 /// wins; unmatched traffic crosses clean. <see cref="Match"/> sees post-NAT (internet)
-/// addresses, so a rule on a subnet shapes exactly the packets that traverse it.</summary>
+/// addresses, so a rule on a subnet shapes exactly the packets that traverse it.
+/// <see cref="BitsPerSecond"/> installs a finite-bandwidth bottleneck: every matching
+/// packet shares ONE FIFO drained at that rate, with <see cref="QueuePackets"/> of
+/// standing room — a full queue tail-drops, exactly the finite-queue behavior the
+/// congestion-control baseline (#27) needs. Shaping applies after the loss decision;
+/// the rule's delay/jitter is propagation time applied when a packet leaves the queue.</summary>
 internal sealed class LinkRule
 {
     public required Func<IPEndPoint, IPEndPoint, bool> Match { get; init; }
@@ -102,6 +107,8 @@ internal sealed class LinkRule
     public TimeSpan Delay { get; init; }
     public TimeSpan Jitter { get; init; }
     public bool DropAll { get; init; }
+    public long BitsPerSecond { get; init; }
+    public int QueuePackets { get; init; }
 
     public long Passed;
     public long Lost;
@@ -162,6 +169,23 @@ internal sealed class LinkRule
         DropAll = dropAll,
         Delay = delay,
         Jitter = jitter,
+    };
+
+    /// <summary>A bandwidth bottleneck between two subnets: one shared FIFO, tail-dropped
+    /// when full, drained at <paramref name="bitsPerSecond"/> in both directions. Optional
+    /// independent loss chains ride the same rule — remember first-match-wins, so loss that
+    /// should apply to shaped traffic must live here, not in a second overlapping rule.</summary>
+    public static LinkRule Bottleneck(Subnet a, Subnet b, long bitsPerSecond, int queuePackets,
+        TimeSpan delay = default, TimeSpan jitter = default,
+        LossModel? forwardLoss = null, LossModel? reverseLoss = null) => new()
+    {
+        Match = (src, dst) => (a.Contains(src) && b.Contains(dst)) || (b.Contains(src) && a.Contains(dst)),
+        Delay = delay,
+        Jitter = jitter,
+        BitsPerSecond = bitsPerSecond,
+        QueuePackets = queuePackets,
+        ForwardLoss = forwardLoss,
+        ReverseLoss = reverseLoss,
     };
 
     /// <summary>A black hole around one subnet: every packet into or out of it dies.</summary>

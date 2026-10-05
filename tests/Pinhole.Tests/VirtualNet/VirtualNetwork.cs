@@ -15,6 +15,7 @@ internal sealed class VirtualNetwork : IDisposable
     private readonly List<VirtualNat> _nats = [];
     private readonly List<LinkRule> _rules = [];
     private readonly List<ScheduledPacket> _inflight = [];
+    private readonly Dictionary<LinkRule, Shaper> _shapers = new();
     private readonly Thread _scheduler;
     private readonly AutoResetEvent _wake = new(false);
     private volatile bool _disposed;
@@ -103,15 +104,41 @@ internal sealed class VirtualNetwork : IDisposable
             return;
         }
 
+        if (rule is not null)
+        {
+            Interlocked.Increment(ref rule.Passed);
+        }
+
+        // A finite-bandwidth rule parks the packet in its shared FIFO instead of crossing
+        // now; the scheduler drains it at the configured rate and applies the rule's
+        // propagation delay as the packet leaves the queue.
+        if (rule is { BitsPerSecond: > 0 } shaped)
+        {
+            Shaper shaper;
+            lock (_gate)
+            {
+                if (!_shapers.TryGetValue(shaped, out shaper!))
+                {
+                    shaper = new Shaper(this, shaped.BitsPerSecond, shaped.QueuePackets);
+                    _shapers[shaped] = shaper;
+                }
+            }
+
+            shaper.Enqueue(source, dest, payload);
+            return;
+        }
+
+        ScheduleCrossing(rule, source, dest, payload);
+    }
+
+    /// <summary>Applies the rule's propagation delay/jitter (or delivers immediately on a
+    /// zero-delay link, preserving causal order like loopback UDP).</summary>
+    private void ScheduleCrossing(LinkRule? rule, IPEndPoint source, IPEndPoint dest, byte[] payload)
+    {
         TimeSpan delay = rule?.Delay ?? TimeSpan.Zero;
         if (rule is { } shaped && shaped.Jitter > TimeSpan.Zero)
         {
             delay += TimeSpan.FromMilliseconds(Random.Shared.NextDouble() * shaped.Jitter.TotalMilliseconds);
-        }
-
-        if (rule is not null)
-        {
-            Interlocked.Increment(ref rule.Passed);
         }
 
         if (delay <= TimeSpan.Zero)
@@ -167,6 +194,7 @@ internal sealed class VirtualNetwork : IDisposable
         while (!_disposed)
         {
             List<ScheduledPacket> due = [];
+            List<(LinkRule Rule, List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Emitted)> drained = [];
             lock (_gate)
             {
                 DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -178,11 +206,33 @@ internal sealed class VirtualNetwork : IDisposable
                         _inflight.RemoveAt(i);
                     }
                 }
+
+                foreach ((LinkRule rule, Shaper shaper) in _shapers)
+                {
+                    List<(IPEndPoint, IPEndPoint, byte[])> emitted = shaper.Drain(now);
+                    if (emitted.Count > 0)
+                    {
+                        drained.Add((rule, emitted));
+                    }
+                }
             }
 
-            foreach (ScheduledPacket packet in due)
+            // Due packets were collected newest-first (backwards removal is O(1)); deliver
+            // oldest-first: chronological, causal order — exactly what loopback UDP gives.
+            // Reversed batches would trip the engine's strictly-increasing replay window
+            // and reject all but one frame per tick (found by the #27 delay rungs).
+            for (int i = due.Count - 1; i >= 0; i--)
             {
-                Deliver(packet.Source, packet.Dest, packet.Payload);
+                Deliver(due[i].Source, due[i].Dest, due[i].Payload);
+            }
+
+            // Drained packets left the bottleneck; propagation delay applies from now.
+            foreach ((LinkRule rule, var emitted) in drained)
+            {
+                foreach ((IPEndPoint source, IPEndPoint dest, byte[] payload) in emitted)
+                {
+                    ScheduleCrossing(rule, source, dest, payload);
+                }
             }
 
             _wake.WaitOne(5);
@@ -202,7 +252,13 @@ internal sealed class VirtualNetwork : IDisposable
     {
         lock (_gate)
         {
-            string rules = string.Join("; ", _rules.Select(r => $"rule(passed={Interlocked.Read(ref r.Passed)},lost={Interlocked.Read(ref r.Lost)})"));
+            string rules = string.Join("; ", _rules.Select(r =>
+            {
+                string shaper = _shapers.TryGetValue(r, out Shaper? s) && (s.QueuedDropped > 0 || s.Dequeued > 0)
+                    ? $" shaped(dequeued={s.Dequeued},tailDropped={s.QueuedDropped},depth={s.Depth})"
+                    : "";
+                return $"rule(passed={Interlocked.Read(ref r.Passed)},lost={Interlocked.Read(ref r.Lost)}){shaper}";
+            }));
             string nats = string.Join("; ", _nats.Select(n => n.Counters()));
             return $"delivered={Interlocked.Read(ref Delivered)} dropped={Interlocked.Read(ref DroppedByPolicy)} " +
                    $"unroutable={Interlocked.Read(ref Unroutable)} {rules} {nats}".Trim();
@@ -241,4 +297,67 @@ internal sealed class VirtualNetwork : IDisposable
 
     private readonly record struct ScheduledPacket(
         DateTimeOffset Due, IPEndPoint Source, IPEndPoint Dest, byte[] Payload);
+
+    /// <summary>One shared finite-bandwidth FIFO (the bottleneck link): packets enter on
+    /// arrival (a full queue tail-drops), and <see cref="Drain"/> releases exactly as many
+    /// bytes as the elapsed time × rate paid for. Queue delay is emergent — a burst sits in
+    /// the queue until the link can send it — so a small queue turns bursts into loss and a
+    /// deep one into bufferbloat, the two regimes the #27 baseline must record.</summary>
+    internal sealed class Shaper(VirtualNetwork net, long bitsPerSecond, int queuePackets)
+    {
+        private readonly object _gate = new();
+        private readonly Queue<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> _queue = new();
+        private double _creditBits;
+        private DateTimeOffset _lastDrain = DateTimeOffset.UtcNow;
+
+        public long QueuedDropped;
+        public long Dequeued;
+        public int Depth { get { lock (_gate) { return _queue.Count; } } }
+
+        public void Enqueue(IPEndPoint source, IPEndPoint dest, byte[] payload)
+        {
+            lock (_gate)
+            {
+                if (_queue.Count >= queuePackets)
+                {
+                    Interlocked.Increment(ref QueuedDropped);
+                    Interlocked.Increment(ref net.DroppedByPolicy);
+                    return;
+                }
+
+                _queue.Enqueue((source, dest, payload));
+            }
+        }
+
+        /// <summary>Called by the scheduler: pays out credit for the elapsed time and
+        /// releases whole packets while their byte-cost fits.</summary>
+        public List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Drain(DateTimeOffset now)
+        {
+            lock (_gate)
+            {
+                if (_queue.Count == 0)
+                {
+                    _lastDrain = now;
+                    _creditBits = 0;
+                    return [];
+                }
+
+                _creditBits += (now - _lastDrain).TotalSeconds * bitsPerSecond;
+                _lastDrain = now;
+                // A modest burst allowance keeps the link from idling between scheduler
+                // ticks; real links serialize packet-by-packet, the lab per 5 ms tick.
+                _creditBits = Math.Min(_creditBits, bitsPerSecond * 0.2);
+                var emitted = new List<(IPEndPoint, IPEndPoint, byte[])>();
+                while (_queue.Count > 0 && _queue.Peek().Payload.Length * 8L <= _creditBits)
+                {
+                    (IPEndPoint source, IPEndPoint dest, byte[] payload) = _queue.Dequeue();
+                    _creditBits -= payload.Length * 8L;
+                    Interlocked.Increment(ref Dequeued);
+                    emitted.Add((source, dest, payload));
+                }
+
+                return emitted;
+            }
+        }
+    }
 }
