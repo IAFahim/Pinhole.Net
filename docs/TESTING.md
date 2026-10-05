@@ -107,3 +107,42 @@ assert outcomes and print `lab.Net.Counters()` so failures carry their physics. 
 scenarios, `BlobServer`/`BlobClient` take the same options via `NodeOptions`
 (`lab.BaseOptions(...)` + your socket factory). Deterministic seeds for loss models keep
 a rung reproducible; budgets come from `TestBudget`.
+
+## Real-infrastructure tests (#26): real relays, real OS sockets
+
+`tests/Pinhole.Tests/RealNet/` runs scenarios against REAL external infrastructure —
+no virtual network, no fake relay — on the production `SystemUdpSocket` path:
+
+| Scenario | Infrastructure | What it proves |
+|---|---|---|
+| relay-only connect + flow | a real `iroh-relay` server process (dev HTTP on loopback) | the managed iroh-relay WebSocket client interoperates with the reference server; relay-only sessions are `Degraded` + end-to-end encrypted; no hidden UDP bypass (all non-relay candidates stripped from the string) |
+| 256 KiB blob download through the relay | same | the full blob stack (Hello/Welcome negotiation, sealed frames, BLAKE3 verification) over a real relay |
+| real relay process death + restart | kill the server, start a fresh process on the same port | the logical connection object survives a REAL server restart and heals onto an available path; the healed path (direct or relay) is recorded in the report |
+| TURN relay connect + flow | a real `turnserver` (coturn) process, RFC 5766 UDP, long-term credentials | `TurnClient` interoperates with the reference TURN server |
+
+### Running them
+
+```sh
+cargo install iroh-relay --features server --version 1.3.0 --locked   # pinned, test-only
+IROH_RELAY_BIN="$(cargo bin --find iroh-relay 2>/dev/null || echo ~/.cargo/bin)/iroh-relay" \
+  dotnet test -c Release --filter "FullyQualifiedName~RealNetworkTests"
+# TURN scenario: provide any coturn build, e.g. COTURN_BIN=/usr/bin/turnserver
+```
+
+Without the env vars the tests SKIP with instructions (they never touch public relay
+operators). Every run leaves `report.json` (tool + version, socket implementation, relay
+protocol, duration, healed-path note) and the captured server logs under
+`$TMPDIR/pinhole-realnet/<scenario>-*/` — kept on pass and fail as evidence.
+
+### Honest division of evidence
+
+- **Real**: the relay/TURN protocol interop above, plus every plain loopback test in the
+  suite (those have always used real kernel sockets — direct path, real UDP).
+- **Virtual (portable, every OS)**: NAT matrix physics, loss/delay shaping, blocked-UDP
+  hotels, CGNAT hairpin — the topology lab above, which can force topologies a
+  loopback machine physically cannot.
+- **Root-gated, documented gap**: full kernel-level NAT/firewall/impairment matrices
+  (Linux namespaces via the Patchbay CLI, or `ip/nft/tc`) are not yet wired into the C#
+  harness; the scenarios exist virtually and the tools are external, so the remaining
+  work is a TOML scenario set + runner permissions (needs `CAP_NET_ADMIN`), no new
+  simulator. A Linux-namespace run will never be reported as Windows/macOS validation.
