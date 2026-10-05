@@ -401,7 +401,10 @@ public class CryptoTests
                     BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), token);
                     fakePeer.SendTo(pack, any);
 
-                    for (int i = 0; i < 20 && !got.Task.IsCompleted; i++)
+                    // Keep the data coming until the test has seen it: on a slow runner the
+                    // whole burst can be delivered before the post-dial subscription attaches.
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    while (!got.Task.IsCompleted && sw.Elapsed < TimeSpan.FromSeconds(6))
                     {
                         byte[] data = new byte[13 + 5];
                         data[0] = 0x52;
