@@ -7,6 +7,18 @@ using System.Text;
 
 namespace Pinhole.Turn;
 
+/// <summary>The server answered and refused: a definitive error response (437 allocation
+/// mismatch, 401 after re-auth, …) proving the credentials or allocation this client holds
+/// are unusable on that server. Distinct from a timeout or transport fault, which proves
+/// nothing — callers must treat this type as retire-the-client evidence and everything
+/// else as transient.</summary>
+public sealed class TurnRejectException(int code, string reason)
+    : InvalidOperationException($"TURN {code} {reason}")
+{
+    /// <summary>The RFC 5766 error code the server answered with.</summary>
+    public int Code { get; } = code;
+}
+
 /// <summary>
 /// A relayed connection through any RFC 5766 TURN server: allocate, refresh, permission and
 /// send/data indications over one UDP socket, authenticated with long-term credentials.
@@ -532,7 +544,7 @@ public sealed class TurnClient : IAsyncDisposable
             }
         }
 
-        throw new InvalidOperationException($"TURN {code} {reason}");
+        throw new TurnRejectException(code, reason);
     }
 
     private static byte[] Message(ushort type, byte[] txid, byte[] attrs)

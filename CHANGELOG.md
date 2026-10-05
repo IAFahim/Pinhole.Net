@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — the topology/loss lab, and the three gaps it found (#20, part 1)
+
+An in-process virtual internet — NATs that really translate and filter, Gilbert-Elliott
+loss, delay and reorder — injected under the engine's socket layer through an internal
+`IUdpSocket` seam (production behavior unchanged). iroh runs its connectivity claims
+through real Linux namespaces; this is the managed equivalent, and it runs identically
+on every OS in CI. Documented in `docs/TESTING.md`.
+
+The 16-cell NAT pairing matrix reproduces the classical hole-punching table exactly:
+13 pairings punch direct (symmetric sides included, via observed-source adoption), and
+symmetric×symmetric, symmetric×port-restricted, port-restricted×symmetric are relay-only
+by physics. Scenario coverage adds the UDP-blocked hotel (not one direct datagram
+escapes), CGNAT hairpin, silent NAT mapping expiry, a v4→v6 mid-connection roam, a
+mid-transfer server roam, and relay restart/outage cells. The loss ladder records the
+blob ARQ's goodput baseline (1%→494 KiB/s … 20%→82 KiB/s, bursty 10%→251) — the curve
+congestion control (#20, part 2) will be judged against.
+
+Three real gaps surfaced and are fixed here:
+
+- **A mid-transfer roam killed the blob pumps.** `Send` throws while a connection is
+  briefly `Punching` through a rebind, and both blob pumps treated that as peer-gone.
+  Sends now ride out pathless transitions (`BlobWire.SendRidingOutPathlessness`):
+  bounded wait, closed-connection and budget escape hatches intact.
+- **A restarted TURN relay left ghost allocations.** `IsAlive` is a local flag, so a
+  relay that restarted made every relayed frame black-hole until the minutes-long
+  refresh cadence noticed. A failed permission round trip is now evidence the
+  allocation is gone: the client is retired and reallocated immediately, and a
+  relay-leg path validation (the same idle/probe/suspect machinery the direct path
+  always had) notices a silent relay within the path-validation window.
+- **Relay-only sessions cannot survive their single relay restarting in place** — both
+  peers' relayed addresses live on the dead relay and no channel remains to re-learn
+  them. Documented as a known architectural gap (`docs/TESTING.md`); fresh-ticket
+  redial now heals end-to-end in ~9 s instead of stalling for a refresh cycle.
+
 ## 1.8.0 — blob wire v3: independent provider freshness
 
 The 1.7.1 blob key derivation depended on two random 32-bit routing tokens. Those

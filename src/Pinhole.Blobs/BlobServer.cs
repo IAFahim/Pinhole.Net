@@ -57,6 +57,9 @@ public sealed class BlobServer : IAsyncDisposable
     /// <summary>Total verified chunks sent across all connections — a live activity counter.</summary>
     public long ChunksServed { get; private set; }
 
+    /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
+    internal PinholeNode Node => _node;
+
     /// <summary>Total downloader connections accepted so far.</summary>
     public long ConnectionsAccepted { get; private set; }
 
@@ -227,14 +230,14 @@ public sealed class BlobServer : IAsyncDisposable
                             byte[] head = BlobWire.Head(f.Stream, served.TotalBytes, served.TotalChunks);
                             if (cipher is null)
                             {
-                                conn.Send(head);
+                                await SendFrameAsync(conn, head).ConfigureAwait(false);
                             }
                             else
                             {
                                 // Every retry keeps the same provider nonce but seals a
                                 // new Head with a fresh counter, including directory streams.
                                 byte[] sealedHead = cipher.Seal(asProvider: true, sendCounter.Next(), head);
-                                conn.Send(BlobWire.Welcome(f.Stream, boundSession!, providerNonce!, sealedHead));
+                                await SendFrameAsync(conn, BlobWire.Welcome(f.Stream, boundSession!, providerNonce!, sealedHead)).ConfigureAwait(false);
                             }
                         }
 
@@ -272,8 +275,14 @@ public sealed class BlobServer : IAsyncDisposable
     private Task SendSealedAsync(PinholeConnection conn, BlobWire.Cipher? cipher, byte[] plain, Counter counter)
     {
         byte[] wire = cipher is null ? plain : cipher.Seal(asProvider: true, counter.Next(), plain);
-        return Task.Run(() => conn.Send(wire), _stop.Token);
+        return SendFrameAsync(conn, wire);
     }
+
+    /// <summary>Every provider→downloader frame — Welcome and Head included — rides out the
+    /// connection's transient states: a directory download sends a fresh Hello per stream,
+    /// and a server-side roam during stream N+1's handshake must not kill the pump.</summary>
+    private Task SendFrameAsync(PinholeConnection conn, byte[] wire) =>
+        Task.Run(() => BlobWire.SendRidingOutPathlessness(conn, wire, _stop.Token), _stop.Token);
 
     private async Task ServeRangeAsync(PinholeConnection conn, BlobWire.Cipher? cipher, Served item, long start, int count, Dictionary<ulong, FileStream> files, Counter counter)
     {
