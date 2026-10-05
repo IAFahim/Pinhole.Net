@@ -1378,7 +1378,9 @@ internal sealed class NodeEngine : IDisposable
         Ping(c);
     }
 
-    // ------------------------------------------------------------------ path MTU discovery    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
+    // ------------------------------------------------------------------ path MTU discovery
+
+    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
     /// size upward, a matching pong confirms a size, and three unanswered probes abandon a
     /// size for a long cooldown. Only direct paths are probed — relays tunnel whatever they
     /// are handed — and leaving the direct path forgets everything: a new path may have a
