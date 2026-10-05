@@ -47,7 +47,11 @@ public sealed class AddressRecord
     /// <summary>The most endpoints one record may carry.</summary>
     public const int MaxEndpoints = 16;
 
-    private const byte WireVersion = 1;
+    /// <summary>The most relayed endpoints one record may carry.</summary>
+    public const int MaxRelayedEndpoints = 4;
+
+    private const byte WireVersion1 = 1;
+    private const byte WireVersion2 = 2;
 
     /// <summary>The publisher's peer ID — a locator hint. A record whose ID matches the
     /// dialer's expectation but whose key does not is discarded: IDs never authorize peers.</summary>
@@ -68,6 +72,13 @@ public sealed class AddressRecord
     /// <summary>Direct and server-reflexive endpoints the publisher is reachable on.</summary>
     public IReadOnlyList<IPEndPoint> Endpoints { get; init; } = [];
 
+    /// <summary>The publisher's TURN relayed addresses (v2 records). These are plain
+    /// endpoints — the ADDRESS a peer may send at through its own allocation on the same
+    /// server — never the credentials: a relay candidate's username/password stays out of
+    /// any public record. Resolvers only adopt relayed endpoints on relay servers they are
+    /// themselves configured to use, where their own credentials already apply.</summary>
+    public IReadOnlyList<IPEndPoint> RelayedEndpoints { get; init; } = [];
+
     /// <summary>Canonical unsigned body: everything but the signature, in a fixed layout so
     /// both endpoints sign and verify identical bytes.</summary>
     public byte[] Encode()
@@ -77,25 +88,26 @@ public sealed class AddressRecord
             throw new InvalidOperationException($"records carry at most {MaxEndpoints} endpoints");
         }
 
+        if (RelayedEndpoints.Count > MaxRelayedEndpoints)
+        {
+            throw new InvalidOperationException($"records carry at most {MaxRelayedEndpoints} relayed endpoints");
+        }
+
         if (EndpointKey is not { Length: EndpointKeyLength })
         {
             throw new InvalidOperationException($"endpoint keys are {EndpointKeyLength} bytes");
         }
 
-        var payload = new MemoryStream(32 + Endpoints.Count * 19);
-        payload.WriteByte(WireVersion);
+        var payload = new MemoryStream(32 + (Endpoints.Count + RelayedEndpoints.Count) * 19);
+        payload.WriteByte(RelayedEndpoints.Count > 0 ? WireVersion2 : WireVersion1);
         WriteU64(payload, PeerId);
         payload.Write(EndpointKey);
         WriteU64(payload, Sequence);
         WriteU64(payload, (ulong)ExpiresAtUtc.ToUnixTimeSeconds());
-        payload.WriteByte((byte)Endpoints.Count);
-        foreach (IPEndPoint ep in Endpoints)
+        WriteEndpointList(payload, Endpoints);
+        if (RelayedEndpoints.Count > 0)
         {
-            byte[] raw = ep.Address.GetAddressBytes();
-            payload.WriteByte((byte)raw.Length);
-            payload.Write(raw);
-            payload.WriteByte((byte)(ep.Port >> 8));
-            payload.WriteByte((byte)ep.Port);
+            WriteEndpointList(payload, RelayedEndpoints);
         }
 
         return payload.ToArray();
@@ -135,7 +147,7 @@ public sealed class AddressRecord
         ReadOnlySpan<byte> signature = wire[^SignatureLength..];
 
         // Field reads are bounds-checked against the body; a truncated record fails here.
-        if (body[0] != WireVersion)
+        if (body[0] is not (WireVersion1 or WireVersion2) || body.Length < MinimumLength)
         {
             return false;
         }
@@ -144,8 +156,7 @@ public sealed class AddressRecord
         byte[] key = body[9..41].ToArray();
         ulong sequence = BinaryPrimitives.ReadUInt64LittleEndian(body[41..]);
         long expires = BinaryPrimitives.ReadInt64LittleEndian(body[49..]);
-        int count = body[57];
-        if (count > MaxEndpoints || peerId != expectedPeerId || !key.AsSpan().SequenceEqual(expectedEndpointKey))
+        if (peerId != expectedPeerId || !key.AsSpan().SequenceEqual(expectedEndpointKey))
         {
             return false;
         }
@@ -155,6 +166,9 @@ public sealed class AddressRecord
             return false;
         }
 
+        // The signature covers the whole body, so parsing may run after verification or
+        // before — here it runs after the structural checks and before the final
+        // length reconciliation, all under the same bytes the signature covered.
         var verifier = new Ed25519Signer();
         verifier.Init(false, new Ed25519PublicKeyParameters(key.ToArray(), 0));
         verifier.BlockUpdate(body.ToArray(), 0, body.Length);
@@ -163,20 +177,26 @@ public sealed class AddressRecord
             return false;
         }
 
-        int pos = 58;
-        var endpoints = new IPEndPoint[count];
-        for (int i = 0; i < count; i++)
+        int pos = 57;
+        int directCount = body[pos++];
+        if (!TryReadEndpointList(body, MaxEndpoints, ref pos, directCount, out IPEndPoint[] endpoints))
         {
-            int family = body[pos++];
-            if (family is not 4 and not 16 || pos + family + 2 > body.Length)
+            return false;
+        }
+
+        IPEndPoint[] relayed = [];
+        if (body[0] == WireVersion2)
+        {
+            if (pos >= body.Length)
             {
                 return false;
             }
 
-            endpoints[i] = new IPEndPoint(
-                new IPAddress(body.Slice(pos, family)),
-                BinaryPrimitives.ReadUInt16BigEndian(body.Slice(pos + family)));
-            pos += family + 2;
+            int relayedCount = body[pos++];
+            if (!TryReadEndpointList(body, MaxRelayedEndpoints, ref pos, relayedCount, out relayed))
+            {
+                return false;
+            }
         }
 
         if (pos != body.Length)
@@ -191,17 +211,65 @@ public sealed class AddressRecord
             Sequence = sequence,
             ExpiresAtUtc = DateTimeOffset.FromUnixTimeSeconds(expires),
             Endpoints = endpoints,
+            RelayedEndpoints = relayed,
         };
         return true;
     }
 
-    private const int MinimumLength = 58; // version + id + key + sequence + expiry + count
+    private const int MinimumLength = 58; // version + id + key + sequence + expiry + direct count
 
     private static void WriteU64(MemoryStream payload, ulong value)
     {
         Span<byte> tmp = stackalloc byte[8];
         BitConverter.TryWriteBytes(tmp, value);
         payload.Write(tmp);
+    }
+
+    private static void WriteEndpointList(MemoryStream payload, IReadOnlyList<IPEndPoint> endpoints)
+    {
+        payload.WriteByte((byte)endpoints.Count);
+        foreach (IPEndPoint ep in endpoints)
+        {
+            byte[] raw = ep.Address.GetAddressBytes();
+            payload.WriteByte((byte)raw.Length);
+            payload.Write(raw);
+            payload.WriteByte((byte)(ep.Port >> 8));
+            payload.WriteByte((byte)ep.Port);
+        }
+    }
+
+    /// <summary>Reads a length-prefixed endpoint list at <paramref name="pos"/>; false when
+    /// the list is malformed or over its cap. Returns the position after the list.</summary>
+    private static bool TryReadEndpointList(ReadOnlySpan<byte> body, int cap, ref int pos, int count, out IPEndPoint[] endpoints)
+    {
+        endpoints = [];
+        if (count > cap)
+        {
+            return false;
+        }
+
+        var parsed = new IPEndPoint[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (pos >= body.Length)
+            {
+                return false;
+            }
+
+            int family = body[pos++];
+            if (family is not 4 and not 16 || pos + family + 2 > body.Length)
+            {
+                return false;
+            }
+
+            parsed[i] = new IPEndPoint(
+                new IPAddress(body.Slice(pos, family)),
+                BinaryPrimitives.ReadUInt16BigEndian(body.Slice(pos + family)));
+            pos += family + 2;
+        }
+
+        endpoints = parsed;
+        return true;
     }
 }
 

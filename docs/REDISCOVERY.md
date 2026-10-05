@@ -35,8 +35,12 @@ there is no in-place migration, on purpose.
 An `AddressRecord` is the peer's signed statement of where it is reachable **now**:
 
 - peer ID, Ed25519 endpoint key, monotonic sequence (unix-time ms), expiry (90 s),
-  and up to 16 direct/reflexive endpoints,
-- Ed25519-signed over a canonical body, transported as opaque bytes.
+  up to 16 direct/reflexive endpoints, and — since the #30 relay work — up to 4 relayed
+  *addresses* (bare endpoints; the relay candidate's username/password never enters a
+  public record, and adopters only take relayed endpoints on relay servers they are
+  themselves configured to use, where their own credentials apply),
+- Ed25519-signed over a canonical body, transported as opaque bytes (record wire v2;
+  v1 parsers see the same record without the relayed section).
 
 Verification (`AddressRecord.TryParseVerified`) requires the *expected* peer ID **and**
 the *pinned* endpoint key to match, the record to be unexpired, and the signature to
@@ -50,10 +54,9 @@ serve stale, forged, or poisoned records. Every one of those outcomes only *deni
 availability*: the forged ones fail the pin, the stale ones point at dead addresses, and
 even a perfectly authentic record contains nothing that impersonates the peer, because
 impersonation requires the X25519 session handshake to pass the static-key pin too.
-Records also never carry secrets: no session keys, no pre-shared keys, no TURN
-credentials — relay reachability is deliberately *not* in records (TURN candidates embed
-passwords; iroh relay URLs are locator configuration), because a public directory must
-never hold ticket secrets.
+Records never carry secrets: no session keys, no pre-shared keys, no TURN credentials —
+the relayed section is addresses only, and adopting one requires the resolver to already
+run an allocation on that very server with its own credentials.
 
 ## Providers
 

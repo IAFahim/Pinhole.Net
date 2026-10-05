@@ -261,7 +261,7 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         // black-hole every relayed frame for a full refresh cycle (~minutes) if nothing
         // retired them.
         lab.Turn!.Dispose();
-        using FakeTurnServer successor = RestartTurnOnPort(relayPort);
+        using FakeTurnServer successor = RestartTurnOnPort(relayPort, lab.TurnAddress(0));
 
         await TestPoll.UntilAsync(TestBudget.Scenario, () =>
             RelayCandidate(a) is { } fresh && !fresh.Equals(oldRelayed));
@@ -392,13 +392,13 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         }
     }
 
-    private static FakeTurnServer RestartTurnOnPort(int port)
+    private static FakeTurnServer RestartTurnOnPort(int port, IPAddress address)
     {
         for (int attempt = 0; ; attempt++)
         {
             try
             {
-                return new FakeTurnServer(port: port);
+                return new FakeTurnServer(port: port, bindAddress: address);
             }
             catch (SocketException) when (attempt < 20)
             {

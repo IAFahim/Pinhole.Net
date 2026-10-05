@@ -42,7 +42,7 @@ public sealed class FakeTurnServer : IDisposable
     private int _nonceVersion;
     private volatile bool _running = true;
 
-    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600, int port = 0)
+    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600, int port = 0, IPAddress? bindAddress = null)
     {
         _realm = realm;
         _user = user;
@@ -50,7 +50,7 @@ public sealed class FakeTurnServer : IDisposable
         _key = MD5.HashData(Encoding.UTF8.GetBytes($"{user}:{realm}:{password}"));
         _main = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _main.ReceiveTimeout = 200; // bounded wakeups keep dispose from wedging on macOS
-        _main.Bind(new IPEndPoint(IPAddress.Loopback, port));
+        _main.Bind(new IPEndPoint(bindAddress ?? IPAddress.Loopback, port));
         Control = (IPEndPoint)_main.LocalEndPoint!;
         new Thread(Run) { IsBackground = true, Name = "fake-turn" }.Start();
     }
@@ -71,12 +71,28 @@ public sealed class FakeTurnServer : IDisposable
     public int BadIntegrityRejections { get; private set; }
     public int ExpiredRejections { get; private set; }
     public int PermissionsGranted { get; private set; }
+    public int InboundDropped { get; private set; }
+    public int SendsReceived { get; private set; }
+    public int SendsForwarded { get; private set; }
+    public int SendsUnknownTarget { get; private set; }
+    public int AllocateRejections { get; private set; }
 
     public void RotateNonce() => Interlocked.Increment(ref _nonceVersion);
 
     /// <summary>Test seam: the next N permission requests are silently dropped — a lost UDP
     /// request that proves nothing about the allocation's health.</summary>
     public int DropNextPermissions;
+
+    /// <summary>Test seam: when non-zero, every authenticated ALLOCATE is refused with this
+    /// error code (e.g. 429 quota, 401 revoked credentials) and no allocation is made.
+    /// Counts in <see cref="AllocateRejections"/> so a test can bound retry storms.</summary>
+    public int RejectAllocationsWithCode;
+
+    /// <summary>When true (the default), a data indication is only delivered to an
+    /// allocation that holds a permission for the SENDER's relayed address — the RFC 5766
+    /// receive-side gate real TURN servers enforce and the sender-side check above does
+    /// not. Turning it off reproduces the lab's historical permissive behavior.</summary>
+    public bool StrictInbound = true;
 
     /// <summary>Total successful allocations over this server's lifetime — a realloc flap
     /// detector for the relay-recovery tests.</summary>
@@ -164,8 +180,15 @@ public sealed class FakeTurnServer : IDisposable
             return;
         }
 
+        if (RejectAllocationsWithCode is var injected and not 0)
+        {
+            AllocateRejections++;
+            ReplyError(remote, TypeAllocate | ClassError, txid, (ushort)injected, "Injected");
+            return;
+        }
+
         var portHolder = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        portHolder.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        portHolder.Bind(new IPEndPoint(((IPEndPoint)_main.LocalEndPoint!).Address, 0));
         var relayed = (IPEndPoint)portHolder.LocalEndPoint!;
         var alloc = new Allocation
         {
@@ -265,6 +288,8 @@ public sealed class FakeTurnServer : IDisposable
             return;
         }
 
+        SendsReceived++;
+
         if (alloc.ExpiresAt < DateTimeOffset.UtcNow)
         {
             ExpiredRejections++;
@@ -288,11 +313,22 @@ public sealed class FakeTurnServer : IDisposable
         lock (_byRelayed) _byRelayed.TryGetValue(peer, out target);
         if (target is null)
         {
+            SendsUnknownTarget++;
+            return;
+        }
+
+        // The receive-side half of RFC 5762/5766 permissions: delivery requires the
+        // RECEIVER's allocation to permit the sender's relayed address too. Without this
+        // gate the lab cannot see permission-bootstrap bugs — everything would just flow.
+        if (StrictInbound && !target.Permitted.Contains(alloc.Relayed.Address))
+        {
+            InboundDropped++;
             return;
         }
 
         byte[] indTxid = RandomNumberGenerator.GetBytes(12);
         byte[] ind = Build(0x0017, indTxid, Attr(AttrXorPeerAddress, Xor(alloc.Relayed)), Attr(AttrData, data));
+        SendsForwarded++;
         Reply(target.Control, ind);
     }
 
@@ -484,12 +520,17 @@ public sealed class TurnClientTests
         int seen = 0;
         b.Received += (_, _) => { if (Interlocked.Increment(ref seen) == 2) bGot.TrySetResult(seen); };
 
+        // Receive-side permission, as RFC 5766 requires before the server delivers anything
+        // to b's allocation (the fake enforces it by default now).
+        await b.CreatePermissionAsync(a.RelayedAddress!.Address);
+
         await a.SendAsync("one"u8.ToArray(), b.RelayedAddress!);
         await a.SendAsync("two"u8.ToArray(), b.RelayedAddress!);
         await bGot.Task.WaitAsync(DefaultTimeout);
 
-        // Exactly one permission transact for the peer despite two sends.
-        Assert.Equal(1, server.PermissionsGranted);
+        // Two permissions total: b's explicit one, and exactly one lazy sender-side permit
+        // for the peer despite two sends — the cache is the subject.
+        Assert.Equal(2, server.PermissionsGranted);
     }
 
     [Fact]

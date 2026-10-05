@@ -1,5 +1,32 @@
 # Changelog
 
+
+## 1.10.0 (unreleased) — relay failover and changed allocations (#30)
+
+A relay is an availability dependency; several independent relays should not be. The
+engine now treats the TURN fleet as a pool: slots retry on a doubling jittered ladder
+(30 s → 5 min), a maintenance pass re-ensures dead slots even when nobody is dialing,
+relay sends route through the allocation on the *same server* as the peer's relayed
+address (the only route strict RFC 5766 servers deliver), and a relay (re)allocation
+change is blasted to every connected peer — closing the 1.9.0 "TURN restart needs a
+fresh ticket" gap. Signed address records (#29) now also carry relayed *addresses*
+(never credentials), adopted only for relay servers the resolver itself uses, so a
+relay-only pair whose allocations all changed re-finds each other without a new ticket.
+
+Two engine bugs surfaced by the new multi-relay tests and fixed here: a relayed frame
+arriving on the peer's *other* relay leg used to demote the confirmed leg and force an
+endless permission round trip (a livelock in which data never found the leg ready —
+single-relay setups could never show it), and a condemned relay leg kept its ready mark
+forever, sending into a relay that no longer owned the peer's address. The fake TURN
+server now enforces the RFC receive-side permission gate by default and can inject
+quota refusals; the lab runs each relay on its own loopback IP, like real deployments.
+
+Tests: loss of one of two relays, in-place relay restart with both allocations changed
+(the old gap, now healed without a fresh ticket), differing relay lists meeting at the
+common relay, quota refusals bounded by the ladder, all-relays-down pending then
+recovery, unresolvable relay hostnames leaving the direct path untouched. Operational
+guidance — self-hosting coturn/iroh-relay, failure domains, capacity honesty, no SLA
+claims for free infrastructure — in `docs/RELAYS.md`.
 ## 1.10.0 (unreleased) — persistent identity, authenticated rediscovery (#29)
 
 One persisted 32-byte seed (`IdentityKeySeed`) now restores the *full* endpoint

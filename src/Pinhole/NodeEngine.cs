@@ -52,11 +52,13 @@ internal sealed class ConnState
     public bool RemoteTokenKnown;
     public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
     public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
+    public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
     public bool HsckSent;                    // Gate: our confirm went out in an Hsck frame
     public bool Announced;
     public DateTimeOffset LastKick = DateTimeOffset.UtcNow;
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
     public int PunchGeneration;
+    public long LastLookupTicks;           // Gate; cadence for punch-time record lookups
     public int PermitInFlight;               // single-flight guard for TURN permission round trips
     public IrohRelay? Iroh;
     public byte[]? IrohPeerKey;
@@ -126,6 +128,7 @@ internal sealed class NodeEngine : IDisposable
     private static readonly TimeSpan SymmetricDirectTrickle = TimeSpan.FromSeconds(1);
     private const int MaxUpgradeAttempts = 120; // then passive: peer frames can still open direct
     private static readonly TimeSpan RelayRetryBackoff = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RelayMaxBackoff = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RecoverDebounce = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(2);
 
@@ -156,6 +159,7 @@ internal sealed class NodeEngine : IDisposable
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
     private readonly RelayIdentity? _endpointIdentity; // Ed25519 endpoint key; null = random per-bind peer id only
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
+    private HashSet<IPEndPoint> _lastRelayedAddresses = new();       // relay-change detector, guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
     private IPEndPoint? _mappedEndpoint;                              // router-granted mapping (UPnP/PMP/PCP), guarded by _gate
     private NatHint _observedNatHint;                                 // derived from multi-server STUN observations, guarded by _gate
@@ -190,6 +194,8 @@ internal sealed class NodeEngine : IDisposable
     private int _networkWatchHooked;
     private Task? _maintenance; // one scheduler for the whole node (path validation + STUN refresh)
     private long _nextStunRefreshTicks; // maintenance deadline; 0 = refresh disabled
+    private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
+    private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
 
     public NodeEngine(PinholeOptions options)
@@ -256,6 +262,7 @@ internal sealed class NodeEngine : IDisposable
     {
         public TurnClient? Client;
         public DateTimeOffset NextRetry = DateTimeOffset.MinValue;
+        public TimeSpan Backoff = RelayRetryBackoff; // doubles per failure; success resets
     }
 
     // ------------------------------------------------------------------ bind
@@ -300,13 +307,14 @@ internal sealed class NodeEngine : IDisposable
             _portMap.Ensure(LocalPort);
         }
 
-        if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero || _portMap is not null)
+        if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero || _portMap is not null || _relays.Count > 0)
         {
             if (_options.StunRefreshInterval > TimeSpan.Zero)
             {
                 _nextStunRefreshTicks = Environment.TickCount64 + (long)_options.StunRefreshInterval.TotalMilliseconds;
             }
 
+            _nextRelayEnsureTicks = Environment.TickCount64 + (long)RelayRetryBackoff.TotalMilliseconds;
             _maintenance = MaintenanceLoopAsync(_shutdown.Token);
         }
 
@@ -825,6 +833,42 @@ internal sealed class NodeEngine : IDisposable
 
         await Task.WhenAll(cold.Select(slot => AllocateSlotAsync(slot, ct))).ConfigureAwait(false);
         RefreshLocalCandidates();
+        ReannounceIfRelayAddressesChanged();
+    }
+
+    /// <summary>A relay (re)allocation changes this node's relayed addresses. Connected peers
+    /// still hold the old ones, and a relayed-only session's only route is through them — so
+    /// a changed set must be blasted to every peer immediately. This closes the old "TURN
+    /// restart requires a fresh ticket" gap: the peer's announce handler adopts our new
+    /// relay candidates and re-punches without any out-of-band action.</summary>
+    private void ReannounceIfRelayAddressesChanged()
+    {
+        HashSet<IPEndPoint> current = new();
+        lock (_gate)
+        {
+            foreach (TurnClient client in AliveRelayClientsNoLock())
+            {
+                if (client.RelayedAddress is { } relayed)
+                {
+                    current.Add(relayed);
+                }
+            }
+
+            if (current.SetEquals(_lastRelayedAddresses))
+            {
+                return;
+            }
+
+            _lastRelayedAddresses = current;
+        }
+
+        foreach (ConnState c in ConnectionsSnapshot())
+        {
+            if (c.State != PinholeConnectionState.Closed)
+            {
+                AnnounceTo(c, blast: true);
+            }
+        }
     }
 
     private async Task AllocateSlotAsync(RelaySlot slot, CancellationToken ct)
@@ -836,13 +880,36 @@ internal sealed class NodeEngine : IDisposable
             lock (_gate)
             {
                 slot.Client = client;
+                slot.Backoff = RelayRetryBackoff;
+            }
+
+            // Receive-side bootstrap for strict TURN servers: an allocation only receives
+            // from IPs it permitted, and a peer relaying through the same server arrives
+            // from that server's IP. Permitting our own configured relay servers (and the
+            // free catalog, in PermitCatalogRelaysAsync) is what lets two strangers behind
+            // one shared relay find each other without any out-of-band permission exchange.
+            foreach (IPEndPoint own in (_options.Relays ?? _options.ResolvedRelays).Select(r => r.Server).Append(slot.Config.Server))
+            {
+                try
+                {
+                    await client.CreatePermissionAsync(own.Address, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException)
+                {
+                }
             }
         }
         catch (Exception)
         {
             // Servers see every client at once when an allocation expires or a relay restarts;
-            // jitter spreads that herd without meaningfully delaying anyone.
-            slot.NextRetry = DateTimeOffset.UtcNow + Jitter(RelayRetryBackoff);
+            // jitter spreads that herd without meaningfully delaying anyone. Each further
+            // failure doubles the wait up to RelayMaxBackoff — a down or rate-limiting relay
+            // costs one datagram per ladder step, never a reconnect storm.
+            lock (_gate)
+            {
+                slot.NextRetry = DateTimeOffset.UtcNow + Jitter(slot.Backoff);
+                slot.Backoff = TimeSpan.FromTicks(Math.Min(slot.Backoff.Ticks * 2, RelayMaxBackoff.Ticks));
+            }
         }
     }
 
@@ -869,6 +936,31 @@ internal sealed class NodeEngine : IDisposable
                 try
                 {
                     await client.CreatePermissionAsync(server.Address, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>Permits a learned peer's TURN server (and relayed address) on every alive
+    /// allocation of ours — announced relay candidates are the only in-band way the accept
+    /// side learns where a dialer's relayed traffic will come from.</summary>
+    private async Task PermitPeerRelayServerAsync(PinholeCandidate relay)
+    {
+        foreach (TurnClient client in AliveRelayClients())
+        {
+            foreach (IPAddress? ip in new[] { relay.RelayServer?.Address, relay.Address.Address })
+            {
+                if (ip is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await client.CreatePermissionAsync(ip, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException)
                 {
@@ -1022,12 +1114,10 @@ internal sealed class NodeEngine : IDisposable
     private byte[]? BuildSignedRecord()
     {
         List<IPEndPoint> endpoints = new(AddressRecord.MaxEndpoints);
+        List<IPEndPoint> relayed = new(AddressRecord.MaxRelayedEndpoints);
         HashSet<IPEndPoint> seen = new();
         foreach (PinholeCandidate candidate in LocalCandidatesSnapshot())
         {
-            // Records carry direct/reflexive reachability only: relay candidates embed
-            // TURN credentials (a secret a public directory must never hold) and iroh
-            // relays are locator configuration, both already shared in the ticket.
             if (candidate.Kind is not (CandidateKind.Direct or CandidateKind.Reflexive))
             {
                 continue;
@@ -1039,7 +1129,18 @@ internal sealed class NodeEngine : IDisposable
             }
         }
 
-        if (endpoints.Count == 0)
+        // Relayed addresses go in as bare endpoints — the address a peer's own allocation
+        // on the same server may send at. Credentials never do: a record is public, and a
+        // resolver only adopts relayed endpoints on servers it is itself configured to use.
+        foreach (TurnClient client in AliveRelayClients())
+        {
+            if (client.RelayedAddress is { } address && seen.Add(address) && relayed.Count < AddressRecord.MaxRelayedEndpoints)
+            {
+                relayed.Add(address);
+            }
+        }
+
+        if (endpoints.Count == 0 && relayed.Count == 0)
         {
             return null;
         }
@@ -1051,6 +1152,7 @@ internal sealed class NodeEngine : IDisposable
             Sequence = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             ExpiresAtUtc = DateTimeOffset.UtcNow.Add(RecordTtl),
             Endpoints = endpoints,
+            RelayedEndpoints = relayed,
         }.EncodeSigned(_endpointIdentity);
     }
 
@@ -1161,6 +1263,23 @@ internal sealed class NodeEngine : IDisposable
                         added = true;
                     }
                 }
+
+                // Relayed endpoints are adopted only where we run an allocation ourselves
+                // (matched by server IP): our own credentials for that server apply, and
+                // sending at the peer's relayed address through it needs nothing else.
+                foreach (IPEndPoint relayed in record.RelayedEndpoints)
+                {
+                    TurnServerConfig? config = (_options.Relays ?? _options.ResolvedRelays)
+                        .FirstOrDefault(r => r.Server.Address.Equals(relayed.Address));
+                    if (config is null || !known.Add(relayed))
+                    {
+                        continue;
+                    }
+
+                    c.PeerCandidates.Add(new PinholeCandidate(
+                        CandidateKind.Relay, relayed, config.Server, config.Username, config.Credential));
+                    added = true;
+                }
             }
 
             if (added)
@@ -1184,6 +1303,7 @@ internal sealed class NodeEngine : IDisposable
             // string's publisher speaks the handshake, a v1 string's does not, so nothing is
             // negotiated on the wire — no downgrade window exists to strip.
             PinnedStaticKey = _identity is not null && cs.StaticKey is not null ? cs.StaticKey : null,
+            PinnedEndpointKey = cs.EndpointKey,
             Crypto = _identity is not null && cs.StaticKey is not null
                 ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId)
                 : null,
@@ -1385,6 +1505,18 @@ internal sealed class NodeEngine : IDisposable
                 lock (_gate)
                 {
                     candidates = c.PeerCandidates.ToArray();
+
+                    // A stuck punch whose ticket pins an endpoint key asks the lookup
+                    // providers where the peer is NOW, on a slow cadence: unsuccessful
+                    // recovery is one of the events that must refresh reachability. This is
+                    // also the only retry that keeps firing once the session has fallen to
+                    // Punching (NotifyPathSuspect no longer runs there).
+                    if (c.PinnedEndpointKey is { } pinned && _lookup.Count > 0
+                        && Environment.TickCount64 - c.LastLookupTicks > 5000)
+                    {
+                        c.LastLookupTicks = Environment.TickCount64;
+                        _ = ResolveViaLookupAsync(c, pinned, stop.Token);
+                    }
                 }
 
                 // A symmetric hint is scheduling advice, not a ban: relay candidates carry
@@ -1419,7 +1551,7 @@ internal sealed class NodeEngine : IDisposable
                         }
                         else if (candidate.Kind == CandidateKind.Relay)
                         {
-                            SendViaRelayTo(c.PuncFrame, candidate.Address);
+                            SendViaRelayTo(c.PuncFrame, candidate.Address, candidate.RelayServer?.Address);
                         }
                         else
                         {
@@ -1477,6 +1609,32 @@ internal sealed class NodeEngine : IDisposable
             {
                 Volatile.Write(ref _nextStunRefreshTicks, Environment.TickCount64 + refreshMs);
                 _ = RefreshReflexiveAsync(ct);
+            }
+
+            // An idle node must still heal its own relay fleet: a dead or refused TURN slot
+            // retries on the slot's backoff ladder (via EnsureRelaysAsync's NextRetry check),
+            // checked here once per RelayRetryBackoff. Without this, a relay that died while
+            // nobody was dialing would stay dead until the next dial.
+            if (Environment.TickCount64 >= Volatile.Read(ref _nextRelayEnsureTicks))
+            {
+                Volatile.Write(ref _nextRelayEnsureTicks, Environment.TickCount64 + (long)RelayRetryBackoff.TotalMilliseconds);
+                if (Interlocked.Exchange(ref _relayEnsuring, 1) == 0)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await EnsureRelaysAsync(CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException or TimeoutException)
+                        {
+                        }
+                        finally
+                        {
+                            Volatile.Write(ref _relayEnsuring, 0);
+                        }
+                    });
+                }
             }
 
             _portMap?.Tick(Environment.TickCount64);
@@ -1682,6 +1840,15 @@ internal sealed class NodeEngine : IDisposable
 
         if (suspect)
         {
+            // The condemned relay leg loses its ready mark BEFORE NotifyPathSuspect: a
+            // stale RelayReady would keep the session Degraded forever, sending into a
+            // relay that no longer owns the peer's address. Unready, the next arrival
+            // from one of the peer's live legs re-adopts through RelayPathConfirmed.
+            lock (c.Gate)
+            {
+                c.RelayReady = false;
+            }
+
             NotifyPathSuspect(c); // outside the gate: it takes c.Gate itself
             return;
         }
@@ -2006,9 +2173,16 @@ internal sealed class NodeEngine : IDisposable
         _udp.SendTo(frame, sa);
     }
 
-    private void SendViaRelayTo(ReadOnlySpan<byte> frame, IPEndPoint peer)
+    /// <summary>Sends to the peer's relayed address through our allocation on the SAME
+    /// server whenever one exists — a relayed address lives on its server, so the target IP
+    /// is itself the routing hint. Cross-server forwarding is legal TURN, but the receiver's
+    /// allocation only holds permissions for relay servers it knows about, so same-server is
+    /// the route that arrives. Falls back to any alive allocation when we have none there.</summary>
+    private void SendViaRelayTo(ReadOnlySpan<byte> frame, IPEndPoint peer, IPAddress? viaServer = null)
     {
-        TurnClient? client = AliveRelayClients().FirstOrDefault();
+        List<TurnClient> alive = AliveRelayClients();
+        TurnClient? client = alive.FirstOrDefault(c => c.Server.Address.Equals(viaServer ?? peer.Address));
+        client ??= alive.FirstOrDefault();
         if (client is null)
         {
             throw new InvalidOperationException("no relay allocation available");
@@ -2127,9 +2301,15 @@ internal sealed class NodeEngine : IDisposable
     {
         FrameType type = (FrameType)frame[0];
         ConnState? c = Lookup(BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]));
-        if (c is not null && arrival.ViaRelay)
+        if (c is not null && arrival.ViaRelay
+            && c.RelayRemote?.Address.Equals(arrival.Relay?.Address) == true)
         {
-            Volatile.Write(ref c.LastRelayRxTicks, Environment.TickCount64); // relay-leg liveness clock
+            // Relay-leg liveness clock — and only traffic from the leg we SEND on may wind
+            // it. With several relays, the peer keeps probing our other relayed addresses
+            // too; those cross-leg arrivals proved nothing about our current leg, and
+            // counting them kept dead legs looking alive (the liveness honest path below
+            // then never fired, and data kept black-holing into the dead server).
+            Volatile.Write(ref c.LastRelayRxTicks, Environment.TickCount64);
         }
 
         if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
@@ -2625,11 +2805,12 @@ internal sealed class NodeEngine : IDisposable
         }
 
         byte[] body = frame[(HeaderSize + 4)..].ToArray();
+        List<PinholeCandidate> fresh = new();
         try
         {
             var reader = new CandidateCodec.Reader(body, 0);
             byte count = reader.ReadByte();
-            var fresh = new List<PinholeCandidate>(count);
+            fresh.EnsureCapacity(count);
             for (int i = 0; i < count && !reader.AtEnd; i++)
             {
                 fresh.Add(CandidateCodec.Read(ref reader));
@@ -2644,6 +2825,16 @@ internal sealed class NodeEngine : IDisposable
         catch (FormatException)
         {
             return;
+        }
+
+        // A peer advertising a TURN candidate is telling us which server it relays through.
+        // Permitting that server's IP on our own allocations is what lets its frames reach
+        // us on strict TURN servers — the receive-side permission this peer cannot create
+        // for us any other way. Best-effort and fire-and-forget: the permit costs one
+        // datagram per server and races nothing.
+        foreach (PinholeCandidate relay in fresh.Where(x => x.Kind == CandidateKind.Relay))
+        {
+            _ = PermitPeerRelayServerAsync(relay);
         }
 
         if (!arrival.ViaRelay)
@@ -2749,7 +2940,7 @@ internal sealed class NodeEngine : IDisposable
                 {
                     try
                     {
-                        SendViaRelayTo(frame, target.Address);
+                        SendViaRelayTo(frame, target.Address, target.RelayServer?.Address);
                     }
                     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                     {
@@ -2908,16 +3099,22 @@ internal sealed class NodeEngine : IDisposable
             {
                 return;
             }
-        }
 
-        if (c.RelayRemote?.Address.Equals(peerRelayed.Address) == true && c.RelayReady)
-        {
+            // Leg hysteresis: a confirmed relay leg is never demoted by the peer's OTHER
+            // legs. With two relays configured, both sides punch both of the peer's relayed
+            // addresses, and every cross-leg arrival used to flip RelayReady off and force a
+            // permission round trip — a livelock in which data sends never found the leg
+            // ready. Arrivals still count as relay traffic (the dispatch stamp) whatever leg
+            // they rode; the leg only changes when it actually fails and path validation
+            // suspects it.
+            if (c.RelayReady)
+            {
+                return;
+            }
+
             c.RelayRemote = peerRelayed;
-            return;
         }
 
-        c.RelayRemote = peerRelayed;
-        c.RelayReady = false;
         if (Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
         {
             // Single-flight: a relayed frame burst must not spawn one permission round
@@ -3069,6 +3266,14 @@ internal sealed class NodeEngine : IDisposable
         if (c.RelayRemote is { } relayPeer && Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
         {
             _ = PermitRelayAsync(c, relayPeer);
+        }
+
+        // And when the ticket pinned the peer's endpoint key, the lookup providers may know
+        // where the peer moved to (both allocations changed, both old addresses dead): fetch
+        // its current signed record and fold any verified endpoint into this dial's punch.
+        if (c.PinnedEndpointKey is { } pinned && _lookup.Count > 0)
+        {
+            _ = ResolveViaLookupAsync(c, pinned, CancellationToken.None);
         }
     }
 
@@ -3232,6 +3437,50 @@ internal sealed class NodeEngine : IDisposable
     // ------------------------------------------------------------------ test hooks
 
     internal Task SimulateInterfaceLossAsync() => RecoverAsync(forceRebind: true, CancellationToken.None);
+
+    /// <summary>Test/diagnostic accessor: each managed TURN slot's server and live relayed
+    /// address (null when the slot has no allocation right now).</summary>
+    internal IReadOnlyList<(IPEndPoint Server, IPEndPoint? Relayed)> RelayAllocations()
+    {
+        lock (_gate)
+        {
+            return _relays.Select(r => (r.Config.Server, r.Client is { IsAlive: true } c ? c.RelayedAddress : null)).ToList();
+        }
+    }
+
+    /// <summary>Test/diagnostic accessor: the relayed address this node currently sends the
+    /// peer's frames at, and whether that leg is confirmed usable.</summary>
+    internal (IPEndPoint? Remote, bool Ready) PeerRelayLeg(ulong peerId)
+    {
+        lock (_gate)
+        {
+            return _conns.TryGetValue(peerId, out ConnState? c) ? (c.RelayRemote, c.RelayReady) : (null, false);
+        }
+    }
+
+    /// <summary>Test/diagnostic accessor: how many TURN slots this node manages.</summary>
+    internal int RelaysConfiguredCount
+    {
+        get { lock (_gate) return _relays.Count; }
+    }
+
+    /// <summary>Test hook: pretends the relay backoff ladder has expired, so a test can
+    /// exercise retry behavior without waiting out the 30 s first step.</summary>
+    internal void TestExpediteRelayRetry()
+    {
+        lock (_gate)
+        {
+            foreach (RelaySlot slot in _relays)
+            {
+                slot.NextRetry = DateTimeOffset.MinValue;
+                slot.Backoff = RelayRetryBackoff;
+            }
+        }
+    }
+
+    /// <summary>Test hook: one relay-ensure pass right now — the same pass a path-suspect
+    /// cycle, a dial, or the maintenance tick triggers, without waiting for their timers.</summary>
+    internal Task ForceRelayEnsureAsync() => EnsureRelaysAsync(CancellationToken.None);
 
     internal void SimulateDirectPathDeath(ulong peerId)
     {

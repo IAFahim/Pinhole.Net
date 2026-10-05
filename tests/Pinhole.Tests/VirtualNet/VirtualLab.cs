@@ -19,11 +19,14 @@ internal sealed class VirtualLab : IDisposable
 
     public readonly VirtualNetwork Net = new();
     private readonly List<VirtualStunServer> _stun = [];
+    private readonly List<(FakeTurnServer Server, TurnServerConfig Config)> _turns = [];
 
-    public FakeTurnServer? Turn { get; private set; }
-    public TurnServerConfig? TurnConfig { get; private set; }
+    /// <summary>Convenience for the single-relay era: the first configured TURN server.</summary>
+    public FakeTurnServer? Turn => _turns.Count > 0 ? _turns[0].Server : null;
+    public TurnServerConfig? TurnConfig => _turns.Count > 0 ? _turns[0].Config : null;
+    public IReadOnlyList<FakeTurnServer> Turns => _turns.Select(t => t.Server).ToArray();
 
-    public VirtualLab(bool withTurn = false, bool withV6Stun = false, int turnPort = 0)
+    public VirtualLab(bool withTurn = false, bool withV6Stun = false, int turnPort = 0, int turnLifetimeSeconds = 600)
     {
         AddStun(new IPEndPoint(IPAddress.Parse("192.0.2.53"), 3478));
         AddStun(new IPEndPoint(IPAddress.Parse("192.0.2.54"), 3478));
@@ -34,10 +37,25 @@ internal sealed class VirtualLab : IDisposable
 
         if (withTurn)
         {
-            Turn = new FakeTurnServer(port: turnPort);
-            TurnConfig = new TurnServerConfig(Turn.Control, "user", "pass");
+            AddTurn(port: turnPort, lifetimeSeconds: turnLifetimeSeconds);
         }
     }
+
+    private static int _nextRelayHost = 2; // 127.0.0.2, 127.0.0.3, ... — one IP per server
+
+    /// <summary>Attaches another independently operated TURN server on its own loopback IP
+    /// (mirroring real deployments where each relay is a distinct address) — every node's
+    /// options carry every configured relay, which is exactly the multi-relay failover setup.
+    /// Bind an explicit address only to restart a dead server's identity in place.</summary>
+    public FakeTurnServer AddTurn(int port = 0, int lifetimeSeconds = 600, IPAddress? bindAddress = null)
+    {
+        IPAddress address = bindAddress ?? IPAddress.Parse($"127.0.0.{System.Threading.Interlocked.Increment(ref _nextRelayHost) - 1}");
+        FakeTurnServer server = new(port: port, lifetimeSeconds: lifetimeSeconds, bindAddress: address);
+        _turns.Add((server, new TurnServerConfig(server.Control, "user", "pass")));
+        return server;
+    }
+
+    public IPAddress TurnAddress(int index) => _turns[index].Server.Control.Address;
 
     public IReadOnlyList<IPEndPoint> StunServers => _stun.Select(s => s.LocalEndPoint).ToArray();
 
@@ -53,7 +71,7 @@ internal sealed class VirtualLab : IDisposable
         PinholeOptions options = new()
         {
             StunServers = StunServers,
-            Relays = TurnConfig is { } turn ? [turn] : [],
+            Relays = [.. _turns.Select(t => t.Config)],
             IrohRelayUrls = [],
             EnableNetworkWatch = false,
             EnablePortMapping = false,
@@ -96,7 +114,11 @@ internal sealed class VirtualLab : IDisposable
             stun.Dispose();
         }
 
-        Turn?.Dispose();
+        foreach ((FakeTurnServer server, _) in _turns)
+        {
+            server.Dispose();
+        }
+
         Net.Dispose();
     }
 }

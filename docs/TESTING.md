@@ -170,3 +170,31 @@ The "relay restart with changed TURN addresses" case from the issue is covered a
 reachability-record level by `AllCachedAddressesDead_...` (every cached address replaced);
 relay *failure* recovery itself is #30's scope, and records deliberately carry no relay
 candidates (they would embed TURN credentials).
+
+
+## #30 — relay failover and changed allocations
+
+`RelayFailoverTests.cs` runs in the virtual lab against two or three *independently
+addressed* TURN servers (each fake on its own loopback IP, mirroring real deployments),
+short allocation lifetimes so a killed server is detected in seconds, and the RFC
+receive-side permission gate ON by default. `FakeTurnServer` gained that gate plus
+injectable allocation refusals (quota/auth) and send-path counters.
+
+| Scenario | Test | Proof |
+|---|---|---|
+| Lose one of two relays | `TwoRelays_LoseOne_RelayOnlySessionSurvivesOnTheSurvivor` | relay-only session keeps flowing on the survivor, same connection objects |
+| Relay restarts in place, both allocations change | `RelayRestartInPlace_BothAllocationsChange_SessionHealsWithoutFreshTicket` | same session object heals via reallocation announce + #29 records; new relayed address adopted |
+| Differing relay preferences | `DifferingRelayLists_MeetThroughTheCommonRelay` | A=[X,Y], B=[Y,Z] meet through Y under strict permissions |
+| Quota/rate-limit refusal | `QuotaRefusal_RetriesAreBoundedAndRecoveryIsImmediate` | ladder gates retries to one attempt per step; immediate recovery once accepted |
+| All relays down, then restored | `AllRelaysTemporarilyDown_SessionPendsThenRecoversOnRestoration` | explained pending state (no close, no false health), self-recovery on return |
+| Relay DNS failure containment | `UnresolvableIrohHostname_DirectPathUnaffected` | bind stays bounded, direct path unaffected, `HasRelay` honest |
+
+Two engine defects found by these tests and fixed in the same change: relay-leg
+flapping (a cross-leg arrival demoting the confirmed leg into a permission livelock)
+and condemned relay legs keeping their ready mark forever. The single-relay restart
+cell in `TopologyLabTests` (fresh-ticket redial) remains as the pre-1.10 behavior
+witness; the in-place heal above supersedes it operationally.
+
+Real-infrastructure coverage: the #26 harness (`docs/TESTING.md` § #26) still runs
+iroh-relay and coturn processes on real sockets; a second coturn instance for
+cross-server permission behavior is the remaining env-gated gap (COTURN_BIN).
