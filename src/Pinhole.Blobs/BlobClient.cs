@@ -256,7 +256,7 @@ public static class BlobClient
 
                     // Retries reuse the same downloader nonce. Welcome carries the
                     // provider nonce and a Head authenticated with the resulting key.
-                    _conn.Send(BlobWire.Hello(_stream, _session.SessionId));
+                    BlobWire.SendRidingOutPathlessness(_conn, BlobWire.Hello(_stream, _session.SessionId), CancellationToken.None);
                 }
                 else
                 {
@@ -389,7 +389,10 @@ public static class BlobClient
 
         private void Send(byte[] plain)
         {
-            _conn.Send(_session.Seal(_send.Next(), plain));
+            // A downloader-side roam flips the connection through Punching mid-transfer;
+            // the ARQ's next frame waits out the transition rather than dying. No token:
+            // disposal closes the connection, which the ride-out treats as terminal.
+            BlobWire.SendRidingOutPathlessness(_conn, _session.Seal(_send.Next(), plain), CancellationToken.None);
         }
     }
 

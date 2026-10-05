@@ -42,7 +42,7 @@ public sealed class FakeTurnServer : IDisposable
     private int _nonceVersion;
     private volatile bool _running = true;
 
-    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600)
+    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600, int port = 0)
     {
         _realm = realm;
         _user = user;
@@ -50,7 +50,7 @@ public sealed class FakeTurnServer : IDisposable
         _key = MD5.HashData(Encoding.UTF8.GetBytes($"{user}:{realm}:{password}"));
         _main = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _main.ReceiveTimeout = 200; // bounded wakeups keep dispose from wedging on macOS
-        _main.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        _main.Bind(new IPEndPoint(IPAddress.Loopback, port));
         Control = (IPEndPoint)_main.LocalEndPoint!;
         new Thread(Run) { IsBackground = true, Name = "fake-turn" }.Start();
     }

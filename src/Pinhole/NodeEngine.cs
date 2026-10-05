@@ -72,6 +72,7 @@ internal sealed class ConnState
     // frames RECEIVED on the direct path count as activity — a successful UDP send proves
     // nothing, or a dead path that never errors would look alive forever.
     public long LastDirectRxTicks;       // Volatile; written under Gate
+    public long LastRelayRxTicks;        // Volatile; receive thread only — relay-leg liveness clock
     public bool ProbeOutstanding;        // Gate
     public long ProbeNonce;              // Gate; TickCount64 | ProbeMarker
     public long ProbeDeadlineTicks;      // Gate
@@ -166,7 +167,7 @@ internal sealed class NodeEngine : IDisposable
     // swaps in a fresh socket; a sender briefly racing the swap gets the old socket and a
     // caught ObjectDisposedException — the same send-failure handling a dead path already
     // triggers, and rebinds are rare.
-    private volatile Socket _udp = null!;
+    private volatile IUdpSocket _udp = null!;
     private long _recovering; // single-flight guard for recovery
     private volatile bool _disposed;
     private int _networkWatchHooked;
@@ -213,7 +214,7 @@ internal sealed class NodeEngine : IDisposable
         {
             lock (_gate)
             {
-                return ((IPEndPoint)_udp.LocalEndPoint!).Port;
+                return _udp.LocalEndPoint.Port;
             }
         }
     }
@@ -294,29 +295,8 @@ internal sealed class NodeEngine : IDisposable
         });
     }
 
-    private Socket CreateSocket(IPEndPoint? bind)
-    {
-        var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-        // Blocked receives must wake up periodically: closing a socket while a sync receive
-        // holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so disposal needs the
-        // receive loop to come back and observe the disposed state.
-        udp.ReceiveTimeout = 200;
-        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
-        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, 4 * 1024 * 1024);
-        if (OperatingSystem.IsWindows())
-        {
-            const int sioUdpConnreset = -1744830452;
-            udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
-        }
-
-        // A dual-mode socket cannot bind a bare IPv4 address; map it so a caller's
-        // IPAddress.Loopback/Any bind option works instead of throwing.
-        IPEndPoint? bindV6 = bind is { Address.AddressFamily: AddressFamily.InterNetwork }
-            ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
-            : bind;
-        udp.Bind(bindV6 ?? new IPEndPoint(IPAddress.IPv6Any, 0));
-        return udp;
-    }
+    private IUdpSocket CreateSocket(IPEndPoint? bind) =>
+        _options.UdpSocketFactory is { } build ? build(bind) : SystemUdpSocket.Create(bind);
 
     // ------------------------------------------------------------------ local candidates
 
@@ -491,7 +471,7 @@ internal sealed class NodeEngine : IDisposable
         _stunPending[key] = tcs;
         try
         {
-            _udp.SendTo(req, SocketFlags.None, ToWire(server));
+            _udp.SendTo(req, ToWire(server));
             // Two expiry sources on one WaitAsync race each other: on a stalled runner both
             // fire before either is observed and the timeout can mask the caller's token.
             // The probe's own deadline is a linked source instead, translated back — so an
@@ -955,7 +935,7 @@ internal sealed class NodeEngine : IDisposable
             {
                 foreach (PinholeCandidate candidate in cs.Candidates.Where(x => x.Kind == CandidateKind.Relay))
                 {
-                    await client.CreatePermissionAsync(candidate.Address.Address, ct).ConfigureAwait(false);
+                    await TryPermitAsync(client, candidate.Address.Address, ct).ConfigureAwait(false);
                 }
             }
 
@@ -1278,6 +1258,12 @@ internal sealed class NodeEngine : IDisposable
     private void ValidatePath(ConnState c)
     {
         long now = Environment.TickCount64;
+        if (c.State == PinholeConnectionState.Degraded && c.Path == PathKind.Relay)
+        {
+            ValidateRelayPath(c);
+            return;
+        }
+
         bool suspect = false;
         lock (c.Gate)
         {
@@ -1322,6 +1308,71 @@ internal sealed class NodeEngine : IDisposable
         }
 
         SendPathProbe(c);
+    }
+
+    /// <summary>The relay leg of a degraded session gets the same liveness honesty the
+    /// direct path gets: silence beyond <see cref="PinholeOptions.PathValidationIdle"/> is
+    /// probed with the token ping (which rides the relay), and persistent silence escalates
+    /// through <see cref="NotifyPathSuspect"/> — whose permit re-validation retires a ghost
+    /// allocation (a restarted relay) instead of black-holing until the minutes-long TURN
+    /// refresh cadence notices. Reuses the direct probe slots: a connection validates one
+    /// leg at a time, and a leg switch resets the counters.</summary>
+    private void ValidateRelayPath(ConnState c)
+    {
+        long now = Environment.TickCount64;
+        bool suspect = false;
+        bool probe = false;
+        lock (c.Gate)
+        {
+            if (c.State != PinholeConnectionState.Degraded || c.Path != PathKind.Relay || !c.RelayReady)
+            {
+                return;
+            }
+
+            long lastRx = Volatile.Read(ref c.LastRelayRxTicks);
+            if (lastRx > 0 && now - lastRx < _options.PathValidationIdle.TotalMilliseconds)
+            {
+                ResetPathProbesNoLock(c); // live relay traffic; any half-finished probe sequence is forgotten
+                return;
+            }
+
+            if (c.ProbeOutstanding)
+            {
+                if (now < c.ProbeDeadlineTicks)
+                {
+                    return; // this probe's reply may still land
+                }
+
+                c.ProbeOutstanding = false;
+                c.UnansweredProbes++;
+                if (c.UnansweredProbes >= _options.PathValidationMaxUnansweredProbes)
+                {
+                    c.UnansweredProbes = 0;
+                    suspect = true;
+                }
+                else
+                {
+                    return; // next tick sends the next probe
+                }
+            }
+            else
+            {
+                probe = true;
+                c.ProbeOutstanding = true;
+                c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
+            }
+        }
+
+        if (suspect)
+        {
+            NotifyPathSuspect(c); // outside the gate: it takes c.Gate itself
+            return;
+        }
+
+        if (probe)
+        {
+            Ping(c); // RouteFrame sends degraded traffic via the relay leg
+        }
     }
 
     private void ResetPathProbesNoLock(ConnState c)
@@ -1617,12 +1668,12 @@ internal sealed class NodeEngine : IDisposable
     {
         // Volatile read, no lock: this runs once per sent frame, and the rebind that swaps
         // the socket is rare enough to pay for itself with a caught send error.
-        _udp.SendTo(frame, SocketFlags.None, ToWire(ep));
+        _udp.SendTo(frame, ToWire(ep));
     }
 
     private void SendToWire(SocketAddress sa, ReadOnlySpan<byte> frame)
     {
-        _udp.SendTo(frame, SocketFlags.None, sa);
+        _udp.SendTo(frame, sa);
     }
 
     private void SendViaRelayTo(ReadOnlySpan<byte> frame, IPEndPoint peer)
@@ -1667,7 +1718,7 @@ internal sealed class NodeEngine : IDisposable
             int n;
             try
             {
-                n = _udp.ReceiveFrom(buf, SocketFlags.None, remote);
+                n = _udp.ReceiveFrom(buf, remote);
             }
             catch (ObjectDisposedException)
             {
@@ -1746,6 +1797,11 @@ internal sealed class NodeEngine : IDisposable
     {
         FrameType type = (FrameType)frame[0];
         ConnState? c = Lookup(BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]));
+        if (c is not null && arrival.ViaRelay)
+        {
+            Volatile.Write(ref c.LastRelayRxTicks, Environment.TickCount64); // relay-leg liveness clock
+        }
+
         if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
         {
             return; // test hook: the direct path to this peer is a black hole; relayed frames still pass
@@ -2546,7 +2602,10 @@ internal sealed class NodeEngine : IDisposable
             await EnsureRelaysAsync(CancellationToken.None).ConfigureAwait(false);
             foreach (TurnClient client in AliveRelayClients())
             {
-                await client.CreatePermissionAsync(peer.Address, CancellationToken.None).ConfigureAwait(false);
+                if (!await TryPermitAsync(client, peer.Address, CancellationToken.None).ConfigureAwait(false))
+                {
+                    return; // the slot was retired; the reconnect's fresh permit finishes this
+                }
             }
 
             bool kick = false;
@@ -2584,6 +2643,44 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    /// <summary>One permission round trip that treats failure as evidence about the
+    /// allocation, not just the attempt: a rejected or timed-out permit retires the client
+    /// so the next <see cref="EnsureRelaysAsync"/> reallocates. Without this, a restarted
+    /// relay leaves every node holding a ghost allocation — "alive" locally, unknown to the
+    /// server — and relayed traffic black-holes until the minutes-long refresh cadence
+    /// notices. A retired-but-healthy allocation costs one realloc round trip.</summary>
+    private async Task<bool> TryPermitAsync(TurnClient client, IPAddress peer, CancellationToken ct)
+    {
+        try
+        {
+            await client.CreatePermissionAsync(peer, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is SocketException or InvalidOperationException or TimeoutException or ObjectDisposedException)
+        {
+            await RetireRelayClientAsync(client).ConfigureAwait(false);
+            return false;
+        }
+    }
+
+    private async Task RetireRelayClientAsync(TurnClient client)
+    {
+        client.Received -= HandleRelayData;
+        _ = client.DisposeAsync();
+        lock (_gate)
+        {
+            foreach (RelaySlot slot in _relays)
+            {
+                if (ReferenceEquals(slot.Client, client))
+                {
+                    slot.Client = null; // NextRetry stays: a live server reconnects immediately
+                }
+            }
+        }
+
+        await EnsureRelaysAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
     /// <summary>The path looks dead (send errors or a simulated failure): re-punch toward the
     /// known candidates; a usable relay keeps the session alive as Degraded.</summary>
     public void NotifyPathSuspect(ConnState c)
@@ -2619,6 +2716,15 @@ internal sealed class NodeEngine : IDisposable
         }
 
         KickPunch(c);
+
+        // A suspect relay path re-validates its allocation: the permit round trip either
+        // confirms the relay leg or (TryPermitAsync) retires a ghost client — a restarted
+        // relay's stale allocation — and reallocates, instead of waiting out the
+        // minutes-long refresh cadence while every relayed frame black-holes.
+        if (c.RelayRemote is { } relayPeer && Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
+        {
+            _ = PermitRelayAsync(c, relayPeer);
+        }
     }
 
     private void Transition(ConnState c, PinholeConnectionState state)
@@ -2705,8 +2811,8 @@ internal sealed class NodeEngine : IDisposable
 
     private async Task RebindAsync(CancellationToken ct)
     {
-        Socket old;
-        Socket fresh;
+        IUdpSocket old;
+        IUdpSocket fresh;
         lock (_gate)
         {
             old = _udp;
@@ -2739,7 +2845,7 @@ internal sealed class NodeEngine : IDisposable
 
         await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
-        _portMap?.Rebind(((IPEndPoint)_udp.LocalEndPoint!).Port); // LocalPort takes _gate; we hold none here
+        _portMap?.Rebind(_udp.LocalEndPoint.Port); // LocalPort takes _gate; we hold none here
         ReannounceAndRepunch();
     }
 

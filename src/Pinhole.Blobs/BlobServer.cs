@@ -57,6 +57,9 @@ public sealed class BlobServer : IAsyncDisposable
     /// <summary>Total verified chunks sent across all connections — a live activity counter.</summary>
     public long ChunksServed { get; private set; }
 
+    /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
+    internal PinholeNode Node => _node;
+
     /// <summary>Total downloader connections accepted so far.</summary>
     public long ConnectionsAccepted { get; private set; }
 
@@ -272,7 +275,9 @@ public sealed class BlobServer : IAsyncDisposable
     private Task SendSealedAsync(PinholeConnection conn, BlobWire.Cipher? cipher, byte[] plain, Counter counter)
     {
         byte[] wire = cipher is null ? plain : cipher.Seal(asProvider: true, counter.Next(), plain);
-        return Task.Run(() => conn.Send(wire), _stop.Token);
+        // Task.Run keeps the pump off the accept loop's thread; the ride-out keeps a roam
+        // or relay outage on THIS side from killing the transfer permanently.
+        return Task.Run(() => BlobWire.SendRidingOutPathlessness(conn, wire, _stop.Token), _stop.Token);
     }
 
     private async Task ServeRangeAsync(PinholeConnection conn, BlobWire.Cipher? cipher, Served item, long start, int count, Dictionary<ulong, FileStream> files, Counter counter)

@@ -150,6 +150,11 @@ public sealed record PinholeOptions
     internal Func<CancellationToken, Task<IPEndPoint[]>>? StunCatalog { get; init; }
     internal Func<CancellationToken, Task<IPEndPoint[]>>? RelayCatalog { get; init; }
 
+    /// <summary>Test seam for the topology lab: replaces the OS UDP socket with an
+    /// in-process network that routes datagrams between nodes through injected NATs,
+    /// loss, and delay. Null (always, in production) binds real sockets.</summary>
+    internal UdpSocketFactory? UdpSocketFactory { get; init; }
+
     internal static readonly Uri[] PublicIrohRelays =
     [
         new Uri("https://aps1-1.relay.n0.iroh.link/"),

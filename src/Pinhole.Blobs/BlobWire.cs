@@ -435,4 +435,38 @@ internal static class BlobWire
                 _inner.TryOpen(fromProvider, wire, ref watermark, out plaintext);
         }
     }
+
+    // ------------------------------------------------------------------ send-path transition tolerance
+
+    /// <summary>How long a blob pump waits out a pathless connection before giving up:
+    /// longer than the engine's worst relay-reconnect backoff, shorter than the
+    /// downloader's 30 s stall clock, so an unhealable path surfaces as an honest stall
+    /// instead of a zombie pump.</summary>
+    internal static readonly TimeSpan RideOutBudget = TimeSpan.FromSeconds(30);
+
+    private static readonly TimeSpan RideOutPace = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>Sends one wire frame, riding out the connection's transient states: a
+    /// mid-transfer roam flips Open→Punching and back on the roaming side, and a relay
+    /// outage parks a relay-only session until the reconnect lands. Reliability is the
+    /// blob layer's job, so bounded pathlessness is a wait, not a death — the frame goes
+    /// out the moment a path exists again. Only a Closed connection (the peer is gone) or
+    /// an expired <see cref="RideOutBudget"/> rethrows.</summary>
+    internal static void SendRidingOutPathlessness(Pinhole.PinholeConnection conn, byte[] wire, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                conn.Send(wire);
+                return;
+            }
+            catch (InvalidOperationException) when (conn.State != Pinhole.PinholeConnectionState.Closed && sw.Elapsed < RideOutBudget)
+            {
+                ct.ThrowIfCancellationRequested();
+                Thread.Sleep(RideOutPace);
+            }
+        }
+    }
 }
