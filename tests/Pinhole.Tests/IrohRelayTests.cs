@@ -21,8 +21,13 @@ public sealed class IrohRelayTests
         EnableNetworkWatch = false, EnablePortMapping = false, ConnectTimeout = Timeout,
     };
 
-    private static string RelayOnly(PinholeNode node) => new ConnectionString(node.PeerId,
-        ConnectionString.Parse(node.ConnectionString).Candidates.Where(c => c.Kind == CandidateKind.IrohRelay).ToArray()).ToString();
+    private static string RelayOnly(PinholeNode node)
+    {
+        ConnectionString full = ConnectionString.Parse(node.ConnectionString);
+        return new ConnectionString(node.PeerId,
+            full.Candidates.Where(c => c.Kind == CandidateKind.IrohRelay).ToArray(),
+            staticKey: full.StaticKey).ToString();
+    }
 
     private static async Task Exchange(PinholeConnection from, PinholeConnection to, string text)
     {

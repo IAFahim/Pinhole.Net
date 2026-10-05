@@ -75,7 +75,8 @@ public sealed class NatDetectorTests
         string doomed = new ConnectionString(
             a.PeerId,
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, a.LocalPort))],
-            NatHint.Symmetric).ToString();
+            NatHint.Symmetric,
+            staticKey: a.StaticPublicKey).ToString();
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await Assert.ThrowsAsync<TimeoutException>(() => b.ConnectAsync(doomed).WaitAsync(Timeout));

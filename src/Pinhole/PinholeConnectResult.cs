@@ -15,6 +15,10 @@ public enum PinholeConnectFailure
     NoRelayFallback = 3,
     /// <summary>No path was established before the timeout, despite advertised relay candidates.</summary>
     TimedOut = 4,
+    /// <summary>The peer's connection string predates encryption and this node requires it
+    /// (regenerate the string on a current node, or set <see cref="PinholeOptions.Encryption"/>
+    /// to <see cref="PinholeEncryption.Optional"/>).</summary>
+    PeerIncompatible = 5,
 }
 
 /// <summary>The outcome of <see cref="PinholeNode.TryConnectAsync"/>.

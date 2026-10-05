@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
@@ -11,13 +12,14 @@ namespace Pinhole;
 
 internal enum FrameType : byte
 {
-    Punc = 0x50, // punch probe; body = the sender's handshake token (u32 LE)
-    Pack = 0x51, // punch ack; body = [echo of the received PUNC token][sender's own token]
-    Data = 0x52,  // body = [sender's token][payload]
+    Punc = 0x50, // punch probe; body = the sender's handshake token (u32 LE), or token + X25519 ephemeral + static (v2)
+    Pack = 0x51, // punch ack; body = [echo of the received PUNC token][sender's own token], plus v2 keys + confirm MAC
+    Data = 0x52,  // body = [sender's token][payload] — sealed (counter + AES-GCM) once a session exists
     Ping = 0x53,  // body = [sender's token][timestamp:8]
     Pong = 0x54,  // body = [sender's token][timestamp:8]
     Announce = 0x55, // body = [sender's token][count][candidate TLV stream]
     Bye = 0x56,   // body = [sender's token]
+    Hsck = 0x57,  // handshake confirm; body = [sender's token][confirm MAC:16] — the dialer's proof after a verified PACK
 }
 
 // Wire authentication model: every frame carries the sender's per-connection token at
@@ -48,6 +50,9 @@ internal sealed class ConnState
     public bool SymmetricHint;               // peer advertised a symmetric NAT: skip the punch
     public uint RemoteToken;                 // learned from the peer's frames; staleness filter
     public bool RemoteTokenKnown;
+    public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
+    public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
+    public bool HsckSent;                    // Gate: our confirm went out in an Hsck frame
     public bool Announced;
     public DateTimeOffset LastKick = DateTimeOffset.UtcNow;
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
@@ -88,7 +93,7 @@ internal sealed class ConnState
 internal sealed class NodeEngine : IDisposable
 {
     public const int MaxPayload = 1200;
-    private const int HeaderSize = 9;
+    private const int HeaderSize = CryptoWire.HeaderLength;
 
     /// <summary>Upper bound on connections a stranger flood can materialize. Applications
     /// dialing peers themselves are not bounded by this — only unknown-peer PUNCs are.</summary>
@@ -109,6 +114,7 @@ internal sealed class NodeEngine : IDisposable
 
     private readonly ulong _peerId;
     private readonly PinholeOptions _options;
+    private readonly NodeIdentity? _identity; // long-term X25519 identity; null = plaintext node
     private readonly object _gate = new();
     // Hot path: every frame routes through Lookup, on the receive thread for arrivals and
     // the caller's thread for sends. A ConcurrentDictionary keeps those reads lock-free so
@@ -145,10 +151,15 @@ internal sealed class NodeEngine : IDisposable
             _relayIdentity = new RelayIdentity();
         _peerId = _relayIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
+        _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
     }
 
     public ulong PeerId => _peerId;
+
+    /// <summary>This node's long-term X25519 public key (32 bytes), embedded in v2 connection
+    /// strings and used to authenticate every session's far end; null on plaintext nodes.</summary>
+    public byte[]? StaticPublicKey => _identity?.PublicKey;
 
     public bool HasRelay
     {
@@ -680,10 +691,10 @@ internal sealed class NodeEngine : IDisposable
     private void HandleIrohData(IrohRelay relay, byte[] source, byte[] frame)
     {
         if (_disposed || frame.Length < HeaderSize + 4
-            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Bye) return;
+            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Hsck) return;
         ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
         if (sender != BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1))) return;
-        try { Dispatch(frame, frame.Length, new Arrival(relay, source)); }
+        try { Dispatch(frame, new Arrival(relay, source)); }
         catch (Exception)
         {
             // Match the UDP receive loop: one malformed frame or throwing handler costs one datagram.
@@ -806,7 +817,7 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        Dispatch(data, data.Length, new Arrival(from));
+        Dispatch(data, new Arrival(from));
     }
 
     // ------------------------------------------------------------------ connections
@@ -838,9 +849,16 @@ internal sealed class NodeEngine : IDisposable
             PeerId = cs.PeerId,
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
+            // Crypto is attempted exactly when the string vouches for a static key: a v2
+            // string's publisher speaks the handshake, a v1 string's does not, so nothing is
+            // negotiated on the wire — no downgrade window exists to strip.
+            PinnedStaticKey = _identity is not null && cs.StaticKey is not null ? cs.StaticKey : null,
+            Crypto = _identity is not null && cs.StaticKey is not null
+                ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId)
+                : null,
         };
         c.Buffer = CreateBuffer();
-        c.PuncFrame = BuildPunc(c.Token);
+        c.PuncFrame = BuildPunc(c);
         c.Public = new PinholeConnection(this, c);
         // Before publication: no other thread can see c through the table, so seeding the
         // peer candidates needs no lock.
@@ -910,7 +928,7 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival)
+    private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival, bool cryptoHandshake)
     {
         // Stranger flood bound, checked BEFORE the insert: with the single receive thread
         // as the only writer, the table then never crosses the bound at all, and no
@@ -928,9 +946,10 @@ internal sealed class NodeEngine : IDisposable
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             RemoteToken = token,
             RemoteTokenKnown = true,
+            Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
         };
         c.Buffer = CreateBuffer();
-        c.PuncFrame = BuildPunc(c.Token);
+        c.PuncFrame = BuildPunc(c);
         c.Public = new PinholeConnection(this, c);
         // Two PUNCs raced: the first entry wins, the second becomes nothing.
         if (!_conns.TryAdd(peerId, c))
@@ -964,12 +983,11 @@ internal sealed class NodeEngine : IDisposable
         // loser's close must not tear down the winner's live connection.
         _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
 
-        Span<byte> bye = stackalloc byte[HeaderSize + 4];
-        WriteHeader(bye, FrameType.Bye);
-        BinaryPrimitives.WriteUInt32LittleEndian(bye[HeaderSize..], c.Token);
+        Span<byte> bye = stackalloc byte[HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead];
+        int len = BuildFrame(c, FrameType.Bye, ReadOnlySpan<byte>.Empty, bye);
         try
         {
-            RouteFrame(c, bye);
+            RouteFrame(c, bye[..len]);
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
@@ -1267,13 +1285,13 @@ internal sealed class NodeEngine : IDisposable
             c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
         }
 
-        Span<byte> frame = stackalloc byte[HeaderSize + 4 + 8];
-        WriteHeader(frame, FrameType.Ping);
-        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
-        BitConverter.TryWriteBytes(frame[(HeaderSize + 4)..], nonce);
+        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        Span<byte> nonceBytes = stackalloc byte[8];
+        BitConverter.TryWriteBytes(nonceBytes, nonce);
+        int len = BuildFrame(c, FrameType.Ping, nonceBytes, frame);
         try
         {
-            SendToWire(target, frame);
+            SendToWire(target, frame[..len]);
             Interlocked.Increment(ref c.PathProbesSent);
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
@@ -1316,14 +1334,12 @@ internal sealed class NodeEngine : IDisposable
                 throw new ObjectDisposedException(nameof(PinholeConnection));
         }
 
-        int n = payload.Length + HeaderSize + 4;
+        int n = payload.Length + HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead;
         Span<byte> frame = stackalloc byte[n];
-        WriteHeader(frame, FrameType.Data);
-        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
-        payload.CopyTo(frame[(HeaderSize + 4)..]);
+        int len = BuildFrame(c, FrameType.Data, payload, frame);
         try
         {
-            RouteFrame(c, frame);
+            RouteFrame(c, frame[..len]);
             Interlocked.Increment(ref c.Sent);
             Interlocked.Add(ref c.BytesSent, payload.Length);
             if (Volatile.Read(ref c.ConsecutiveSendFailures) != 0)
@@ -1350,13 +1366,13 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        Span<byte> frame = stackalloc byte[HeaderSize + 4 + 8];
-        WriteHeader(frame, FrameType.Ping);
-        BinaryPrimitives.WriteUInt32LittleEndian(frame[HeaderSize..], c.Token);
-        BitConverter.TryWriteBytes(frame[(HeaderSize + 4)..], Environment.TickCount64);
+        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        Span<byte> timestamp = stackalloc byte[8];
+        BitConverter.TryWriteBytes(timestamp, Environment.TickCount64);
+        int len = BuildFrame(c, FrameType.Ping, timestamp, frame);
         try
         {
-            RouteFrame(c, frame);
+            RouteFrame(c, frame[..len]);
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
@@ -1464,11 +1480,11 @@ internal sealed class NodeEngine : IDisposable
                 continue;
             }
 
-            if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Bye && n >= HeaderSize)
+            if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
             {
                 try
                 {
-                    Dispatch(buf, n, new Arrival(remote));
+                    Dispatch(buf.AsSpan(0, n), new Arrival(remote));
                 }
                 catch (Exception)
                 {
@@ -1519,11 +1535,10 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private void Dispatch(byte[] buf, int n, in Arrival arrival)
+    private void Dispatch(ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        FrameType type = (FrameType)buf[0];
-        ReadOnlySpan<byte> frame = buf.AsSpan(0, n);
-        ConnState? c = Lookup(BitConverter.ToUInt64(buf, 1));
+        FrameType type = (FrameType)frame[0];
+        ConnState? c = Lookup(BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]));
         if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
         {
             return; // test hook: the direct path to this peer is a black hole; relayed frames still pass
@@ -1531,17 +1546,39 @@ internal sealed class NodeEngine : IDisposable
 
         if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
         {
-            TraceLine($"recv {type} from {BitConverter.ToUInt64(buf, 1):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
+            TraceLine($"recv {type} from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} {(c is null ? "NO-CONN" : $"state={c.State} handler={(c.Received is null ? "none" : "on")}")}");
         }
 
         if (c is null)
         {
-            if (type != FrameType.Punc || frame.Length < HeaderSize + 4 || !_options.Listen || _disposed)
+            if (type != FrameType.Punc || !_options.Listen || _disposed)
             {
                 return;
             }
 
-            c = CreateIncoming(BitConverter.ToUInt64(buf, 1), BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]), arrival);
+            // Exact-length stranger gate: the punch probe is either legacy (13 B) or carries
+            // the crypto handshake (77 B) — anything else is malformed. The encryption policy
+            // decides which kinds of strangers may materialize a connection at all, so a
+            // Required node never creates state for a plaintext scan, and no negotiation
+            // happens after creation — there is no downgrade window to strip.
+            bool legacy = frame.Length == HeaderSize + CryptoWire.PuncLegacyBody;
+            bool crypto = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
+            if (!legacy && !crypto)
+            {
+                return;
+            }
+
+            if ((legacy && _options.Encryption == PinholeEncryption.Required)
+                || (crypto && _options.Encryption == PinholeEncryption.Disabled))
+            {
+                return;
+            }
+
+            c = CreateIncoming(
+                BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]),
+                BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]),
+                arrival,
+                crypto);
             if (c is null)
             {
                 return; // connection table full: a stranger flood gets no more objects
@@ -1551,6 +1588,32 @@ internal sealed class NodeEngine : IDisposable
         if (type is not (FrameType.Punc or FrameType.Pack) && !TokenOk(c, frame))
         {
             return; // post-handshake frame without the connection token: spoofed, drop it
+        }
+
+        // Everything except the handshake frames is sealed once a session exists. The frame
+        // decrypts into thread-local scratch prefixed with the untouched header and token, so
+        // every handler below parses one layout regardless of the session's existence.
+        if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck) && c.Crypto is { } cryptoState)
+        {
+            if (!cryptoState.Established)
+            {
+                // We offered crypto (the string pinned a key); an honest peer cannot speak
+                // plaintext here and its sealed frames cannot precede the PACK that carries
+                // our half of the keys. This frame is hostile or reordered beyond recovery.
+                cryptoState.CountRejected();
+                return;
+            }
+
+            byte[] scratch = CryptoScratch();
+            frame[..(HeaderSize + CryptoWire.TokenLength)].CopyTo(scratch);
+            if (!cryptoState.Recv!.Open(frame, scratch.AsSpan(HeaderSize + CryptoWire.TokenLength), out int plainLen))
+            {
+                cryptoState.CountRejected(); // tampered, replayed, or from a bogus epoch
+                return;
+            }
+
+            cryptoState.MarkPeerConfirmed(); // only a key holder can seal a frame that opens
+            frame = scratch.AsSpan(0, HeaderSize + CryptoWire.TokenLength + plainLen);
         }
 
         switch (type)
@@ -1573,6 +1636,9 @@ internal sealed class NodeEngine : IDisposable
             case FrameType.Announce:
                 OnAnnounce(c, frame, arrival);
                 break;
+            case FrameType.Hsck:
+                OnHsck(c, frame, arrival);
+                break;
             case FrameType.Bye:
                 // Remove only this connection's entry: a Bye from a replaced husk must not
                 // tear down the re-dial winner registered under the same peer ID.
@@ -1582,6 +1648,10 @@ internal sealed class NodeEngine : IDisposable
                 break;
         }
     }
+
+    [ThreadStatic] private static byte[]? s_cryptoScratch;
+
+    private static byte[] CryptoScratch() => s_cryptoScratch ??= new byte[RecvBufferSize];
 
     /// <summary>Post-handshake frames must prove the per-connection token the peer learned
     /// during the Punc/Pack exchange. Without it, anyone holding the connection string
@@ -1594,12 +1664,15 @@ internal sealed class NodeEngine : IDisposable
 
     private void OnPunc(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length < HeaderSize + 4)
+        if (frame.Length is not (HeaderSize + CryptoWire.PuncLegacyBody or HeaderSize + CryptoWire.PuncCryptoBody))
         {
             return;
         }
 
+        bool cryptoPunc = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+
+        ConnectionCrypto? crypto;
         lock (c.Gate)
         {
             if (!c.RemoteTokenKnown)
@@ -1611,13 +1684,50 @@ internal sealed class NodeEngine : IDisposable
             {
                 return; // stale frames from an older connection to the same peer ID
             }
+
+            if (c.Crypto is not null && cryptoPunc)
+            {
+                // First-seen keys derive the session; a retried PUNC must repeat them exactly —
+                // different keys for the same token is a stale or substituted handshake.
+                ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
+                if (!c.Crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]))
+                {
+                    c.Crypto.CountRejected();
+                    return;
+                }
+            }
+            else if (c.Crypto is not null || cryptoPunc)
+            {
+                // A plaintext PUNC on a connection that offered crypto, or a crypto PUNC on a
+                // plaintext one: neither is a state any honest peer produces.
+                c.Crypto?.CountRejected();
+                return;
+            }
+
+            crypto = c.Crypto;
         }
 
-        Span<byte> pack = stackalloc byte[HeaderSize + 8];
-        WriteHeader(pack, FrameType.Pack);
-        BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
-        BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
-        SendOnArrival(arrival, pack);
+        // The PACK doubles as the handshake's second flight. Crypto bodies answer crypto
+        // PUNCs deterministically — same keys, same confirm MAC, on every retransmission.
+        if (crypto is { Established: true })
+        {
+            Span<byte> pack = stackalloc byte[HeaderSize + CryptoWire.PackCryptoBody];
+            WriteHeader(pack, FrameType.Pack);
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
+            crypto.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
+            crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
+            crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
+            SendOnArrival(arrival, pack);
+        }
+        else
+        {
+            Span<byte> pack = stackalloc byte[HeaderSize + CryptoWire.PackLegacyBody];
+            WriteHeader(pack, FrameType.Pack);
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
+            SendOnArrival(arrival, pack);
+        }
 
         if (arrival.ViaRelay)
         {
@@ -1637,17 +1747,89 @@ internal sealed class NodeEngine : IDisposable
 
     private void OnPack(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        // body = [echo of our PUNC token][the responder's own token]
-        if (frame.Length < HeaderSize + 8
+        // body = [echo of our PUNC token][the responder's own token] (+ keys and confirm in v2)
+        if (frame.Length < HeaderSize + CryptoWire.PackLegacyBody
             || BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
         {
             return; // not an echo of our handshake token
         }
 
-        lock (c.Gate)
+        bool cryptoPack = frame.Length == HeaderSize + CryptoWire.PackCryptoBody;
+        if (!cryptoPack && frame.Length != HeaderSize + CryptoWire.PackLegacyBody)
         {
-            c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + 4)..]);
-            c.RemoteTokenKnown = true;
+            return; // neither a legacy nor a v2 PACK
+        }
+
+        if (!cryptoPack && c.Crypto is not null)
+        {
+            // We dialed with a key the string vouches for; a plaintext PACK means someone
+            // stripped the handshake. Fail the connection — never fall back to plaintext.
+            c.Crypto.CountRejected();
+            HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
+            return;
+        }
+
+        if (cryptoPack)
+        {
+            ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
+            ConnectionCrypto? crypto = c.Crypto;
+            if (crypto is null)
+            {
+                return; // we never offered crypto; a crypto PACK is bogus
+            }
+
+            if (c.PinnedStaticKey is { } pinned && !body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
+            {
+                // The answering key is not the key the string vouches for: a machine in the
+                // middle, or a stale string. Either way the session is dead on arrival.
+                crypto.CountRejected();
+                HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
+                return;
+            }
+
+            bool sendHsck;
+            lock (c.Gate)
+            {
+                // The responder's token rides the same PACK the legacy handshake uses it for.
+                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
+                c.RemoteTokenKnown = true;
+
+                if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
+                {
+                    crypto.CountRejected();
+                    return;
+                }
+
+                if (!crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
+                {
+                    crypto.CountRejected();
+                    HandshakeFailed(c, "handshake confirmation failed: the answering peer does not hold the advertised key");
+                    return;
+                }
+
+                crypto.MarkPeerConfirmed();
+                sendHsck = !c.HsckSent;
+                c.HsckSent = true;
+            }
+
+            // Third flight: our confirm back, which also asks the responder to re-announce
+            // (its first sealed announce may have arrived before we could open it).
+            if (sendHsck)
+            {
+                Span<byte> hsck = stackalloc byte[HeaderSize + CryptoWire.HsckBody];
+                WriteHeader(hsck, FrameType.Hsck);
+                BinaryPrimitives.WriteUInt32LittleEndian(hsck[HeaderSize..], c.Token);
+                crypto.MyConfirm().CopyTo(hsck[(HeaderSize + CryptoWire.TokenLength)..]);
+                SendOnArrival(arrival, hsck);
+            }
+        }
+        else
+        {
+            lock (c.Gate)
+            {
+                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + 4)..]);
+                c.RemoteTokenKnown = true;
+            }
         }
 
         if (arrival.ViaRelay)
@@ -1664,6 +1846,49 @@ internal sealed class NodeEngine : IDisposable
             c.Announced = true;
             AnnounceTo(c);
         }
+    }
+
+    private void OnHsck(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
+    {
+        if (frame.Length != HeaderSize + CryptoWire.HsckBody)
+        {
+            return;
+        }
+
+        lock (c.Gate)
+        {
+            if (c.Crypto is not { Established: true } crypto || crypto.PeerConfirmed)
+            {
+                return;
+            }
+
+            if (!crypto.VerifyPeerConfirm(frame[(HeaderSize + CryptoWire.TokenLength)..]))
+            {
+                crypto.CountRejected();
+                return;
+            }
+
+            crypto.MarkPeerConfirmed();
+        }
+
+        // The dialer heard our PACK — re-announce, in case the first sealed announce lost
+        // the race against the PACK that delivered our half of the keys.
+        AnnounceTo(c);
+    }
+
+    /// <summary>The crypto handshake is unrecoverably broken (stripped, substituted, or
+    /// unconfirmed by a peer whose string vouches for a key). The connection dies honestly
+    /// instead of limping on in plaintext.</summary>
+    private void HandshakeFailed(ConnState c, string reason)
+    {
+        if (c.State is PinholeConnectionState.Closed)
+        {
+            return;
+        }
+
+        c.Connected.TrySetException(new InvalidOperationException(reason));
+        Transition(c, PinholeConnectionState.Dead);
+        c.Dead.Cancel();
     }
 
     private void OnData(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -1704,11 +1929,9 @@ internal sealed class NodeEngine : IDisposable
             DirectPathConfirmed(c, arrival.Direct!);
         }
 
-        Span<byte> pong = stackalloc byte[HeaderSize + 4 + 8];
-        WriteHeader(pong, FrameType.Pong);
-        BinaryPrimitives.WriteUInt32LittleEndian(pong[HeaderSize..], c.Token);
-        frame.Slice(HeaderSize + 4, 8).CopyTo(pong[(HeaderSize + 4)..]);
-        SendOnArrival(arrival, pong);
+        Span<byte> pong = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        int len = BuildFrame(c, FrameType.Pong, frame.Slice(HeaderSize + 4, 8), pong);
+        SendOnArrival(arrival, pong[..len]);
     }
 
     private void OnPong(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -1827,9 +2050,6 @@ internal sealed class NodeEngine : IDisposable
     {
         IReadOnlyList<PinholeCandidate> candidates = LocalCandidatesSnapshot();
         var payload = new MemoryStream(32 + candidates.Count * 32);
-        Span<byte> token = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(token, c.Token);
-        payload.Write(token);
         payload.WriteByte((byte)candidates.Count);
         foreach (PinholeCandidate candidate in candidates)
         {
@@ -1840,16 +2060,39 @@ internal sealed class NodeEngine : IDisposable
             catch (InvalidOperationException)
             {
                 payload.SetLength(0); // a malformed candidate list must not kill the announce
-                payload.Write(token);
                 payload.WriteByte(0);
                 break;
             }
         }
 
-        byte[] frame = new byte[HeaderSize + payload.Length];
-        WriteHeader(frame, FrameType.Announce);
-        payload.GetBuffer().AsSpan(0, (int)payload.Length).CopyTo(frame.AsSpan(HeaderSize));
+        byte[] body = payload.GetBuffer();
+        int bodyLen = (int)payload.Length;
 
+        // Announce frames are sealed like everything else post-handshake; the biggest legal
+        // one (32 fat relay candidates) needs the rented path rather than the stack.
+        int cap = HeaderSize + CryptoWire.TokenLength + bodyLen + CryptoWire.SealedOverhead;
+        if (cap <= 1024)
+        {
+            Span<byte> frame = stackalloc byte[cap];
+            int len = BuildFrame(c, FrameType.Announce, body.AsSpan(0, bodyLen), frame);
+            AnnounceSend(c, frame[..len], blast);
+            return;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(cap);
+        try
+        {
+            int len = BuildFrame(c, FrameType.Announce, body.AsSpan(0, bodyLen), rented.AsSpan(0, cap));
+            AnnounceSend(c, rented.AsSpan(0, len), blast);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    private void AnnounceSend(ConnState c, ReadOnlySpan<byte> frame, bool blast)
+    {
         if (blast)
         {
             // Right after a rebind no path is confirmed live, but the PEER's own addresses
@@ -2372,13 +2615,40 @@ internal sealed class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ helpers
 
-    private byte[] BuildPunc(uint token)
+    private byte[] BuildPunc(ConnState c)
     {
-        byte[] frame = new byte[HeaderSize + 4];
+        // The punch probe doubles as the crypto handshake's first flight: a crypto dial
+        // carries this connection's ephemeral and static public keys, deterministically, in
+        // every retransmission — key agreement must not depend on which probe lands.
+        byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody : CryptoWire.PuncCryptoBody)];
         frame[0] = (byte)FrameType.Punc;
         BitConverter.TryWriteBytes(frame.AsSpan(1), _peerId);
-        BitConverter.TryWriteBytes(frame.AsSpan(HeaderSize), token);
+        BitConverter.TryWriteBytes(frame.AsSpan(HeaderSize), c.Token);
+        if (c.Crypto is { } crypto)
+        {
+            crypto.MyEphPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength));
+            crypto.MyStaticPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength));
+        }
+
         return frame;
+    }
+
+    /// <summary>Builds one post-handshake frame into <paramref name="dst"/>: legacy
+    /// [header][token][body] or, once the session is derived, [header][token][counter][sealed
+    /// body]. The 13-byte plaintext prefix is the AEAD associated data, so the frame type,
+    /// sender id, and token are tamper-evident too. Returns the frame length.</summary>
+    private int BuildFrame(ConnState c, FrameType type, ReadOnlySpan<byte> body, Span<byte> dst)
+    {
+        WriteHeader(dst, type);
+        BinaryPrimitives.WriteUInt32LittleEndian(dst[HeaderSize..], c.Token);
+        if (c.Crypto is { Established: true } crypto)
+        {
+            crypto.Send!.Seal(dst[(HeaderSize + CryptoWire.TokenLength)..], dst[..(HeaderSize + CryptoWire.TokenLength)], body);
+            return HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead + body.Length;
+        }
+
+        body.CopyTo(dst[(HeaderSize + CryptoWire.TokenLength)..]);
+        return HeaderSize + CryptoWire.TokenLength + body.Length;
     }
 
     private void WriteHeader(Span<byte> frame, FrameType type)

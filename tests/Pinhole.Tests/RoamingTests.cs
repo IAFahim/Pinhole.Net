@@ -85,8 +85,10 @@ public sealed class RoamingTests
 
         // Meet on the relay first (direct candidates withheld), then let the engine's
         // upgrade probing move the pair onto a direct path.
+        ConnectionString fullA = ConnectionString.Parse(a.ConnectionString);
         string relayOnly = new ConnectionString(a.PeerId,
-            ConnectionString.Parse(a.ConnectionString).Candidates.Where(c => c.Kind == CandidateKind.Relay).ToList()).ToString();
+            fullA.Candidates.Where(c => c.Kind == CandidateKind.Relay).ToList(),
+            staticKey: fullA.StaticKey).ToString();
         (PinholeConnection conn, PinholeConnection atA) = await ConnectPairAsync(a, b, relayOnly);
         // On loopback the engine's direct-upgrade probing can land within the dial itself,
         // so the post-dial state is Degraded *or* already Open — the meet was on the relay

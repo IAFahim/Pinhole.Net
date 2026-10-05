@@ -170,7 +170,7 @@ public sealed class NodeConnectionTests
 
         // A connection string with the direct candidates withheld: the punch has nothing to
         // try, so the connection can only live on the relay — and must still exist.
-        string relayOnlyString = new ConnectionString(a.PeerId, RelayCandidatesOf(a)).ToString();
+        string relayOnlyString = new ConnectionString(a.PeerId, RelayCandidatesOf(a), staticKey: a.StaticPublicKey).ToString();
         Assert.True(ConnectionString.Parse(relayOnlyString).Candidates.All(c => c.Kind == CandidateKind.Relay));
 
         Task<PinholeConnection> accept = a.AcceptAsync();
@@ -220,7 +220,8 @@ public sealed class NodeConnectionTests
 
         string deadString = new ConnectionString(
             a.PeerId,
-            [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Parse("192.0.2.1"), 9))]).ToString();
+            [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Parse("192.0.2.1"), 9))],
+            staticKey: a.StaticPublicKey).ToString();
         Task<PinholeConnection> dial = b.ConnectAsync(deadString).WaitAsync(TimeSpan.FromSeconds(15));
 
         // While the doomed dial is in flight, sending on it is a clear error, not a mystery.

@@ -12,6 +12,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 {
     private const string InvalidCodeMessage = "Invalid connection string. Copy your friend's current connection string and try again.";
     private const string SelfConnectionMessage = "That is your own connection string. Use your friend's string, or listen for an incoming connection.";
+    private const string IncompatibleMessage = "The peer's connection string predates encryption and this node requires it. Ask for a fresh string from a current node, or set Encryption=Optional to allow plaintext peers.";
     private readonly NodeEngine _engine;
     private readonly PinholeOptions _options;
     private volatile NatHint _natHint = NatHint.Unknown;
@@ -51,12 +52,20 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// <summary>The bound UDP port.</summary>
     public int LocalPort => _engine.LocalPort;
 
-    /// <summary>The single discovery artifact: "pinhole1:..." carrying this peer's ID and
-    /// direct/reflexive/relay candidates. Regenerate and re-share after roaming.</summary>
+    /// <summary>This node's long-term X25519 public key (32 bytes), embedded in every
+    /// connection string this node publishes — peers pin the handshake's answering key
+    /// against it, which is what makes sessions man-in-the-middle proof. Null when
+    /// <see cref="PinholeOptions.Encryption"/> is <see cref="PinholeEncryption.Disabled"/>.
+    /// Persist a seed via <see cref="PinholeOptions.IdentityKeySeed"/> for identity across restarts.</summary>
+    public byte[]? StaticPublicKey => _engine.StaticPublicKey;
+
+    /// <summary>The single discovery artifact: "pinhole1:..." carrying this peer's ID, its
+    /// static key, and direct/reflexive/relay candidates. Regenerate and re-share after roaming.</summary>
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
-        NatHint).ToString();
+        NatHint,
+        _engine.StaticPublicKey).ToString();
 
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
@@ -121,6 +130,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw new FormatException(InvalidCodeMessage);
         if (cs.PeerId == PeerId)
             throw new ArgumentException(SelfConnectionMessage, nameof(connectionString));
+        if (_options.Encryption == PinholeEncryption.Required && cs.StaticKey is null)
+            throw new InvalidOperationException(IncompatibleMessage);
 
         return await ConnectPeerAsync(cs, ct).ConfigureAwait(false);
     }
@@ -135,6 +146,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             return PinholeConnectResult.Failed(PinholeConnectFailure.InvalidConnectionString, InvalidCodeMessage);
         if (cs.PeerId == PeerId)
             return PinholeConnectResult.Failed(PinholeConnectFailure.SelfConnection, SelfConnectionMessage);
+        if (_options.Encryption == PinholeEncryption.Required && cs.StaticKey is null)
+            return PinholeConnectResult.Failed(PinholeConnectFailure.PeerIncompatible, IncompatibleMessage);
 
         try
         {

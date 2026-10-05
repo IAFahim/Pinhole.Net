@@ -399,7 +399,8 @@ public sealed class BlobsTests
             // negotiates an upgrade — rides the relay.
             var full = Pinhole.ConnectionString.Parse(server.Ticket.ConnectionString);
             string relayOnly = new Pinhole.ConnectionString(full.PeerId,
-                full.Candidates.Where(c => c.Kind == Pinhole.CandidateKind.IrohRelay).ToArray()).ToString();
+                full.Candidates.Where(c => c.Kind == Pinhole.CandidateKind.IrohRelay).ToArray(),
+                staticKey: full.StaticKey).ToString();
             var relayTicket = new BlobTicket
             {
                 Kind = server.Ticket.Kind,

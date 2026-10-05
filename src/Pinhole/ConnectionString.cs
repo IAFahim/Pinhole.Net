@@ -69,35 +69,55 @@ public sealed class ConnectionString
     /// <summary>The NAT classification the publisher embedded, to steer dialers away from a hopeless punch.</summary>
     public NatHint NatHint { get; }
 
+    /// <summary>The peer's long-term X25519 public key (32 bytes) when the string was
+    /// published by an encryption-capable node (v2). Dialers pin the answering handshake to
+    /// this key, so no man in the middle can substitute itself. Null on v1 strings, whose
+    /// dialers fall back to plaintext when the local policy allows it.</summary>
+    public byte[]? StaticKey { get; }
+
     /// <summary>Every address the peer is reachable on — direct, reflexive, and relay entries as published.</summary>
     public IReadOnlyList<PinholeCandidate> Candidates { get; }
 
-    /// <summary>Assembles a string from a peer ID, its candidates, and a NAT hint. Throws
-    /// <see cref="ArgumentOutOfRangeException"/> above <see cref="MaxCandidates"/> candidates.</summary>
-    public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown)
+    /// <summary>Assembles a string from a peer ID, its candidates, a NAT hint, and optionally
+    /// the peer's 32-byte static public key. Throws <see cref="ArgumentOutOfRangeException"/>
+    /// above <see cref="MaxCandidates"/> candidates or for a malformed key.</summary>
+    public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown, byte[]? staticKey = null)
     {
         if (candidates.Count > MaxCandidates)
         {
             throw new ArgumentOutOfRangeException(nameof(candidates), $"at most {MaxCandidates} candidates fit a connection string");
         }
 
+        if (staticKey is not null && staticKey.Length != NodeIdentity.KeyLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(staticKey), $"static keys are {NodeIdentity.KeyLength} bytes");
+        }
+
         PeerId = peerId;
         NatHint = natHint;
+        StaticKey = staticKey;
         Candidates = candidates;
     }
 
-    /// <summary>Encodes as "pinhole1:..." (base64url, no padding).</summary>
+    /// <summary>Encodes as "pinhole1:..." (base64url, no padding). Payloads with a static
+    /// key are version 2; without, version 1 — the same envelope either way.</summary>
     public override string ToString()
     {
-        var payload = new MemoryStream(64 + Candidates.Count * 32);
-        payload.WriteByte(Version);
-        payload.WriteByte(0); // flags, reserved
+        bool keyed = StaticKey is not null;
+        var payload = new MemoryStream(64 + Candidates.Count * 32 + (keyed ? NodeIdentity.KeyLength : 0));
+        payload.WriteByte(keyed ? Version2 : Version1);
+        payload.WriteByte((byte)(keyed ? FlagsHasStaticKey : 0));
         WriteU64(payload, PeerId);
         payload.WriteByte((byte)NatHint);
         payload.WriteByte((byte)Candidates.Count);
         foreach (PinholeCandidate candidate in Candidates)
         {
             CandidateCodec.Write(payload, candidate);
+        }
+
+        if (keyed)
+        {
+            payload.Write(StaticKey!);
         }
 
         return Scheme + ":" + Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
@@ -137,9 +157,15 @@ public sealed class ConnectionString
         }
 
         byte[] payload = Base64Url.Decode(text[(colon + 1)..]);
-        if (payload.Length < 13 || payload[0] != Version)
+        if (payload.Length < 13 || payload[0] is not (Version1 or Version2))
         {
             throw new FormatException("unsupported connection string version");
+        }
+
+        byte flags = payload[1];
+        if (payload[0] == Version2 && flags != FlagsHasStaticKey)
+        {
+            throw new FormatException("unknown connection string flags");
         }
 
         var reader = new CandidateCodec.Reader(payload, 2);
@@ -162,15 +188,27 @@ public sealed class ConnectionString
             candidates.Add(CandidateCodec.Read(ref reader));
         }
 
-        if (!reader.AtEnd)
+        byte[]? staticKey = null;
+        if (payload[0] == Version2)
+        {
+            if (payload.Length - reader.Position != NodeIdentity.KeyLength)
+            {
+                throw new FormatException("v2 connection string must end with a 32-byte static key");
+            }
+
+            staticKey = payload[^NodeIdentity.KeyLength..];
+        }
+        else if (!reader.AtEnd)
         {
             throw new FormatException("trailing bytes in connection string");
         }
 
-        return new ConnectionString(peerId, candidates, hint);
+        return new ConnectionString(peerId, candidates, hint, staticKey);
     }
 
-    private const byte Version = 1;
+    private const byte Version1 = 1;
+    private const byte Version2 = 2;
+    private const byte FlagsHasStaticKey = 1;
 
     private static void WriteU64(MemoryStream payload, ulong value)
     {
@@ -271,6 +309,8 @@ internal static class CandidateCodec
         private int _pos = pos;
 
         public readonly bool AtEnd => _pos == _data.Length;
+
+        public readonly int Position => _pos;
 
         public byte ReadByte()
         {

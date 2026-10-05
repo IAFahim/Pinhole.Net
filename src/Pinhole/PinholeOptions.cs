@@ -52,6 +52,20 @@ public sealed record PinholeOptions
     /// keeps trying the chain (punch, then relay) before failing. Default 15 s.</summary>
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>Wire encryption and peer authentication (default <see cref="PinholeEncryption.Required"/>).
+    /// Every session runs an X25519 handshake and is sealed with AES-256-GCM: traffic is
+    /// confidential, tamper-proof, replay-proof, and the peer is authenticated against the
+    /// static key embedded in its connection string — a man in the middle cannot substitute
+    /// itself, strip the handshake, or read a byte. <see cref="PinholeEncryption.Optional"/>
+    /// still accepts pre-1.6 plaintext peers when they cannot speak crypto;
+    /// <see cref="PinholeEncryption.Disabled"/> reproduces the old plaintext wire.</summary>
+    public PinholeEncryption Encryption { get; init; } = PinholeEncryption.Required;
+
+    /// <summary>The 32-byte private seed of this node's long-term X25519 identity. Leave
+    /// null for a fresh identity per process; persist and pass one when peer identity should
+    /// survive restarts (peers pin the public half from connection strings).</summary>
+    public byte[]? IdentityKeySeed { get; init; }
+
     /// <summary>Budget for the bind-time STUN probes and relay allocation. Failures are
     /// tolerated: the node comes up with whatever candidates were observed. Default 5 s.</summary>
     public TimeSpan BindProbeBudget { get; init; } = TimeSpan.FromSeconds(5);
@@ -157,6 +171,8 @@ public sealed record PinholeOptions
 
     private static void Validate(PinholeOptions options)
     {
+        if (options.IdentityKeySeed is { Length: not NodeIdentity.KeyLength })
+            throw new ArgumentOutOfRangeException(nameof(options), $"IdentityKeySeed must be {NodeIdentity.KeyLength} bytes");
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationIdle, TimeSpan.FromMilliseconds(50));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationProbeInterval, TimeSpan.FromMilliseconds(20));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationMaxUnansweredProbes, 1);

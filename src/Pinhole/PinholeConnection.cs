@@ -86,6 +86,46 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
     /// <summary>The peer's stable ID, taken from its connection string.</summary>
     public ulong PeerId => _c.PeerId;
 
+    /// <summary>Whether this session is encrypted: the X25519 handshake completed and every
+    /// frame on the wire is sealed (AES-256-GCM, replay-protected). Always true between
+    /// current nodes; false only for plaintext-legacy peers accepted by an
+    /// <see cref="PinholeEncryption.Optional"/> node.</summary>
+    public bool IsEncrypted
+    {
+        get
+        {
+            lock (_c.Gate)
+            {
+                return _c.Crypto is { Established: true };
+            }
+        }
+    }
+
+    /// <summary>The peer's long-term X25519 public key (32 bytes) once the handshake
+    /// delivered it — the identity to pin (trust on first use or against a directory) if
+    /// the connection string did not already vouch for it. Null on plaintext sessions.</summary>
+    public byte[]? RemoteStaticKey
+    {
+        get
+        {
+            lock (_c.Gate)
+            {
+                return _c.Crypto?.PeerStaticPublic;
+            }
+        }
+    }
+
+    /// <summary>Frames dropped because they failed authentication — tampered, replayed, or
+    /// plaintext where a session was promised. Steady zero on a healthy path.</summary>
+    public long FramesRejected
+    {
+        get
+        {
+            ConnectionCrypto? crypto = _c.Crypto;
+            return crypto is null ? 0 : System.Threading.Interlocked.Read(ref crypto.Rejected);
+        }
+    }
+
     /// <summary>Current lifecycle state; changes are also surfaced on <see cref="StateChanged"/>.</summary>
     public PinholeConnectionState State => _c.State;
 

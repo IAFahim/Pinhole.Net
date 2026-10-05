@@ -42,7 +42,8 @@ public sealed class AttackTests
     /// that stable remote endpoint.</summary>
     private static string LoopbackString(PinholeNode listener) => new ConnectionString(
         listener.PeerId,
-        [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))]).ToString();
+        [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))],
+        staticKey: listener.StaticPublicKey).ToString();
 
     private static byte[] Frame(byte type, ulong sender, uint token, ReadOnlySpan<byte> payload = default)
     {
@@ -311,7 +312,8 @@ public sealed class AttackTests
             new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, a.LocalPort)),
             new PinholeCandidate(CandidateKind.Relay, new IPEndPoint(IPAddress.Parse("203.0.113.1"), 40000),
                 new IPEndPoint(IPAddress.Parse("203.0.113.1"), 3478), "ghost", "ghost"),
-        ]);
+        ],
+        staticKey: a.StaticPublicKey);
         PinholeConnection atB = await b.ConnectAsync(withDeadRelay.ToString()).WaitAsync(Timeout);
         Task<PinholeConnection> accept = a.AcceptAsync();
         PinholeConnection atA = await accept.WaitAsync(Timeout);
