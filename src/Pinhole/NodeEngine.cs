@@ -463,7 +463,20 @@ internal sealed class NodeEngine : IDisposable
         try
         {
             _udp.SendTo(req, SocketFlags.None, ToWire(server));
-            return await tcs.Task.WaitAsync(ProbeTimeout, ct).ConfigureAwait(false);
+            // Two expiry sources on one WaitAsync race each other: on a stalled runner both
+            // fire before either is observed and the timeout can mask the caller's token.
+            // The probe's own deadline is a linked source instead, translated back — so an
+            // externally canceled probe always surfaces as cancellation, never as timeout.
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(ProbeTimeout);
+            try
+            {
+                return await tcs.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"STUN server {server} did not answer within {ProbeTimeout.TotalSeconds:0.#}s");
+            }
         }
         finally
         {

@@ -549,13 +549,16 @@ public class CryptoTests
         byte[] forged = oracle.SealFrame(0x52, "forged"u8);
         forged[^1] ^= 0xFF;
 
+        // Subscribe before sending: on a fast machine the genuine frame can be delivered
+        // before a subscription added after the sends would attach.
+        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        conn.Received += p => got.TrySetResult(p.ToArray());
+
         var nodeEp = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
         oracle.Sock.SendTo(real, nodeEp);
         oracle.Sock.SendTo(replay, nodeEp);
         oracle.Sock.SendTo(forged, nodeEp);
 
-        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        conn.Received += p => got.TrySetResult(p.ToArray());
         Assert.Equal("genuine"u8.ToArray(), await got.Task.WaitAsync(Timeout));
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 2);
