@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.7.1 — blob layer: the session layer's rules, applied to itself
+
+Follow-up to the 1.7.0 review of #19: two blob-layer findings, both the same class
+as the session-layer bugs fixed a day earlier.
+
+### The blob watermark moved on failed authentication
+
+`Cipher.TryOpen` reported the frame's claimed counter even when the tag failed, and
+both the client and the server wrote that value straight back into their
+highest-seen watermark. A forged frame claiming a far-future counter starved every
+legitimate frame behind it; a replayed old counter dragged the watermark backward and
+re-admitted frames before it. The API now takes the watermark by `ref` and advances
+it only after the tag verifies — a rejected frame can move it neither forward nor
+back, by construction. Proven by a wire-oracle adversarial test: a hand-rolled
+provider injects a counter-10_000 frame with a corrupted tag between the Head and the
+first genuine chunk of a real download, and the download completes anyway.
+
+### Session uniqueness no longer rests on the downloader alone
+
+The 1.7.0 v2 key forked on the downloader's session id only — all freshness from one
+side, so a downloader that repeated an earlier id reproduced the key while per-
+connection counters restarted at 1 (demonstrated in tests: the second "connection"
+read the first one's frames). The derivation now also binds the connection's
+**transport binding** — the two engine tokens, numerically ordered, fresh from BOTH
+endpoints (the provider's token is the provider's contribution). A repeated session
+id across connections derives a different key by construction. The blob wire itself
+is unchanged (the Hello and frame formats are as shipped in 1.7.0); since 1.7.0 was
+never tagged or released, v2 is finalized here rather than versioned again.
+
+### The legacy refusal no longer seals anything
+
+The 1.7.0 refusal sealed a Bye under the pre-v2 fixed per-ticket key — two refusals
+would have re-used that key's nonce 1, repeating the very sin the refusal exists to
+punish. The provider now hangs up with no blob frame at all, and the legacy
+derivation is exposed to production code only as an open-only `LegacyDetector`
+(sealing under it is unrepresentable; a separate internal seam exists solely so tests
+can *be* a pre-2.0 client). The legacy peer still fails fast, the server keeps
+serving others (asserted), and the compatibility notes in BLOBS.md match the code.
+
 ## 1.7.0 — authenticate before you commit
 
 Three correctness fixes from the source review (#19). No public API changes; one

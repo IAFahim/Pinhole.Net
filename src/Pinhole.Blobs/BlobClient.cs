@@ -53,11 +53,12 @@ public static class BlobClient
         await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
         await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString).ConfigureAwait(false);
 
-        // One random session id per connection: it rides the first Hello and salts the
-        // connection's cipher, so simultaneous, reconnected, and resumed downloads of the
-        // same ticket never share a (key, nonce) pair.
+        // One random session id per connection rides the first Hello, and the connection's
+        // transport binding (both engine tokens, fresh from both endpoints) joins it in
+        // the key derivation — so simultaneous, reconnected, resumed, and even
+        // session-id-repeating downloads of the same ticket never share a (key, nonce) pair.
         byte[] sessionId = BlobWire.Cipher.FreshSessionId();
-        BlobWire.Cipher? cipher = BlobWire.Cipher.For(ticket.PreSharedKey, ticket.Root, sessionId);
+        BlobWire.Cipher? cipher = BlobWire.Cipher.For(ticket.PreSharedKey, ticket.Root, sessionId, conn.SessionBinding);
 
         if (ticket.Kind == BlobKind.File)
         {
@@ -408,7 +409,7 @@ public static class BlobClient
                 return true;
             }
 
-            return _cipher.TryOpen(fromProvider: true, payload, _recvCounter, out plain, out _recvCounter);
+            return _cipher.TryOpen(fromProvider: true, payload, ref _recvCounter, out plain);
         }
     }
 

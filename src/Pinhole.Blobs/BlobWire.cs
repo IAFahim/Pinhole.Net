@@ -190,13 +190,16 @@ internal static class BlobWire
     }
 
     /// <summary>Per-direction frame encryption. The key is HKDF-SHA256 over the ticket's
-    /// pre-shared key, salted with the content root <em>and the connection's session id</em>
-    /// (wire v2), so two tickets never share a stream cipher even when a caller reuses a
-    /// key — and two connections sharing one ticket never share a cipher either, which is
-    /// what makes per-connection counters restarting at 1 safe. Nonces are (role, 64-bit
-    /// frame counter); the counter rides in the clear ahead of the ciphertext and receivers
-    /// reject replayed or regressed counters — a replayer can at most duplicate a frame the
-    /// ARQ layer already de-duplicates.</summary>
+    /// pre-shared key, salted with the content root, the downloader's session id, and the
+    /// connection's transport binding — the two engine tokens, freshness contributed by
+    /// BOTH endpoints — so two tickets never share a stream cipher even when a caller
+    /// reuses a key, and two connections sharing one ticket never share a cipher either:
+    /// a downloader that repeats its session id still gets a different key, because the
+    /// server's token is fresh in every connection. That is what makes per-connection
+    /// counters restarting at 1 safe. Nonces are (role, 64-bit frame counter); the
+    /// counter rides in the clear ahead of the ciphertext and receivers reject replayed
+    /// or regressed counters — a replayer can at most duplicate a frame the ARQ layer
+    /// already de-duplicates.</summary>
     internal sealed class Cipher
     {
         private const byte DownloaderRole = 0;
@@ -205,27 +208,35 @@ internal static class BlobWire
 
         private Cipher(KeyParameter key) => _key = key;
 
-        /// <summary>The connection cipher: bound to the downloader's session id, so every
-        /// connection — simultaneous, reconnected, or resumed — seals under its own key and
-        /// (key, nonce) pairs never repeat across connections. Null when the ticket carries
-        /// no PSK (plaintext mode).</summary>
-        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId)
+        /// <summary>The connection cipher: bound to the downloader's session id and to
+        /// the connection's transport binding, so every connection — simultaneous,
+        /// reconnected, resumed, or a hostile repeat of an earlier session id — seals
+        /// under its own key. Null when the ticket carries no PSK (plaintext mode).</summary>
+        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, TransportBinding transport)
         {
             if (psk is null)
             {
                 return null;
             }
 
-            var salt = new byte[root.Length + sessionId.Length];
+            var salt = new byte[root.Length + sessionId.Length + 8];
             root.CopyTo(salt, 0);
             sessionId.CopyTo(salt.AsSpan(root.Length));
+            BinaryPrimitives.WriteUInt32LittleEndian(salt.AsSpan(root.Length + sessionId.Length), transport.Lo);
+            BinaryPrimitives.WriteUInt32LittleEndian(salt.AsSpan(root.Length + sessionId.Length + 4), transport.Hi);
             return Derive(psk, salt, "pinhole-blobs-v2");
         }
 
-        /// <summary>The pre-v2 fixed per-ticket key. Retained for one purpose only:
-        /// recognizing a pre-2.0 downloader by opening its frames, so the provider can
-        /// refuse it with a Bye it can actually read. It never serves content.</summary>
-        public static Cipher ForLegacy(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1");
+        /// <summary>The pre-v2 fixed per-ticket key, wrapped so it can only ever OPEN
+        /// frames: it exists to recognize a pre-2.0 downloader and refuse it. Sealing
+        /// under it is unrepresentable on purpose — that key re-used (key, nonce) pairs
+        /// across connections, and the refusal path must not repeat the sin.</summary>
+        public static LegacyDetector ForLegacy(byte[] psk, byte[] root) => new(psk, root);
+
+        /// <summary>Emulation seam for tests that need to <em>be</em> a pre-2.0 downloader
+        /// (which seals under the old key). Production code gets only
+        /// <see cref="ForLegacy"/>, which cannot seal.</summary>
+        internal static Cipher ForLegacyEmulation(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1");
 
         private static Cipher Derive(byte[] psk, byte[] salt, string info)
         {
@@ -255,24 +266,30 @@ internal static class BlobWire
             return output;
         }
 
-        public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ulong maxSeenCounter, out byte[] plaintext, out ulong counter)
+        /// <summary>Tries to open one wire frame. <paramref name="watermark"/> is the
+        /// highest counter this direction has authenticated, and it moves ONLY when a
+        /// frame authenticates: a forged counter — however far into the future — and a
+        /// replayed or regressed old counter both leave it exactly where it was. A
+        /// rejected frame can neither starve the frames behind it (the pre-2.1 bug, the
+        /// same unauthenticated-watermark class as the session layer's replay window)
+        /// nor re-admit the frames before it.</summary>
+        public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ref ulong watermark, out byte[] plaintext)
         {
             plaintext = Array.Empty<byte>();
-            counter = 0;
             if (wire.Length < 8 + 16)
             {
                 return false;
             }
 
-            counter = BinaryPrimitives.ReadUInt64LittleEndian(wire);
-            if (counter <= maxSeenCounter)
+            ulong candidate = BinaryPrimitives.ReadUInt64LittleEndian(wire);
+            if (candidate <= watermark)
             {
                 return false; // replay or regression; the ARQ layer tolerates loss, not lies
             }
 
             var aead = new ChaChaPoly();
             Span<byte> nonce = stackalloc byte[12];
-            BuildNonce(nonce, fromProvider, counter);
+            BuildNonce(nonce, fromProvider, candidate);
             aead.Init(false, new AeadParameters(_key, 128, nonce.ToArray()));
             byte[] input = wire.ToArray();
             byte[] buf = new byte[input.Length];
@@ -281,11 +298,12 @@ internal static class BlobWire
                 int n = aead.ProcessBytes(input, 8, input.Length - 8, buf, 0);
                 n += aead.DoFinal(buf, n);
                 plaintext = buf[..n];
+                watermark = candidate; // committed only after the tag verifies
                 return true;
             }
             catch (InvalidCipherTextException)
             {
-                return false;
+                return false; // forged or corrupted in flight: the watermark does not move
             }
         }
 
@@ -294,6 +312,18 @@ internal static class BlobWire
             nonce[0] = provider ? ProviderRole : DownloaderRole;
             BinaryPrimitives.WriteUInt64LittleEndian(nonce[1..], counter);
             nonce[9..].Clear();
+        }
+
+        /// <summary>Open-only view over the pre-v2 per-ticket key. See
+        /// <see cref="ForLegacy"/>.</summary>
+        internal sealed class LegacyDetector
+        {
+            private readonly Cipher _inner;
+
+            internal LegacyDetector(byte[] psk, byte[] root) => _inner = Derive(psk, root, "pinhole-blobs-v1");
+
+            public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ref ulong watermark, out byte[] plaintext) =>
+                _inner.TryOpen(fromProvider, wire, ref watermark, out plaintext);
         }
     }
 }

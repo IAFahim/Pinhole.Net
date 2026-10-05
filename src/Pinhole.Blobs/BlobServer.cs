@@ -157,63 +157,65 @@ public sealed class BlobServer : IAsyncDisposable
         ulong legacyRecv = 0;    // the refusal path's watermark — never serves, just refuses
         BlobWire.Cipher? cipher = null;          // per connection: bound to the Hello's session id
         byte[]? boundSession = null;
-        BlobWire.Cipher? legacy = _psk is null ? null : BlobWire.Cipher.ForLegacy(_psk, _root);
+        BlobWire.Cipher.LegacyDetector? legacy = _psk is null ? null : BlobWire.Cipher.ForLegacy(_psk, _root);
         var files = new Dictionary<ulong, FileStream>();
         try
         {
             while (!ct.IsCancellationRequested
-            && await conn.ReceiveAsync(ct).ConfigureAwait(false) is { } payload)
-        {
-            BlobWire.Frame f;
-            if (_psk is null)
+                && await conn.ReceiveAsync(ct).ConfigureAwait(false) is { } payload)
             {
-                // Plaintext serving: any Hello body is fine — there is no cipher to bind.
-                if (!BlobWire.Frame.TryParse(payload.Span, out f))
+                BlobWire.Frame f;
+                if (_psk is null)
                 {
-                    continue;
-                }
-            }
-            else
-            {
-                // The only plaintext an encrypting provider ever accepts is the Hello
-                // that presents — or retries — the connection's session id: it names
-                // the salt the cipher derives from, so it cannot itself be sealed.
-                // Everything else must decrypt under the session-bound cipher.
-                if (BlobWire.Frame.TryParse(payload.Span, out f)
-                    && f.Type == BlobWire.TypeHello
-                    && f.SessionId is not null)
-                {
-                    if (boundSession is null)
+                    // Plaintext serving: any Hello body is fine — there is no cipher to bind.
+                    if (!BlobWire.Frame.TryParse(payload.Span, out f))
                     {
-                        boundSession = f.SessionId;
-                        cipher = BlobWire.Cipher.For(_psk, _root, f.SessionId);
+                        continue;
                     }
-                    else if (!boundSession.AsSpan().SequenceEqual(f.SessionId))
-                    {
-                        continue; // a session swap mid-connection: confused or hostile, ignored
-                    }
-                }
-                else if (cipher is not null
-                    && cipher.TryOpen(fromProvider: false, payload.Span, recvCounter, out byte[] plain, out recvCounter)
-                    && BlobWire.Frame.TryParse(plain, out f))
-                {
-                }
-                else if (legacy is not null
-                    && legacy.TryOpen(fromProvider: false, payload.Span, legacyRecv, out byte[] legacyPlain, out legacyRecv)
-                    && BlobWire.Frame.TryParse(legacyPlain, out f))
-                {
-                    // A pre-2.0 downloader: it seals under the fixed per-ticket key, which
-                    // reused (key, nonce) pairs across connections. Refuse loudly with a
-                    // Bye it can read, never serve a byte under that construction.
-                    await SendSealedAsync(conn, legacy, BlobWire.Bye(f.Stream), sendCounter).ConfigureAwait(false);
-                    await conn.CloseAsync().ConfigureAwait(false);
-                    return;
                 }
                 else
                 {
-                    continue; // nothing decryptable: garbage costs one datagram
+                    // The only plaintext an encrypting provider ever accepts is the Hello
+                    // that presents — or retries — the connection's session id: it names
+                    // part of the salt the cipher derives from, so it cannot itself be
+                    // sealed. Everything else must decrypt under the session-bound cipher.
+                    if (BlobWire.Frame.TryParse(payload.Span, out f)
+                        && f.Type == BlobWire.TypeHello
+                        && f.SessionId is not null)
+                    {
+                        if (boundSession is null)
+                        {
+                            boundSession = f.SessionId;
+                            // The transport binding (both engine tokens) joins the salt:
+                            // even a downloader that repeats an earlier session id gets a
+                            // different key, because this connection's tokens are new.
+                            cipher = BlobWire.Cipher.For(_psk, _root, f.SessionId, conn.SessionBinding);
+                        }
+                        else if (!boundSession.AsSpan().SequenceEqual(f.SessionId))
+                        {
+                            continue; // a session swap mid-connection: confused or hostile, ignored
+                        }
+                    }
+                    else if (cipher is not null
+                        && cipher.TryOpen(fromProvider: false, payload.Span, ref recvCounter, out byte[] plain)
+                        && BlobWire.Frame.TryParse(plain, out f))
+                    {
+                    }
+                    else if (legacy is not null
+                        && legacy.TryOpen(fromProvider: false, payload.Span, ref legacyRecv, out byte[] legacyPlain))
+                    {
+                        // A pre-2.0 downloader: it seals under the fixed per-ticket key,
+                        // which re-used (key, nonce) pairs across connections. Refuse by
+                        // hanging up — nothing is ever sealed under that key, not even a
+                        // Bye (two refusals would reuse its nonce 1).
+                        await conn.CloseAsync().ConfigureAwait(false);
+                        return;
+                    }
+                    else
+                    {
+                        continue; // nothing decryptable: garbage costs one datagram
+                    }
                 }
-            }
 
             switch (f.Type)
             {

@@ -63,6 +63,14 @@ public readonly record struct PinholeStats(
     public long PingsLost => Math.Max(0, PingsSent - PongsReceived);
 }
 
+/// <summary>The two engine tokens of one connection, numerically ordered: each endpoint
+/// generates a fresh random token per connection and learns the peer's during the
+/// handshake, so both endpoints hold the same ordered pair and the pair carries
+/// freshness from BOTH sides. Upper layers bind per-connection keys to it so a
+/// peer-chosen value alone (such as the blobs session id) can never reproduce a key
+/// across two connections.</summary>
+internal readonly record struct TransportBinding(uint Lo, uint Hi);
+
 /// <summary>One open-forever datagram connection to a peer, identified by stable peer ID —
 /// never by IP. Roaming, rebinding, and path death are handled inside: the same object keeps
 /// delivering while the network underneath changes. It ends only when the app closes it.</summary>
@@ -85,6 +93,27 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
 
     /// <summary>The peer's stable ID, taken from its connection string.</summary>
     public ulong PeerId => _c.PeerId;
+
+    /// <summary>This connection's <see cref="TransportBinding"/> — defined once the
+    /// handshake has delivered both tokens, which is before any application byte can
+    /// flow. Throws if read earlier, which would indicate an engine bug, not a race.</summary>
+    internal TransportBinding SessionBinding
+    {
+        get
+        {
+            lock (_c.Gate)
+            {
+                if (!_c.RemoteTokenKnown)
+                {
+                    throw new InvalidOperationException("transport binding exists only once the handshake completes");
+                }
+
+                uint mine = _c.Token;
+                uint theirs = _c.RemoteToken;
+                return mine <= theirs ? new TransportBinding(mine, theirs) : new TransportBinding(theirs, mine);
+            }
+        }
+    }
 
     /// <summary>Whether this session is encrypted: the X25519 handshake completed and every
     /// frame on the wire is sealed (AES-256-GCM, replay-protected). Always true between

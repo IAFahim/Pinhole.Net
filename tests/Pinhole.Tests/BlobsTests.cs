@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using Pinhole.Blobs;
@@ -305,31 +307,92 @@ public sealed class BlobsTests
     {
         // Two connections on one ticket used to restart the same per-ticket key with the
         // same counters — ChaCha20-Poly1305 (key, nonce) reuse across connections. The
-        // session id in each connection's first Hello must fork the key per connection.
+        // session id in each connection's first Hello forks the key per connection, and
+        // the transport binding (below) forks it again even for a repeated session id.
         byte[] psk = RandomNumberGenerator.GetBytes(32);
         byte[] root = RandomNumberGenerator.GetBytes(32);
+        var binding = new Pinhole.TransportBinding(0x11223344, 0x55667788);
         byte[] sidA = BlobWire.Cipher.FreshSessionId();
         byte[] sidB = BlobWire.Cipher.FreshSessionId();
 
-        BlobWire.Cipher? providerA = BlobWire.Cipher.For(psk, root, sidA);
-        BlobWire.Cipher? downloaderA = BlobWire.Cipher.For(psk, root, sidA); // same connection, both ends
-        BlobWire.Cipher? connectionB = BlobWire.Cipher.For(psk, root, sidB);
+        BlobWire.Cipher? providerA = BlobWire.Cipher.For(psk, root, sidA, binding);
+        BlobWire.Cipher? downloaderA = BlobWire.Cipher.For(psk, root, sidA, binding); // same connection, both ends
+        BlobWire.Cipher? connectionB = BlobWire.Cipher.For(psk, root, sidB, binding);
         Assert.NotNull(providerA);
         Assert.NotNull(downloaderA);
         Assert.NotNull(connectionB);
 
         // Connection A's first provider frame (counter 1): its own far end opens it...
+        ulong seen = 0;
         byte[] wireA = providerA!.Seal(asProvider: true, 1, "chunk-of-A"u8.ToArray());
-        Assert.True(downloaderA!.TryOpen(fromProvider: true, wireA, 0, out byte[] plain, out _));
+        Assert.True(downloaderA!.TryOpen(fromProvider: true, wireA, ref seen, out byte[] plain));
         Assert.Equal("chunk-of-A"u8.ToArray(), plain);
 
         // ...connection B must not — same ticket, same role, same counter, different key.
-        Assert.False(connectionB!.TryOpen(fromProvider: true, wireA, 0, out _, out _),
+        ulong seenB = 0;
+        Assert.False(connectionB!.TryOpen(fromProvider: true, wireA, ref seenB, out _),
             "a second connection on the same ticket must not read the first one's frames");
 
         // And B sealing at its own counter 1 is a distinct (key, nonce) pair, not a collision.
         byte[] wireB = connectionB.Seal(asProvider: true, 1, "chunk-of-B"u8.ToArray());
-        Assert.False(providerA.TryOpen(fromProvider: true, wireB, 0, out _, out _));
+        Assert.False(providerA.TryOpen(fromProvider: true, wireB, ref seen, out _));
+    }
+
+    [Fact]
+    public void Cipher_RepeatedSessionId_TransportBindingStillForksTheKey()
+    {
+        // Session uniqueness must not rest on the downloader alone: a buggy or hostile
+        // client that repeats an earlier session id gets the same id-derived input — but
+        // a new connection has new engine tokens from BOTH endpoints, so the derived key
+        // still differs. The provider contributes freshness by construction.
+        byte[] psk = RandomNumberGenerator.GetBytes(32);
+        byte[] root = RandomNumberGenerator.GetBytes(32);
+        byte[] repeated = BlobWire.Cipher.FreshSessionId();
+        var first = new Pinhole.TransportBinding(0x01020304, 0x0a0b0c0d);
+        var second = new Pinhole.TransportBinding(0x01020304, 0xaabbccdd); // only the provider's token changed
+
+        var conn1 = BlobWire.Cipher.For(psk, root, repeated, first)!;
+        var conn2 = BlobWire.Cipher.For(psk, root, repeated, second)!;
+        var conn1Again = BlobWire.Cipher.For(psk, root, repeated, first)!; // both ends of one connection agree
+
+        byte[] wire = conn1.Seal(asProvider: true, 1, "connection one"u8.ToArray());
+        ulong seen = 0;
+        Assert.True(conn1Again.TryOpen(fromProvider: true, wire, ref seen, out _));
+
+        seen = 0;
+        Assert.False(conn2.TryOpen(fromProvider: true, wire, ref seen, out _),
+            "a repeated session id must not reproduce the key across connections");
+        byte[] wire2 = conn2.Seal(asProvider: true, 1, "connection two"u8.ToArray());
+        seen = 0;
+        Assert.False(conn1.TryOpen(fromProvider: true, wire2, ref seen, out _));
+    }
+
+    [Fact]
+    public void Cipher_ForgedAndReplayedCounters_NeverMoveTheWatermark()
+    {
+        // The blob layer's replay watermark obeys the same rule the session layer learned
+        // the hard way: it moves only on authenticated frames. A forged far-future
+        // counter must not starve the frames behind it, and a replayed old counter must
+        // not re-admit the frames before it.
+        var c = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
+            BlobWire.Cipher.FreshSessionId(), new Pinhole.TransportBinding(1, 2))!;
+        ulong watermark = 5;
+        byte[] genuine5 = c.Seal(asProvider: true, 5, "real"u8.ToArray());
+
+        byte[] forged = new byte[8 + 4 + 16]; // counter 100, garbage everything else
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(forged, 100);
+        Assert.False(c.TryOpen(fromProvider: true, forged, ref watermark, out _));
+        Assert.Equal(5UL, watermark); // the forgery moved nothing
+
+        byte[] genuine6 = c.Seal(asProvider: true, 6, "next"u8.ToArray());
+        Assert.True(c.TryOpen(fromProvider: true, genuine6, ref watermark, out _));
+        Assert.Equal(6UL, watermark); // genuine frames still land after the forgery
+
+        Assert.False(c.TryOpen(fromProvider: true, genuine5, ref watermark, out _));
+        Assert.Equal(6UL, watermark); // the replay of an authenticated old frame moved nothing
+
+        byte[] genuine7 = c.Seal(asProvider: true, 7, "more"u8.ToArray());
+        Assert.True(c.TryOpen(fromProvider: true, genuine7, ref watermark, out _));
     }
 
     [Fact]
@@ -366,45 +429,40 @@ public sealed class BlobsTests
     }
 
     [Fact]
-    public async Task LegacyHello_EncryptedProvider_RefusesWithAReadableBye()
+    public async Task LegacyHello_EncryptedProvider_RefusesByHangingUp_AndKeepsServing()
     {
         string dir = TempDir();
         try
         {
+            byte[] data = RandomBytes(4096);
             string src = Path.Combine(dir, "legacy.bin");
-            await File.WriteAllBytesAsync(src, RandomBytes(4096));
+            await File.WriteAllBytesAsync(src, data);
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
             BlobTicket ticket = server.Ticket;
 
-            // A pre-v2 downloader: it seals under the fixed per-ticket key and sends a
-            // Hello with an empty body. The provider must refuse loudly — a Bye the
-            // legacy peer can read — and hang up, never serving under the old construction.
+            // A pre-2.0 downloader emulated from the raw v1 cipher (production code only
+            // ever gets the open-only detector): it seals under the fixed per-ticket key
+            // and sends a Hello with an empty body.
             await using var node = await PinholeNode.BindAsync(Offline() with { Listen = false, ReceiveBufferCapacity = 64 });
             await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString);
 
-            var legacy = BlobWire.Cipher.ForLegacy(ticket.PreSharedKey!, ticket.Root);
+            var legacy = BlobWire.Cipher.ForLegacyEmulation(ticket.PreSharedKey!, ticket.Root);
             ulong stream = BlobWire.StreamId(ticket.Root);
             var legacyHello = new byte[9];
             legacyHello[0] = BlobWire.TypeHello;
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(legacyHello.AsSpan(1), stream);
 
-            var bye = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-            ulong recv = 0;
-            conn.Received += p =>
-            {
-                if (legacy.TryOpen(fromProvider: true, p, recv, out byte[] plain, out recv)
-                    && BlobWire.Frame.TryParse(plain, out BlobWire.Frame f)
-                    && f.Type == BlobWire.TypeBye)
-                {
-                    bye.TrySetResult(plain);
-                }
-            };
-
             conn.Send(legacy.Seal(asProvider: false, 1, legacyHello));
-            await bye.Task.WaitAsync(Timeout); // refused fast, not a 20 s first-contact timeout
-
-            await TestPoll.UntilAsync(Timeout, () => conn.State == PinholeConnectionState.Closed);
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed); // fast, not the 20 s first-contact timeout
             Assert.Equal(0, server.ChunksServed); // nothing was served under the legacy key
+
+            // Failure isolation: the refusal poisoned nothing — the next (current) downloader
+            // of the same ticket completes against the same server.
+            string outDir = Path.Combine(dir, "out");
+            BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+            Assert.Equal(data.Length, result.Bytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "legacy.bin")));
         }
         finally
         {
@@ -464,26 +522,32 @@ public sealed class BlobsTests
     public void Cipher_RejectsTamperingReplayAndRoleConfusion()
     {
         byte[] sessionId = BlobWire.Cipher.FreshSessionId();
-        var cipher = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), sessionId)!;
+        var cipher = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
+            sessionId, new Pinhole.TransportBinding(3, 4))!;
         byte[] plain = RandomNumberGenerator.GetBytes(200);
 
         byte[] wire = cipher.Seal(asProvider: true, 7, plain);
-        Assert.True(cipher.TryOpen(fromProvider: true, wire, 0, out byte[] opened, out ulong counter));
+        ulong watermark = 0;
+        Assert.True(cipher.TryOpen(fromProvider: true, wire, ref watermark, out byte[] opened));
         Assert.Equal(plain, opened);
-        Assert.Equal(7UL, counter);
+        Assert.Equal(7UL, watermark);
 
         byte[] tampered = (byte[])wire.Clone();
         tampered[10] ^= 1;
-        Assert.False(cipher.TryOpen(fromProvider: true, tampered, 0, out _, out _), "flipped bit must fail the tag");
+        Assert.False(cipher.TryOpen(fromProvider: true, tampered, ref watermark, out _), "flipped bit must fail the tag");
+        Assert.Equal(7UL, watermark);
 
-        Assert.False(cipher.TryOpen(fromProvider: true, wire, 7, out _, out _), "replay is refused");
-        Assert.False(cipher.TryOpen(fromProvider: true, wire, 8, out _, out _), "counter regression is refused");
+        Assert.False(cipher.TryOpen(fromProvider: true, wire, ref watermark, out _), "replay is refused");
+        Assert.False(cipher.TryOpen(fromProvider: true, wire, ref watermark, out _), "counter regression is refused");
+        Assert.Equal(7UL, watermark);
 
         byte[] fromDownloader = cipher.Seal(asProvider: false, 1, plain);
-        Assert.False(cipher.TryOpen(fromProvider: true, fromDownloader, 0, out _, out _), "roles must not cross");
+        Assert.False(cipher.TryOpen(fromProvider: true, fromDownloader, ref watermark, out _), "roles must not cross");
 
-        var otherKey = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), BlobWire.Cipher.FreshSessionId())!;
-        Assert.False(otherKey.TryOpen(fromProvider: true, wire, 0, out _, out _), "tickets never share keys");
+        var otherKey = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
+            BlobWire.Cipher.FreshSessionId(), new Pinhole.TransportBinding(3, 4))!;
+        ulong otherWatermark = 0;
+        Assert.False(otherKey.TryOpen(fromProvider: true, wire, ref otherWatermark, out _), "tickets never share keys");
     }
 
     [Fact]
@@ -535,6 +599,209 @@ public sealed class BlobsTests
                 Assert.True(datagram.AsSpan().IndexOf(marker) < 0,
                     "file bytes crossed the relay in the clear — the ticket key must wrap every frame");
             }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    // ---------------------------------------------------------------- wire-oracle adversarial provider
+
+    /// <summary>A hand-rolled provider speaking the real wire — engine crypto handshake
+    /// from a raw socket, then blob frames sealed under the connection's true cipher —
+    /// used to inject hostile frames into a genuine download.</summary>
+    private sealed class BlobsOracle : IDisposable
+    {
+        public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        public readonly ulong PeerId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        public readonly NodeIdentity Identity = new();
+        public const uint EngineToken = 0x00C0FFEE;
+        private ConnectionCrypto? _crypto;
+        private BlobWire.Cipher? _cipher;
+        private ulong _blobCounter;
+
+        public IPEndPoint Ep => (IPEndPoint)Sock.LocalEndPoint!;
+
+        /// <summary>The ticket's connection string, pinning this oracle's static key.</summary>
+        public string DialString => new ConnectionString(
+            PeerId, [new PinholeCandidate(Pinhole.CandidateKind.Direct, Ep)], NatHint.Unknown, Identity.PublicKey).ToString();
+
+        /// <summary>Answers the downloader's engine handshake, then serves the stream
+        /// adversarially: a genuine Head, one forged chunk frame claiming a far-future
+        /// counter with a garbage tag, then every genuine chunk. The download must
+        /// complete anyway — the watermark must not have moved for the forgery.</summary>
+        public async Task ServeAdversariallyAsync(byte[] psk, byte[] root, byte[] content, CancellationToken ct = default)
+        {
+            var peer = new IPEndPoint(IPAddress.Loopback, 0);
+            byte[] buf = new byte[8192];
+            byte[] plain = new byte[8192];
+            ulong stream = BlobWire.StreamId(root);
+            long totalChunks = (content.Length + Blake3.ChunkSize - 1) / Blake3.ChunkSize;
+
+            // Phase 1: engine handshake. The crypto PUNC names the dialer; answer PACK
+            // from the address it arrived on.
+            EndPoint client = new IPEndPoint(IPAddress.Loopback, 0);
+            uint clientToken = 0;
+            while (!ct.IsCancellationRequested)
+            {
+                SocketReceiveFromResult r;
+                try
+                {
+                    r = await Sock.ReceiveFromAsync(buf, peer, ct);
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+                {
+                    return;
+                }
+
+                if (r.ReceivedBytes == 9 + CryptoWire.PuncCryptoBody && buf[0] == 0x50)
+                {
+                    client = r.RemoteEndPoint!;
+                    clientToken = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(9));
+                    _crypto = ConnectionCrypto.New(Identity, PeerId, BinaryPrimitives.ReadUInt64LittleEndian(buf.AsSpan(1)));
+                    if (!_crypto.TryPeerKeys(buf.AsSpan(13, 32), buf.AsSpan(45, 32)))
+                    {
+                        throw new InvalidOperationException("oracle could not derive the downloader's keys");
+                    }
+
+                    byte[] pack = new byte[9 + CryptoWire.PackCryptoBody];
+                    pack[0] = 0x51;
+                    BinaryPrimitives.WriteUInt64LittleEndian(pack.AsSpan(1), PeerId);
+                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(9), clientToken); // echo: we saw the PUNC
+                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), EngineToken); // our token for the client to pin
+                    _crypto.MyEphPublic.CopyTo(pack.AsSpan(17));
+                    _crypto.MyStaticPublic.CopyTo(pack.AsSpan(49));
+                    _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
+                    await Sock.SendToAsync(pack, client, ct);
+                    break;
+                }
+            }
+
+            // Phase 2: serve. Only the Hello (plaintext inside the engine-sealed Data
+            // frame) is answered; everything else the client sends is ignored.
+            while (!ct.IsCancellationRequested)
+            {
+                int received;
+                int len;
+                try
+                {
+                    SocketReceiveFromResult r = await Sock.ReceiveFromAsync(buf, peer, ct);
+                    received = r.ReceivedBytes;
+                    if (received < 13 || buf[0] is 0x50 or 0x51 or 0x57)
+                    {
+                        continue; // handshake frames are plaintext by design
+                    }
+
+                    if (!_crypto!.Recv!.Open(buf.AsSpan(0, received), plain, out len))
+                    {
+                        continue; // not sealed under the session keys: not the downloader
+                    }
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+                {
+                    return;
+                }
+
+                if (!BlobWire.Frame.TryParse(plain.AsSpan(0, len), out BlobWire.Frame f)
+                    || f.Type != BlobWire.TypeHello
+                    || f.SessionId is not { } sid)
+                {
+                    continue;
+                }
+
+                // The same derivation the real provider performs: session id + the
+                // connection's transport binding (both engine tokens).
+                uint lo = Math.Min(clientToken, EngineToken);
+                uint hi = Math.Max(clientToken, EngineToken);
+                _cipher = BlobWire.Cipher.For(psk, root, sid, new Pinhole.TransportBinding(lo, hi))!;
+                _blobCounter = 0;
+
+                await SendBlobAsync(client, BlobWire.Head(stream, content.Length, totalChunks), ct).ConfigureAwait(false);
+
+                // The forgery: a chunk frame claiming counter 10_000 with a corrupted
+                // tag. It must be refused and consume nothing.
+                byte[] first = ChunkFrame(stream, content, 0);
+                byte[] forged = _cipher.Seal(asProvider: true, 10_000, first);
+                forged[^1] ^= 0xFF;
+                await SendSealedAsync(client, forged, ct).ConfigureAwait(false);
+
+                // Every genuine chunk after it, small counters: all must land.
+                for (long i = 0; i < totalChunks; i++)
+                {
+                    await SendBlobAsync(client, ChunkFrame(stream, content, i), ct).ConfigureAwait(false);
+                }
+            }
+        }
+
+        private static byte[] ChunkFrame(ulong stream, byte[] content, long index)
+        {
+            int len = (int)Math.Min(Blake3.ChunkSize, content.Length - index * Blake3.ChunkSize);
+            var chunk = new byte[len];
+            Array.Copy(content, index * Blake3.ChunkSize, chunk, 0, len);
+            return BlobWire.Chunk(stream, index, Blake3.ChunkCv(chunk, (ulong)index, root: false), chunk);
+        }
+
+        private Task SendBlobAsync(EndPoint to, byte[] plain, CancellationToken ct)
+        {
+            byte[] sealedBlob = _cipher!.Seal(asProvider: true, ++_blobCounter, plain);
+            return SendSealedAsync(to, sealedBlob, ct);
+        }
+
+        /// <summary>Wraps one blob payload in a genuine engine Data frame — sealed under
+        /// the session keys, so the client's engine accepts it; only the inner blob layer
+        /// sees hostility.</summary>
+        private async Task SendSealedAsync(EndPoint to, ReadOnlyMemory<byte> blobPayload, CancellationToken ct)
+        {
+            var frame = new byte[13 + CryptoWire.SealedOverhead + blobPayload.Length];
+            frame[0] = 0x52; // Data
+            BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), PeerId);
+            BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(9), EngineToken);
+            _crypto!.Send!.Seal(frame.AsSpan(13), frame.AsSpan(0, 13), blobPayload.Span);
+            try
+            {
+                await Sock.SendToAsync(frame, to, ct);
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+            {
+            }
+        }
+
+        public void Dispose() => Sock.Dispose();
+    }
+
+    [Fact]
+    public async Task WireOracle_ForgedInnerCounter_MidTransfer_DownloadStillCompletes()
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] data = RandomBytes(5000); // 5 chunks
+            var tree = new Blake3.Tree();
+            tree.Update(data);
+            byte[] root = tree.RootHash();
+            byte[] psk = RandomNumberGenerator.GetBytes(32);
+
+            using var oracle = new BlobsOracle();
+            oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            var ticket = new BlobTicket
+            {
+                Kind = BlobKind.File,
+                Root = root,
+                Name = "oracle.bin",
+                ConnectionString = oracle.DialString,
+                PreSharedKey = psk,
+            };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            Task serve = oracle.ServeAdversariallyAsync(psk, root, data, cts.Token);
+            string outDir = Path.Combine(dir, "out");
+            BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() with { EnablePathValidation = false } })
+                .WaitAsync(Timeout);
+
+            Assert.Equal(data.Length, result.Bytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "oracle.bin")));
         }
         finally
         {

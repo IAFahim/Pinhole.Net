@@ -107,34 +107,47 @@ are rejected, so a hostile manifest cannot write outside the destination directo
 
 When the ticket carries a PSK (the default), every frame except the Hello is sealed in
 both directions with ChaCha20-Poly1305 under `HKDF-SHA256(psk, salt = content root ‖
-sessionId, info = "pinhole-blobs-v2")` — the connection's cipher is forked per
-connection by the downloader's Hello-borne session id, so two tickets never share a
-stream cipher even when a caller reuses a key, and **two connections sharing one
-ticket never share a cipher either**. That is what makes per-connection counters
-restarting at 1 safe: without the fork (the pre-2.0 wire), simultaneous, reconnected,
-and resumed downloads of one ticket re-used (key, nonce) pairs across connections.
-Wire form: `[counter u64 LE][ciphertext][tag 16]`. The 12-byte nonce is
-`[role u8][counter u64 LE][zero × 3]` where role separates provider (`1`) from
+sessionId ‖ transportBinding, info = "pinhole-blobs-v2")`. Two salts fork the key per
+connection, each contributing freshness from a different place:
+
+- **`sessionId`** (32 bytes, from the downloader's plaintext Hello) — the downloader's
+  contribution;
+- **`transportBinding`** (8 bytes) — the connection's two engine tokens, numerically
+  ordered: each endpoint generates a fresh random token per connection and learns the
+  peer's during the engine handshake. The **provider contributes freshness here** — a
+  buggy or hostile downloader that repeats an earlier session id still derives a
+  different key, because the new connection's token pair is new.
+
+So two tickets never share a stream cipher even when a caller reuses a key, two
+connections sharing one ticket never share a cipher, and per-connection counters
+restarting at 1 are safe by construction. (The pre-v2 wire had no per-connection
+fork at all; the unreleased first cut of v2 forked on the session id alone — both are
+refused, below.) Wire form: `[counter u64 LE][ciphertext][tag 16]`. The 12-byte nonce
+is `[role u8][counter u64 LE][zero × 3]` where role separates provider (`1`) from
 downloader (`0`) — reflected frames cannot decrypt.
 
 The counter is per-connection and per-direction, monotonic, shared across all streams
 on the connection (directory downloads move between streams; a per-stream counter
-would look like a replay). Receivers reject `counter ≤ max seen` outright: the ARQ
-layer tolerates loss, not lies — a replayer can at most duplicate a frame the sink
-already de-duplicates, and a tag failure drops the frame silently, costing the sender
-one retransmit cycle. The counter is in the clear (needed to build the nonce) and
-reveals only rough progress. Replay safety and integrity hold even against the relay
-itself.
+would look like a replay). Receivers run an authenticate-then-commit watermark:
+**the highest-authenticated counter moves only when a frame's tag verifies** — a
+forged far-future counter cannot starve the frames behind it, and a replayed or
+regressed old counter cannot re-admit the frames before it (the same rule the session
+layer's replay window enforces; the counter is plaintext on the wire, exactly like
+the session token). A tag failure drops the frame silently, costing the sender one
+retransmit cycle, and the counter in the clear reveals only rough progress. Replay
+safety and integrity hold even against the relay itself.
 
 With `Encrypt = false` (trusted high-speed LANs) frames go out as plaintext — the
 verification story is unchanged, only confidentiality is given up.
 
 ### Compatibility (wire v2)
 
-- A v2 provider **refuses a pre-2.0 downloader loudly**: the first frame that opens
-  under the old fixed per-ticket key (`pinhole-blobs-v1`) is answered with a Bye that
-  key can read, and the connection is closed — the legacy key derivation is retained
-  for that refusal only and never serves a byte.
+- A v2 provider **refuses a pre-2.0 downloader by hanging up**: the first frame that
+  opens under the old fixed per-ticket key (`pinhole-blobs-v1`) closes the connection
+  immediately. Nothing is ever *sealed* under the legacy key — not even a refusal Bye,
+  which would re-use its nonce 1 across two refusals; the old derivation exists only
+  as an open-only detector. The legacy peer fails fast (connection went quiet)
+  instead of timing out at first contact, and the server keeps serving others.
 - A pre-2.0 provider cannot parse the v2 Hello, so a v2 downloader against one fails
   with the ordinary first-contact timeout — upgrade both sides.
 - Plaintext serving (`Encrypt = false`) accepts any Hello body: with no cipher there
