@@ -8,7 +8,8 @@ QUIC transport).
 
 Design rule throughout: **holding a connection string lets a stranger dial you, but
 never forge, hijack, or kill an established session** — every frame is authenticated
-with a per-connection token that never appears in the string.
+with a per-connection token that never appears in the string, and since wire v1.6
+every session is additionally encrypted and peer-authenticated (below).
 
 ## Transports
 
@@ -32,18 +33,25 @@ one frame:
 +-------+-------------------------------------------------+---------------+
 ```
 
-- Header size: **9 bytes**. Maximum payload: **1200 bytes** (fits typical MTUs without
-  fragmentation; the socket is dual-mode so IPv4 targets are v4-mapped).
+- Header size: **9 bytes**. Maximum payload: **1200 bytes guaranteed** (QUIC's
+  conservative initial); path-MTU discovery may lift the per-connection ceiling above
+  it on paths that prove they can carry more.
 - The first 4 body bytes of every frame are the **sender's per-connection token**
   (u32 LE, random per connection). The remainder is frame-type-specific.
+- On encrypted sessions every frame type after the handshake is **sealed** — the body
+  shown below becomes `[counter u64 LE][ciphertext ‖ GCM tag]`; see
+  [Encryption](#encryption-wire-v16).
 
 | Type | Byte | Body after token | Meaning |
 |---|---|---|---|
 | `Punc` | `0x50` | token (u32 LE) | Punch probe; body *is* the dialer's handshake token |
+| `Punc`+ | `0x50` | token + ephemeral (32) + static (32) — 77 B frame | Crypto punch: the dialer's half of the handshake (length discriminates from legacy 13 B) |
 | `Pack` | `0x51` | echo (u32 LE) + responder token (u32 LE) | Punch ack; proves the PUNC was seen and delivers the responder's token |
-| `Data` | `0x52` | payload (1–1200 bytes) | Application datagram |
-| `Ping` | `0x53` | timestamp (i64 LE) | Path probe / RTT measurement |
-| `Pong` | `0x54` | echoed timestamp (i64 LE) | Reply to Ping, value copied verbatim |
+| `Pack`+ | `0x51` | echo + token + ephemeral (32) + static (32) + confirm (16) — 97 B frame | Crypto punch ack: the responder's half plus its confirm MAC |
+| `Hsck` | `0x57` | token + confirm (16) — 29 B frame, always plaintext | Third flight: the dialer's confirm MAC; also triggers the responder to re-announce |
+| `Data` | `0x52` | payload (1–1200+ bytes) | Application datagram |
+| `Ping` | `0x53` | nonce (i64 LE) [+ zero padding] | Path probe / RTT / (padded) PMTU probe |
+| `Pong` | `0x54` | echoed nonce (i64 LE) | Reply to Ping, value copied verbatim |
 | `Announce` | `0x55` | count (u8) + candidate TLV stream | Sender's current reachable addresses |
 | `Bye` | `0x56` | — | Clean close |
 
@@ -58,11 +66,91 @@ filtered the same way.
 
 ### Ping/Pong and maintenance probes
 
-The timestamp field is the sender's `Environment.TickCount64` (monotonic, i64). The
-**high bit marks maintenance probes**: engine path-validation probes set it, caller
-`Ping()` calls do not, so RTT statistics and monitoring counters never mix. A probe's
-`Pong` certifies the direct path only when it echoes the outstanding probe's nonce
-*and* arrives from the endpoint the probe was sent to.
+The nonce field is the sender's `Environment.TickCount64` (monotonic, i64) with a
+**class marker in the top bits**: bit 63 (value negative) marks engine
+path-validation probes, bit 62 marks PMTU probes, and neither set is a caller
+`Ping()` — so RTT statistics and monitoring counters never mix. A probe's `Pong`
+certifies the direct path only when it echoes the outstanding probe's nonce *and*
+arrives from the endpoint the probe was sent to.
+
+## Encryption (wire v1.6)
+
+Every session encrypts and authenticates by default: AES-256-GCM per frame over a
+triple-DH X25519 handshake, with the answering key pinned to the connection string.
+No signatures, no certificates, no RNG at MAC time.
+
+### Handshake
+
+The dialer uses crypto precisely when the connection string carries a static key
+(payload v2). Roles are canonical — **lo** is the side with the smaller peer ID —
+so both endpoints derive identical roles no matter who dialed, and simultaneous
+dials converge on one session instead of colliding.
+
+1. The dialer's `Punc` carries its ephemeral and static X25519 public keys (77 B
+   frame). The responder derives the same secrets, and answers `Pack` with its own
+   ephemeral/static keys plus its **confirm MAC** (97 B frame).
+2. The dialer verifies the responder's static key against the string's pinned key —
+   a substitution kills the connection as a MITM, it never negotiates — and the
+   confirm MAC, then sends `Hsck` carrying *its* confirm MAC (29 B frame, the third
+   flight). `Hsck` also asks the responder to re-announce (its first sealed announce
+   may have lost the race against the PACK that delivered its keys).
+
+Key schedule, all sides identical: transcript = SHA-256 of
+`"pinhole-hs1" ‖ loId LE ‖ hiId LE ‖ eLo ‖ sLo ‖ eHi ‖ sHi`; secret input =
+`DH(e,e) ‖ DH(s_lo,e_hi) ‖ DH(e_lo,s_hi)`; 136 B of HKDF-SHA256
+(salt = transcript, info = `"pinhole-session-v1"`) expand to the lo→hi key,
+hi→lo key, both 4-byte nonce salts, and both 16-byte confirm MACs
+(HMAC of the transcript, truncated).
+
+### Sealed frames
+
+After the handshake every frame type (Data, Ping, Pong, Announce, Bye) is:
+
+```
+[header 9][token 4][counter u64 LE][ciphertext ‖ 16-byte GCM tag]
+```
+
+- Nonce = direction's salt (4 B) ‖ counter (8 B). Counters start at 1 and strictly
+  increase, so nonces never repeat. AAD = header + token + counter (21 B) — frame
+  type, sender, token, and ordering are all tamper-evident.
+- The receiver keeps a 64-frame IPsec-style replay window. A frame that fails
+  authentication still consumes its counter — a burned counter is burned, exactly
+  like IPsec — so replays and in-flight bit flips die without side effects.
+- Key ratchet: every 2^28 frames per direction the key chains forward through
+  HKDF-SHA256 (info `"pinhole-rekey-v1"`, salt = transcript). Both sides step
+  identically with no wire negotiation.
+
+### Policy and downgrade resistance
+
+`Required` (default), `Optional`, `Disabled`. There is no negotiation window to
+strip: a plaintext `Pack` answering a crypto dial fails the connection; a crypto
+`Punc` on a plaintext session is dropped; a stranger's 13 B vs 77 B Punc is
+length-discriminated and policy-filtered before any connection state exists.
+`Optional` exists solely for pre-1.6 peers — it still speaks crypto with anyone
+whose string pins a key.
+
+## Path MTU discovery
+
+RFC 8899-style, direct paths only (relays tunnel whatever they are handed). Padded
+`Ping`s — nonce in front, zero padding behind, sized so the whole sealed frame hits
+the probe size — climb from the 1237 B floor in 128 B steps toward the remote
+family's Ethernet plateau (1472 B IPv4 / 1452 B IPv6; the dual-mode socket reports
+v4 peers as v4-mapped v6, so the mapped-back endpoint decides). A matching `Pong`
+confirms a size; three unanswered probes abandon it for a five-minute cooldown; the
+ladder re-climbs a settled path every five minutes. An inbound frame of a new size
+is adopted as evidence directly — if a datagram arrived, the path carries it.
+Leaving the direct path forgets the climb: a relay hop or rebind may have a smaller
+MTU than the last path proved.
+
+## LAN discovery (mDNS)
+
+Nodes may announce on the local link as `<peer-id-hex>._pinhole._udp.local`
+(RFC 6762/6763 subset): PTR + SRV + TXT + A records in one response, the RFC's 3×
+startup burst plus a 120 s heartbeat, unicast answers to legacy queriers, and a
+TTL-0 goodbye on shutdown. TXT carries `id` (16 hex), `hint` (0/1/2), and `key`
+(64 hex = the static public key) — so a discovered peer is immediately dialable
+with the same key pinning as a shared string. Record TTLs are 120 s with the
+cache-flush bit on unique records.
 
 ## Connection lifecycle
 
@@ -77,7 +165,9 @@ The timestamp field is the sender's `Environment.TickCount64` (monotonic, i64). 
    also updates the sender's address (last-wins by peer ID — that is roaming).
 4. **Keepalive/validation.** One scheduler per node probes direct paths that have
    received nothing for the idle window (default 5 s); three unanswered probes
-   (default) mark the path suspect → relay fallback or honest `Dead`.
+   (default) mark the path suspect → relay fallback or honest `Dead`. Separately,
+   an app may set `KeepaliveInterval` to send a caller `Ping` at a fixed cadence —
+   a heartbeat that refreshes NAT mappings both ways; off by default.
 5. **Re-discovery.** STUN is re-probed on a timer (default 60 s, the periodic
    refresh iroh also performs). A moved NAT mapping replaces the reflexive set and
    is re-advertised to every peer with `Announce` — working direct paths are never
@@ -99,15 +189,18 @@ A peer punches them identically; no wire semantics differ.
 
 ## Connection string
 
-`pinhole1:<base64url>` (unpadded). The payload:
+`pinhole1:<base64url>` (unpadded). Two payload versions share the envelope:
 
 ```
 version:u8 (=1)  flags:u8 (=0)  peerId:u64 LE  natHint:u8 (0 unknown, 1 cone, 2 symmetric)
-candidateCount:u8  candidate TLVs...
+candidateCount:u8  candidate TLVs...  [v2 only: staticKey (32 B)]
 ```
 
-At most 32 candidates, at most 8192 encoded characters; parsers reject trailing
-bytes, unknown kinds, and non-strict base64url.
+Version 2 sets flags = 1 and ends with the announcer's 32-byte X25519 static public
+key — the pin that makes every dial man-in-the-middle proof. v1 parses as legacy
+(`StaticKey` null); a default node refuses to *dial* one. At most 32 candidates, at
+most 8192 encoded characters; parsers reject trailing bytes, unknown kinds, and
+non-strict base64url.
 
 `natHint` is derived automatically (a manual `SetNatHint` override wins): when two
 or more configured STUN servers answer, identical observed mappings classify a cone
@@ -173,10 +266,16 @@ into a synchronized retry storm. TURN allocation retries follow the same idea
 | Constant | Value |
 |---|---|
 | Header size | 9 B |
-| Max payload | 1200 B |
+| Max payload (guaranteed floor) | 1200 B (+37 B frame overhead = 1237 B wire) |
+| Sealed-frame overhead | counter 8 B + GCM tag 16 B |
+| Replay window / epoch | 64 frames / rekey every 2^28 frames |
+| Crypto handshake frames | Punc 77 B, Pack 97 B, Hsck 29 B |
+| PMTU ladder | 1237 B floor, +128 B steps, 1472 B (v4) / 1452 B (v6) ceiling, 3 tries/size, 5 min cooldown |
+| mDNS | `_pinhole._udp.local` on 224.0.0.251:5353, TTL 120 s, heartbeat 120 s |
 | Punch pace | 200 ms |
 | Direct-upgrade pace | 1 s, ≤120 attempts |
 | Path-validation defaults | 5 s idle, 1 s interval, 3 unanswered |
+| Keepalive option | off by default; ≥100 ms when set |
 | STUN refresh | 60 s (0 = off) |
 | Relay reconnect backoff | 1 s → ×2 → 30 s cap, ±10% jitter |
 | Port-mapping lease | 2 h, renewed at half-life; discovery retries 60 s after a lost mapping |

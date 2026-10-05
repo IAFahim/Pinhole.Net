@@ -117,6 +117,14 @@ public sealed record PinholeOptions
     /// choose. Failures to announce (no multicast in containers) never fail the bind.</summary>
     public bool EnableLanDiscovery { get; init; }
 
+    /// <summary>Send a heartbeat ping at this interval on every open connection (default
+    /// zero = off). The pings ride the connection's current path — direct or relay — and
+    /// their pongs refresh the NAT mapping in both directions, keep half-idle firewalls
+    /// from forgetting the flow, and feed <see cref="PinholeConnection.LastRtt"/>. They
+    /// count in <see cref="PinholeConnection.Stats"/> like caller pings: the app asked
+    /// for them. This is a heartbeat, not reliability — delivery guarantees stay out.</summary>
+    public TimeSpan KeepaliveInterval { get; init; }
+
     /// <summary>Capacity of the per-connection receive buffer (default 0 = off). With a
     /// positive capacity every received datagram is copied into a bounded queue that exists
     /// from handshake time, so <see cref="PinholeConnection.ReceiveAsync"/> can drain
@@ -198,6 +206,8 @@ public sealed record PinholeOptions
         ArgumentOutOfRangeException.ThrowIfGreaterThan(options.ReceiveBufferCapacity, 65536);
         if (options.StunRefreshInterval > TimeSpan.Zero && options.StunRefreshInterval < TimeSpan.FromMilliseconds(100))
             throw new ArgumentOutOfRangeException(nameof(options), "StunRefreshInterval must be zero (off) or at least 100 ms");
+        if (options.KeepaliveInterval > TimeSpan.Zero && options.KeepaliveInterval < TimeSpan.FromMilliseconds(100))
+            throw new ArgumentOutOfRangeException(nameof(options), "KeepaliveInterval must be zero (off) or at least 100 ms");
     }
 
     private static async Task<IPEndPoint[]> ResolveStunCatalogAsync(PinholeOptions options, CancellationToken ct)

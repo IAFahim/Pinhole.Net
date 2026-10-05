@@ -93,6 +93,7 @@ internal sealed class ConnState
     public long PmtuNextProbeTicks;        // Gate; cooldown after failure / ceiling
     public long PmtuProbesSent;            // Interlocked
     public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
+    public long KeepaliveNextTicks;        // Gate; zero-interval (off) never reaches this path
 
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
@@ -1149,6 +1150,7 @@ internal sealed class NodeEngine : IDisposable
         bool refresh = refreshMs > 0;
         bool validate = _options.EnablePathValidation;
         bool pmtud = _options.EnablePmtud;
+        bool keepalive = _options.KeepaliveInterval > TimeSpan.Zero;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -1168,7 +1170,7 @@ internal sealed class NodeEngine : IDisposable
 
             _portMap?.Tick(Environment.TickCount64);
 
-            if (validate || pmtud)
+            if (validate || pmtud || keepalive)
             {
                 foreach (ConnState c in ConnectionsSnapshot())
                 {
@@ -1180,6 +1182,11 @@ internal sealed class NodeEngine : IDisposable
                     if (pmtud)
                     {
                         DiscoverPathMtu(c);
+                    }
+
+                    if (keepalive)
+                    {
+                        MaybeKeepalive(c);
                     }
                 }
             }
@@ -1350,9 +1357,28 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------ path MTU discovery
+    /// <summary>One heartbeat per interval on every live connection — a caller ping, so
+    /// its pongs refresh the NAT mapping both ways and feed RTT, and it counts in caller
+    /// stats because the app asked for it.</summary>
+    private void MaybeKeepalive(ConnState c)
+    {
+        long intervalMs = (long)_options.KeepaliveInterval.TotalMilliseconds;
+        long now = Environment.TickCount64;
+        lock (c.Gate)
+        {
+            if (c.State is not (PinholeConnectionState.Open or PinholeConnectionState.Degraded)
+                || now < c.KeepaliveNextTicks)
+            {
+                return;
+            }
 
-    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
+            c.KeepaliveNextTicks = now + intervalMs;
+        }
+
+        Ping(c);
+    }
+
+    // ------------------------------------------------------------------ path MTU discovery    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
     /// size upward, a matching pong confirms a size, and three unanswered probes abandon a
     /// size for a long cooldown. Only direct paths are probed — relays tunnel whatever they
     /// are handed — and leaving the direct path forgets everything: a new path may have a

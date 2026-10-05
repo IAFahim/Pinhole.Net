@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.6.0 — the non-goals, demolished
+
+Four things this library said it would never do, done: wire encryption, path-MTU
+discovery, LAN discovery, and an optional keepalive. What remains a non-goal remains
+one deliberately — no delivery guarantees, ordering, or retransmission (a half-baked
+ARQ is worse than none), and no signaling/storage services.
+
+### Wire encryption and authentication (default on)
+
+Every session is now AES-256-GCM per frame over a triple-DH X25519 handshake
+(ephemeral-ephemeral + both static-ephemeral combinations — signatures not needed),
+folded through HKDF-SHA256 over a canonical transcript hash. Roles derive from peer
+IDs, so simultaneous dials converge on one session instead of colliding. Connection
+strings are payload v2 and embed the node's static public key; the dialer pins the
+answering handshake to that key, and a substituted key kills the connection as a
+MITM rather than negotiating. There is no downgrade window at all: a stripped
+handshake fails, a plaintext PACK against a crypto dial fails, and `Optional` exists
+only for pre-1.6 plaintext peers (`Disabled` reproduces the old wire exactly).
+
+Sealed frames carry a strictly increasing counter (nonce never repeats), the header
++ token + counter as AEAD associated data, a 64-frame IPsec-style replay window, and
+an HKDF epoch ratchet every 2^28 frames — key rotation with zero wire negotiation.
+Counters a tampered frame burned stay burned, exactly like IPsec.
+
+New surface: `PinholeEncryption` (`Required`/`Optional`/`Disabled`),
+`PinholeOptions.IdentityKeySeed` (persistent node identity),
+`PinholeNode.StaticPublicKey`, `PinholeConnection.IsEncrypted` / `RemoteStaticKey` /
+`FramesRejected`. The key schedule and sealed frames are verified against an
+independent python oracle byte for byte; the suite also covers MITM substitution,
+downgrade, replay, and tamper kills at the wire level.
+
+### Path MTU discovery (default on)
+
+The 1200-byte payload floor was sized for the worst path a session could land on;
+faster paths were dragged down to it. RFC 8899-style padded pings now climb from the
+floor in 128-byte steps — a matching pong confirms a size, three unanswered probes
+abandon it for a five-minute cooldown — and a confirmed size raises
+`PinholeConnection.PathMtu` (and the largest payload `Send` accepts) up to 1435
+bytes on an ordinary Ethernet IPv4 path. The dual-mode socket reports v4 peers as
+v4-mapped v6 sockaddrs, so the plateau is chosen from the mapped-back endpoint.
+Leaving the direct path forgets the climb: a relay hop or rebind may have a smaller
+MTU than the last path proved. `EnablePmtud = false` restores the flat budget.
+
+### LAN discovery via mDNS
+
+Two machines on one network can find each other with no server and no clipboard:
+`EnableLanDiscovery` (off by default — announcing is a network-visible choice)
+announces the node as `<peer-id>._pinhole._udp.local` (RFC 6762/6763 subset: 3×
+startup burst, 120 s heartbeat, unicast answers to legacy queriers, TTL-0 goodbye),
+and `PinholeNode.DiscoverLanPeersAsync(window)` returns fully dialable v2 connection
+strings — the announcement carries the static key, so discovered sessions get the
+same MITM proofing as shared-string ones. The DNS codec is strict (compression
+pointers must point strictly backwards; truncation/corruption fuzzing over real
+packets) and a multicast-less environment never fails the bind.
+
+### Optional keepalive heartbeat
+
+`KeepaliveInterval` (default off, ≥100 ms) sends a caller ping at a fixed cadence on
+every live connection — pongs refresh the NAT mapping both ways and feed
+`LastRtt`; it counts in caller stats because the app asked for it. A heartbeat, not
+reliability: delivery guarantees stay out.
+
 ## 1.5.0 — router port mappings and automatic NAT classification
 
 The two techniques the iroh parity review found missing — both now spoken from pure C#,

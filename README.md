@@ -6,18 +6,19 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 - **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
-- **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's.
+- **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + static key + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's. On a LAN, mDNS discovery can even replace the clipboard: `EnableLanDiscovery` announces the node as `_pinhole._udp.local` and `DiscoverLanPeersAsync` finds peers with no server at all.
+- **Encrypted and authenticated, by default.** Every session is AES-256-GCM per frame over a triple-DH X25519 handshake; the answering key is pinned to the connection string, so a man in the middle kills the dial instead of intercepting it. No certificates, no downgrade window — a stripped handshake fails, it never falls back. `Optional` speaks plaintext only with pre-1.6 peers; `Disabled` reproduces the old wire. [`Pinhole.Blobs`](#moving-files-pinholeblobs) rides the same session encryption.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
-- **Bring your own protocol on top.** UDP, TCP, QUIC, your own — with your own libraries. Pinhole doesn't provide those and never will. It does the hard bottom part only.
-- **Unauthenticated, unencrypted, unreliable — by design.** Do encryption, authentication, and reliability above this layer. [`Pinhole.Blobs`](#moving-files-pinholeblobs) is the shipped example of exactly that: verified, encrypted, resumable file transfer built strictly on top.
+- **Payload ceilings that follow the path.** 1200 bytes guaranteed on every session; RFC 8899-style path-MTU discovery probes upward and lifts the per-connection ceiling (to 1435 on an ordinary Ethernet path) as the path proves it can carry more.
+- **Unreliable — by design.** No delivery guarantees, ordering, or retransmission; bring your protocol above this layer. An optional keepalive heartbeat exists for NAT warmth; reliability stays yours.
 
 ## Scope contract
 
-**In scope**: a connection between machines using all free STUN + all free relays; connection strings as the discovery artifact (transport of the string = app's concern); open-forever with roaming and path-failure handling; connection tools.
+**In scope**: a connection between machines using all free STUN + all free relays; connection strings as the discovery artifact (transport of the string = app's concern, with optional LAN discovery via mDNS); encryption, authentication, and anti-replay on the wire; path-MTU discovery; open-forever with roaming and path-failure handling; an optional keepalive heartbeat; connection tools.
 
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
-**Non-goals, stated loudly**: no encryption/authentication — traffic is readable and peer identity is unauthenticated **by design**; encrypt and authenticate above this layer. (Anti-spoofing exists below that line: every frame carries a per-connection token that never appears in the connection string, so a string holder can dial you but cannot forge, hijack, or kill an established session.) No delivery guarantees, ordering, retransmission, or app-level keepalive scheduling — the engine's internal path validation keeps the *transport* honest, never your protocol alive. No signaling transport, storage, or coordination services.
+**Non-goals, stated loudly**: no delivery guarantees, ordering, or retransmission — a half-baked ARQ is worse than none, so retransmit at the app layer if you care (the engine's internal path validation keeps the *transport* honest, never your protocol alive; the optional keepalive is a NAT heartbeat, not reliability). No signaling transport, storage, or coordination services — anything stateful about your app belongs to your app.
 
 ## Install
 
@@ -330,7 +331,8 @@ datagram framing; BouncyCastle supplies Ed25519 and BLAKE3. Relays introduce pee
 carry Pinhole datagrams while both sides punch UDP, then remain available for fallback
 and reconnect automatically after a disconnect. This is the iroh relay transport with
 Pinhole's own datagram protocol; it does not implement iroh QUIC or interoperate with Rust
-iroh application endpoints. Pinhole payloads remain unencrypted end to end, as described above.
+iroh application endpoints. Pinhole payloads are end-to-end encrypted between the two
+peers; the relay (like any relay) sees only ciphertext frames.
 
 Everything is overridable — and every infrastructure setting is tri-state: `null`
 (default) takes the free defaults, an empty list disables that provider, explicit
@@ -423,11 +425,12 @@ carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 | Both behind the same NAT (CGNAT hairpin) | Each other | Usually fails — hairpinning is router-dependent and rarely works on CGNAT | Relay automatically; direct is expected-not-guaranteed |
 | Path dies mid-session | Any | Re-punched in the background | Survives on the relay until the punch lands |
 
-Two deliberate decisions from the same audit, stated so nobody re-litigates them blind:
-**PMTUD is a non-goal for now** — frames are capped at a 1200-byte payload budget (QUIC's
-conservative initial) because path-MTU discovery is measurable perf work, not a safety
-gap; and **discovery stays a non-goal** — the connection string is the only discovery
-artifact, and how it travels remains the application's concern.
+Two former non-goals from that same audit are gone, retired deliberately:
+**path-MTU discovery now runs by default** — padded token-checked pings climb from the
+1200-byte floor and lift the payload ceiling as the path proves itself (RFC 8899-style,
+`EnablePmtud = false` for a flat budget) — and **LAN discovery exists** via optional
+mDNS announcement plus serverless browsing, while the connection string remains the
+universal discovery artifact everywhere else.
 
 ## Failure modes, honestly
 
@@ -441,6 +444,8 @@ artifact, and how it travels remains the application's concern.
 | Every STUN server goes silent | Treated as network loss → full rebind; a single rate-limited probe is *not* network death |
 | A relay dies or is unreachable | Best-effort: the remaining configured relays carry the fallback; the dropped relay reconnects forever with capped exponential backoff (~1 s doubling to 30 s, ±10% jitter, reset on success — no synchronized retry storm); direct paths never notice |
 | A datagram is lost | Nothing. It's an unreliable datagram protocol — retransmit at the app layer if you care |
+| A machine in the middle substitutes the answering key, or strips the handshake | The dial dies loudly (`HandshakeFailed` / `ConnectAsync` faults with the reason) — there is no downgrade window to fall into |
+| A tampered, replayed, or forged frame arrives | Dropped silently and counted in `FramesRejected`; a burned counter is burned (IPsec semantics), and steady zero is the healthy number |
 | The peer closes (`CloseAsync`) | `Bye` frame, both sides end up `Closed`; `Closed` tasks complete |
 
 ## The libraries
