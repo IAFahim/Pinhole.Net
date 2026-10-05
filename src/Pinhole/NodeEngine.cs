@@ -2656,23 +2656,33 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>One permission round trip that treats failure as evidence about the
-    /// allocation, not just the attempt: a rejected or timed-out permit retires the client
-    /// so the next <see cref="EnsureRelaysAsync"/> reallocates. Without this, a restarted
-    /// relay leaves every node holding a ghost allocation — "alive" locally, unknown to the
-    /// server — and relayed traffic black-holes until the minutes-long refresh cadence
-    /// notices. A retired-but-healthy allocation costs one realloc round trip.</summary>
+    /// <summary>One permission round trip with the evidence discipline the relay-recovery
+    /// review requires: a <see cref="Turn.TurnRejectException"/> is the server itself
+    /// refusing (allocation gone, credentials refused) — retire the client and reallocate
+    /// immediately, because a restarted relay otherwise leaves a ghost allocation
+    /// black-holing traffic until the minutes-long refresh cadence notices. Everything
+    /// else — a timeout, a transport fault — proves nothing: one lost UDP request must not
+    /// flap a healthy allocation, so it is retried a few times and then abandoned to the
+    /// next trigger, never retired.</summary>
     private async Task<bool> TryPermitAsync(TurnClient client, IPAddress peer, CancellationToken ct)
     {
-        try
+        for (int attempt = 1; ; attempt++)
         {
-            await client.CreatePermissionAsync(peer, ct).ConfigureAwait(false);
-            return true;
-        }
-        catch (Exception ex) when (ex is SocketException or InvalidOperationException or TimeoutException or ObjectDisposedException)
-        {
-            await RetireRelayClientAsync(client).ConfigureAwait(false);
-            return false;
+            try
+            {
+                await client.CreatePermissionAsync(peer, ct).ConfigureAwait(false);
+                return true;
+            }
+            catch (TurnRejectException)
+            {
+                await RetireRelayClientAsync(client).ConfigureAwait(false);
+                return false;
+            }
+            catch (Exception ex) when (attempt < 4
+                && ex is SocketException or TimeoutException or ObjectDisposedException or InvalidOperationException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false);
+            }
         }
     }
 

@@ -285,6 +285,31 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             .FirstOrDefault(c => c.Kind == CandidateKind.Relay)?.Address;
 
     [Fact]
+    public async Task LostPermitRequest_HealthyAllocationMustNotFlap()
+    {
+        using VirtualLab lab = new(withTurn: true);
+        Subnet aSide = Subnet.Parse("192.0.2.10/32");
+        Subnet bSide = Subnet.Parse("192.0.2.20/32");
+        lab.Net.AddRule(LinkRule.Directional(aSide, bSide, dropAll: true));
+        lab.Net.AddRule(LinkRule.Directional(bSide, aSide, dropAll: true));
+        await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
+        await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0));
+        Assert.Equal(2, lab.Turn!.Allocations); // one allocation per node at bind
+
+        // The dialer's first warm-permit request vanishes — one lost UDP datagram, proving
+        // nothing about the allocation. The client must retry the permit and keep the
+        // allocation; retiring here (#24's flap scenario) would realloc on every loss.
+        lab.Turn.DropNextPermissions = 1;
+
+        (PinholeConnection conn, PinholeConnection atA) = await ConnectAsync(a, b);
+        Assert.Equal(PathKind.Relay, conn.Path.Kind);
+        await ExchangeAsync(conn, atA, "one lost permit changed nothing");
+
+        Assert.Equal(2, lab.Turn.Allocations); // no retire, no realloc
+        Assert.True(lab.Turn.PermissionsGranted > 0, "the retried permit actually landed");
+    }
+
+    [Fact]
     public async Task RelayLegValidation_ProbesWithout_CountingAsAppPings()
     {
         using VirtualLab lab = new(withTurn: true);

@@ -81,13 +81,19 @@ exact goodput is machine-dependent and belongs in the logs.
 
 ## Known gaps the lab established
 
-- **A relay-only session cannot survive its single relay restarting in place.** Both
-  peers' relayed transport addresses live on the dead relay, and with no other path there
-  is no channel to re-learn the fresh ones — mid-transfer healing would need a relay mesh
-  or a discovery layer (architecture, tracked, out of scope here). What IS guaranteed now:
-  ghost allocations are retired within the path-validation window (permit failure is
-  evidence the allocation is gone), the server re-advertises fresh relay candidates, and
-  a fresh-ticket redial heals in ~9 s end to end.
+- **A TURN-relayed session cannot survive its single TURN server restarting in place.**
+  This is a TURN-specific property: TURN peers address each other by *allocation*
+  transport addresses, which die with the server process — both peers hold addresses on
+  the dead server and, with no other path, no channel remains to learn the fresh ones.
+  The iroh HTTPS relays are different by construction: they are dialed by *identity*
+  (peer key), so a restarted relay is re-reached through the same URL and key without any
+  address re-learning; their outage behavior is reconnect/backoff, not address death —
+  not covered by this lab's restart scenario either way. What IS guaranteed for TURN now:
+  a *definitive* rejection (437 allocation mismatch — `TurnRejectException`) retires the
+  ghost client and reallocates within the path-validation window, while a *transient*
+  permit failure (lost datagram, timeout) retries the permit and never flaps a healthy
+  allocation; the server re-advertises fresh relay candidates, and a fresh-ticket redial
+  heals in ~9 s end to end.
 - **Relay-leg liveness** now mirrors direct-path validation: a degraded relay-carried
   session probes its relay when silent and escalates to the same suspect machinery
   (before the lab, a dead relay black-holed relayed traffic until the minutes-long TURN

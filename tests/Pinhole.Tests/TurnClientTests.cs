@@ -74,6 +74,14 @@ public sealed class FakeTurnServer : IDisposable
 
     public void RotateNonce() => Interlocked.Increment(ref _nonceVersion);
 
+    /// <summary>Test seam: the next N permission requests are silently dropped — a lost UDP
+    /// request that proves nothing about the allocation's health.</summary>
+    public int DropNextPermissions;
+
+    /// <summary>Total successful allocations over this server's lifetime — a realloc flap
+    /// detector for the relay-recovery tests.</summary>
+    public int Allocations { get; private set; }
+
     private string CurrentNonce => $"n{Volatile.Read(ref _nonceVersion) + 1}";
 
     private void Run()
@@ -169,6 +177,7 @@ public sealed class FakeTurnServer : IDisposable
         };
         lock (_byControl) _byControl[remote] = alloc;
         lock (_byRelayed) _byRelayed[relayed] = alloc;
+        Allocations++;
 
         Reply(remote, Build(TypeAllocate | 0x0100, txid,
             Attr(AttrXorRelayed, Xor(relayed)),
@@ -206,8 +215,14 @@ public sealed class FakeTurnServer : IDisposable
         Reply(remote, Build(TypeRefresh | 0x0100, txid, Attr(AttrLifetime, U32((uint)_lifetimeSeconds))));
     }
 
-    private void HandlePermission(EndPoint remote, byte[] msg, byte[] txid, List<(ushort Type, byte[] Value)> attrs)
+    private void HandlePermission(EndPoint remote, byte[] msg, byte[] txid, List<(ushort Type, byte[])> attrs)
     {
+        if (DropNextPermissions > 0)
+        {
+            DropNextPermissions--;
+            return; // the request vanishes: no reply, no state change — pure loss
+        }
+
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
@@ -231,7 +246,7 @@ public sealed class FakeTurnServer : IDisposable
             return;
         }
 
-        byte[]? peer = attrs.FirstOrDefault(a => a.Type == AttrXorPeerAddress).Value;
+        byte[]? peer = attrs.FirstOrDefault(a => a.Type == AttrXorPeerAddress).Item2;
         if (peer is not null && peer.Length >= 8)
         {
             alloc.Permitted.Add(Unxor(peer).Address);
