@@ -285,6 +285,29 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             .FirstOrDefault(c => c.Kind == CandidateKind.Relay)?.Address;
 
     [Fact]
+    public async Task RelayLegValidation_ProbesWithout_CountingAsAppPings()
+    {
+        using VirtualLab lab = new(withTurn: true);
+        Subnet aSide = Subnet.Parse("192.0.2.10/32");
+        Subnet bSide = Subnet.Parse("192.0.2.20/32");
+        lab.Net.AddRule(LinkRule.Directional(aSide, bSide, dropAll: true));
+        lab.Net.AddRule(LinkRule.Directional(bSide, aSide, dropAll: true));
+        await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
+        await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0));
+
+        (PinholeConnection conn, PinholeConnection atA) = await ConnectAsync(a, b);
+        Assert.Equal(PathKind.Relay, conn.Path.Kind);
+
+        // Idle past the relay-leg idle window plus several probe rounds: the transport's
+        // own liveness probes fly (and the healthy relay answers, so the session never
+        // flaps state) — but none of them may surface as app-requested pings.
+        await Task.Delay(TimeSpan.FromSeconds(9));
+        Assert.Equal(PinholeConnectionState.Degraded, conn.State);
+        Assert.Equal(0L, conn.Stats.PingsSent);
+        await ExchangeAsync(conn, atA, "still alive after idle");
+    }
+
+    [Fact]
     public async Task RelayOutage_MidTransfer_TheDirectPathCarriesTheSession()
     {
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-lab-" + Guid.NewGuid().ToString("N"));
@@ -360,7 +383,7 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task MidTransferRoam_TheDownloadCompletesOnTheReboundPath()
+    public async Task MidTransferRoam_ADirectoryDownloadCompletesOnTheReboundPath()
     {
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-lab-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -369,11 +392,18 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             using VirtualLab lab = new();
             VirtualNat serverNat = lab.Nat(VirtualNatKind.FullCone, "203.0.113.10", "172.31.10.0/24");
 
-            byte[] data = new byte[500_000];
-            Random.Shared.NextBytes(data);
-            string src = Path.Combine(dir, "roam.bin");
-            await File.WriteAllBytesAsync(src, data);
-            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions
+            // Three files so the roam lands across a stream transition: the next file's
+            // Hello→Welcome handshake must ride out the server's rebind, not die on it.
+            string srcDir = Path.Combine(dir, "serve");
+            Directory.CreateDirectory(srcDir);
+            byte[][] files = [new byte[500_000], new byte[300_000], new byte[300_000]];
+            for (int i = 0; i < files.Length; i++)
+            {
+                Random.Shared.NextBytes(files[i]);
+                await File.WriteAllBytesAsync(Path.Combine(srcDir, $"part{i}.bin"), files[i]);
+            }
+
+            await using var server = await BlobServer.ServeAsync(srcDir, new BlobServeOptions
             {
                 NodeOptions = lab.BaseOptions(o => o with
                 {
@@ -381,13 +411,12 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
                 }),
             });
 
-            long fifth = data.Length / 5;
-            var roamed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstFileDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var progress = new Progress<BlobProgress>(p =>
             {
-                if (p.VerifiedBytes >= fifth)
+                if (p.FilesDone >= 1)
                 {
-                    roamed.TrySetResult();
+                    firstFileDone.TrySetResult();
                 }
             });
 
@@ -397,20 +426,25 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
                 {
                     NodeOptions = lab.BaseOptions(o => o with
                     {
-                        UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("192.0.2.20"), 31020)),
+                        UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0)),
                     }),
                 }));
 
-            Assert.True(await Task.WhenAny(roamed.Task, Task.Delay(TestBudget.Scenario)) == roamed.Task,
-                $"transfer never reached {fifth} verified bytes — {lab.Net.Counters()}");
+            Assert.True(await Task.WhenAny(firstFileDone.Task, Task.Delay(TestBudget.Scenario)) == firstFileDone.Task,
+                $"transfer never finished its first file — {lab.Net.Counters()}");
 
-            // The server's interface dies mid-stream: new socket, new private address, new
-            // NAT mapping. The downloader's ARQ re-requests must find the rebound path.
+            // The server's interface dies mid-transfer: new socket, new private address, new
+            // NAT mapping. In-flight chunks, the next file's Hello→Welcome, and the
+            // downloader's ARQ re-requests must all find the rebound path.
             await server.Node.Engine.SimulateInterfaceLossAsync().WaitAsync(TestBudget.Io);
 
             BlobDownloadResult result = await download.WaitAsync(TestBudget.Scenario);
-            Assert.Equal(data.Length, result.Bytes);
-            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "roam.bin")));
+            Assert.Equal(files.Sum(f => f.Length), result.Bytes);
+            for (int i = 0; i < files.Length; i++)
+            {
+                Assert.Equal(files[i], await File.ReadAllBytesAsync(Path.Combine(dir, "out", "serve", $"part{i}.bin")));
+            }
+
             output.WriteLine(lab.Net.Counters());
         }
         finally

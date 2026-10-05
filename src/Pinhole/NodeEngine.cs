@@ -1371,7 +1371,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (probe)
         {
-            Ping(c); // RouteFrame sends degraded traffic via the relay leg
+            PingUncounted(c); // RouteFrame sends degraded traffic via the relay leg
         }
     }
 
@@ -1619,9 +1619,22 @@ internal sealed class NodeEngine : IDisposable
 
     public void Ping(ConnState c)
     {
+        if (SendPingFrame(c))
+        {
+            Interlocked.Increment(ref c.PingsSent);
+        }
+    }
+
+    /// <summary>The path-maintenance variant: same wire probe, but transport-internal
+    /// probes must not inflate the app-visible ping stats — <c>PingsSent</c> counts the
+    /// pings the app asked for, exactly as the keepalive contract documents.</summary>
+    internal void PingUncounted(ConnState c) => SendPingFrame(c);
+
+    private bool SendPingFrame(ConnState c)
+    {
         if (c.State is not (PinholeConnectionState.Open or PinholeConnectionState.Degraded))
         {
-            return;
+            return false;
         }
 
         Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
@@ -1634,10 +1647,10 @@ internal sealed class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
-            return; // a probe that cannot leave simply goes unanswered
+            return false; // a probe that cannot leave simply goes unanswered
         }
 
-        Interlocked.Increment(ref c.PingsSent);
+        return true;
     }
 
     /// <summary>Sends on the connection's current path: direct when open, relay when degraded.</summary>
