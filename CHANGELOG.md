@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — the topology/loss lab, and the three gaps it found (#20, part 1)
+## 1.9.0 — the topology/loss lab, and the three gaps it found (#20, part 1)
 
 An in-process virtual internet — NATs that really translate and filter, Gilbert-Elliott
 loss, delay and reorder — injected under the engine's socket layer through an internal
