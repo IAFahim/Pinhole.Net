@@ -218,6 +218,7 @@ public sealed class BlobServer : IAsyncDisposable
                     }
                     else
                     {
+                        Telemetry.FrameRejected("blob", "undecryptable");
                         continue; // nothing decryptable: garbage costs one datagram
                     }
                 }

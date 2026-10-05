@@ -285,6 +285,7 @@ internal static class BlobWire
                 || !welcome.SessionId.AsSpan().SequenceEqual(SessionId)
                 || (_providerNonce is not null && !_providerNonce.AsSpan().SequenceEqual(welcome.ProviderNonce)))
             {
+                Telemetry.FrameRejected("blob", "welcome-unverified");
                 return false;
             }
 
@@ -293,6 +294,7 @@ internal static class BlobWire
             if (!candidate.TryOpen(fromProvider: true, welcome.SealedHead!, ref candidateWatermark, out byte[] head)
                 || !Frame.TryParse(head, out frame) || frame.Type != TypeHead || frame.Stream != stream)
             {
+                Telemetry.FrameRejected("blob", "welcome-unverified");
                 return false;
             }
 

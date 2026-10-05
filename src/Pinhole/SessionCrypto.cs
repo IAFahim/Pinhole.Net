@@ -534,5 +534,11 @@ internal sealed class ConnectionCrypto
 
     public void MarkPeerConfirmed() => PeerConfirmed = true;
 
-    public void CountRejected() => Interlocked.Increment(ref Rejected);
+    /// <summary>One frame dropped as replayed, tampered, or otherwise unverified: the
+    /// session layer's rejection counter, mirrored into the diagnostics meter (#25).</summary>
+    public void CountRejected()
+    {
+        Interlocked.Increment(ref Rejected);
+        Telemetry.FrameRejected("session", "unverified");
+    }
 }

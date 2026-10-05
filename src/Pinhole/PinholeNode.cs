@@ -168,6 +168,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         }
 
         await c.Connected.Task.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        Telemetry.AttemptOutcome(Telemetry.OutcomeAcceptEstablished, PathName(c));
         return c.Public!;
     }
 
@@ -230,6 +231,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     private async Task<PinholeConnection> ConnectPeerAsync(ConnectionString cs, CancellationToken ct)
     {
         ConnState c = _engine.ConnectAsync(cs, ct);
+        var establish = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await c.Connected.Task.WaitAsync(_options.ConnectTimeout, ct).ConfigureAwait(false);
@@ -237,6 +239,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         catch (TimeoutException ex)
         {
             await _engine.CloseAsync(c).ConfigureAwait(false);
+            Telemetry.AttemptOutcome(Telemetry.OutcomeDialTimeout);
             string message = PeerHasRelay(cs)
                 ? "Connection timed out. Keep both apps running and use your friend's current connection string. The peer may be offline, or a relay path could not be established."
                 : "Direct connection timed out and your friend's connection string has no relay fallback. Share a fresh string after their relay connects, or try connecting from both PCs at the same time.";
@@ -245,11 +248,24 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         catch (OperationCanceledException)
         {
             await _engine.CloseAsync(c).ConfigureAwait(false);
+            Telemetry.AttemptOutcome(Telemetry.OutcomeDialCancelled);
+            throw;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
+        {
+            // The handshake itself refused the peer (pinning mismatch, refused encryption,
+            // failed confirmation): the cause is counted where it happened, in
+            // HandshakeFailed — this is only the attempt's terminal outcome.
+            Telemetry.AttemptOutcome(Telemetry.OutcomeDialFaulted);
             throw;
         }
 
+        Telemetry.AttemptOutcome(Telemetry.OutcomeDialEstablished, PathName(c));
+        Telemetry.EstablishDuration(establish.Elapsed.TotalMilliseconds, PathName(c));
         return c.Public!;
     }
+
+    private static string PathName(ConnState c) => c.Path == PathKind.Relay ? "relay" : "direct";
 
     /// <summary>Re-probes the world right now: re-probes STUN, rebinds the socket if its
     /// network is gone, re-allocates relays, and re-announces to every peer. Connections

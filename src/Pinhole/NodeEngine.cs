@@ -2168,6 +2168,7 @@ internal sealed class NodeEngine : IDisposable
         }
 
         c.Connected.TrySetException(new InvalidOperationException(reason));
+        Telemetry.ConnectionRefused(reason);
         Transition(c, PinholeConnectionState.Dead);
         c.Dead.Cancel();
     }
@@ -2630,6 +2631,7 @@ internal sealed class NodeEngine : IDisposable
                 }
 
                 c.RelayReady = true;
+                Telemetry.Recovery("relay-heal");
                 if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
                 {
                     c.State = PinholeConnectionState.Degraded;
@@ -2688,6 +2690,7 @@ internal sealed class NodeEngine : IDisposable
 
     private async Task RetireRelayClientAsync(TurnClient client)
     {
+        Telemetry.Recovery("relay-retire");
         client.Received -= HandleRelayData;
         _ = client.DisposeAsync();
         lock (_gate)
@@ -2702,6 +2705,7 @@ internal sealed class NodeEngine : IDisposable
         }
 
         await EnsureRelaysAsync(CancellationToken.None).ConfigureAwait(false);
+        Telemetry.Recovery("relay-reallocate");
     }
 
     /// <summary>The path looks dead (send errors or a simulated failure): re-punch toward the
@@ -2739,6 +2743,7 @@ internal sealed class NodeEngine : IDisposable
         }
 
         KickPunch(c);
+        Telemetry.Recovery("path-suspect");
 
         // A suspect relay path re-validates its allocation: the permit round trip either
         // confirms the relay leg or (TryPermitAsync) retires a ghost client — a restarted
@@ -2834,6 +2839,7 @@ internal sealed class NodeEngine : IDisposable
 
     private async Task RebindAsync(CancellationToken ct)
     {
+        Telemetry.Recovery("rebind");
         IUdpSocket old;
         IUdpSocket fresh;
         lock (_gate)
