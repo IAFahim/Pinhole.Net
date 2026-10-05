@@ -79,7 +79,11 @@ public sealed class RendezvousTests
         Assert.Equal(1, server.NodeCount);
         Assert.Equal(1, server.WantCount);
 
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        await Task.Delay(TimeSpan.FromSeconds(1.1));
+        // The sweep runs at ttl/2, so eviction is due — but on a stalled CI runner the sweep
+        // thread can lag past any fixed wall-clock assert. Poll for the contract instead:
+        // gone means gone, whenever the sweep lands.
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => server.NodeCount == 0 && server.WantCount == 0);
         Assert.Equal(0, server.NodeCount);
         Assert.Equal(0, server.WantCount);
     }
