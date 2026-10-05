@@ -307,11 +307,10 @@ public sealed class BlobsTests
     {
         // Two connections on one ticket used to restart the same per-ticket key with the
         // same counters — ChaCha20-Poly1305 (key, nonce) reuse across connections. The
-        // session id in each connection's first Hello forks the key per connection, and
-        // the transport binding (below) forks it again even for a repeated session id.
+        // downloader and provider each contribute a 256-bit nonce to the connection key.
         byte[] psk = RandomNumberGenerator.GetBytes(32);
         byte[] root = RandomNumberGenerator.GetBytes(32);
-        var binding = new Pinhole.TransportBinding(0x11223344, 0x55667788);
+        byte[] binding = BlobWire.Cipher.FreshSessionId();
         byte[] sidA = BlobWire.Cipher.FreshSessionId();
         byte[] sidB = BlobWire.Cipher.FreshSessionId();
 
@@ -339,17 +338,16 @@ public sealed class BlobsTests
     }
 
     [Fact]
-    public void Cipher_RepeatedSessionId_TransportBindingStillForksTheKey()
+    public void Cipher_RepeatedSessionId_ProviderNonceStillForksTheKey()
     {
         // Session uniqueness must not rest on the downloader alone: a buggy or hostile
         // client that repeats an earlier session id gets the same id-derived input — but
-        // a new connection has new engine tokens from BOTH endpoints, so the derived key
-        // still differs. The provider contributes freshness by construction.
+        // the provider contributes an independent 256-bit nonce on each connection.
         byte[] psk = RandomNumberGenerator.GetBytes(32);
         byte[] root = RandomNumberGenerator.GetBytes(32);
         byte[] repeated = BlobWire.Cipher.FreshSessionId();
-        var first = new Pinhole.TransportBinding(0x01020304, 0x0a0b0c0d);
-        var second = new Pinhole.TransportBinding(0x01020304, 0xaabbccdd); // only the provider's token changed
+        byte[] first = BlobWire.Cipher.FreshSessionId();
+        byte[] second = BlobWire.Cipher.FreshSessionId();
 
         var conn1 = BlobWire.Cipher.For(psk, root, repeated, first)!;
         var conn2 = BlobWire.Cipher.For(psk, root, repeated, second)!;
@@ -367,6 +365,57 @@ public sealed class BlobsTests
         Assert.False(conn1.TryOpen(fromProvider: true, wire2, ref seen, out _));
     }
 
+    [Theory]
+    [InlineData(PinholeEncryption.Required)]
+    [InlineData(PinholeEncryption.Disabled)]
+    public async Task SameTicket_RepeatedClientNonce_ProviderFreshnessAndHelloRetries(PinholeEncryption encryption)
+    {
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "nonce.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(500));
+            var options = Offline() with { Encryption = encryption, ReceiveBufferCapacity = 64 };
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = options });
+            await using var node1 = await PinholeNode.BindAsync(options);
+            await using var node2 = await PinholeNode.BindAsync(options);
+            await using var conn1 = await node1.ConnectAsync(server.Ticket.ConnectionString);
+            await using var conn2 = await node2.ConnectAsync(server.Ticket.ConnectionString);
+            byte[] repeated = new byte[32]; // even a downloader repeating a constant id is safe for the provider
+            ulong stream = BlobWire.StreamId(server.Ticket.Root);
+
+            async Task<BlobWire.Frame> Welcome(PinholeConnection conn)
+            {
+                conn.Send(BlobWire.Hello(stream, repeated));
+                using var receiveCts = new CancellationTokenSource(TestBudget.Io);
+                var payload = await conn.ReceiveAsync(receiveCts.Token);
+                Assert.NotNull(payload);
+                Assert.True(BlobWire.Frame.TryParse(payload.Value.Span, out BlobWire.Frame frame));
+                Assert.Equal(BlobWire.TypeWelcome, frame.Type);
+                Assert.Equal(BlobWire.ProtocolVersion, frame.Version);
+                Assert.Equal(repeated, frame.SessionId);
+                Assert.Equal(32, frame.ProviderNonce!.Length);
+                return frame;
+            }
+
+            BlobWire.Frame first = await Welcome(conn1);
+            BlobWire.Frame retry = await Welcome(conn1);
+            BlobWire.Frame second = await Welcome(conn2);
+            Assert.Equal(first.ProviderNonce, retry.ProviderNonce);
+            Assert.False(first.ProviderNonce.AsSpan().SequenceEqual(second.ProviderNonce));
+            var cipher1 = BlobWire.Cipher.For(server.Ticket.PreSharedKey, server.Ticket.Root, repeated, first.ProviderNonce!)!;
+            ulong watermark = 0;
+            Assert.True(cipher1.TryOpen(fromProvider: true, first.SealedHead!, ref watermark, out _));
+            Assert.True(cipher1.TryOpen(fromProvider: true, retry.SealedHead!, ref watermark, out _), "retry uses a fresh counter");
+            watermark = 0;
+            Assert.False(cipher1.TryOpen(fromProvider: true, second.SealedHead!, ref watermark, out _));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact]
     public void Cipher_ForgedAndReplayedCounters_NeverMoveTheWatermark()
     {
@@ -375,7 +424,7 @@ public sealed class BlobsTests
         // counter must not starve the frames behind it, and a replayed old counter must
         // not re-admit the frames before it.
         var c = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
-            BlobWire.Cipher.FreshSessionId(), new Pinhole.TransportBinding(1, 2))!;
+            BlobWire.Cipher.FreshSessionId(), BlobWire.Cipher.FreshSessionId())!;
         ulong watermark = 5;
         byte[] genuine5 = c.Seal(asProvider: true, 5, "real"u8.ToArray());
 
@@ -393,6 +442,67 @@ public sealed class BlobsTests
 
         byte[] genuine7 = c.Seal(asProvider: true, 7, "more"u8.ToArray());
         Assert.True(c.TryOpen(fromProvider: true, genuine7, ref watermark, out _));
+    }
+
+    [Fact]
+    public void Welcome_RejectsTamperingAndNonceSwaps_AndKeepsReplayStateAcrossStreams()
+    {
+        byte[] psk = RandomBytes(32), root = RandomBytes(32), clientNonce = RandomBytes(32), providerNonce = RandomBytes(32);
+        var session = new BlobWire.DownloadSession(psk, root, clientNonce);
+        var provider = BlobWire.Cipher.For(psk, root, clientNonce, providerNonce)!;
+        ulong stream = BlobWire.StreamId(root);
+        byte[] head = provider.Seal(asProvider: true, 1, BlobWire.Head(stream, 500, 1));
+        byte[] welcome = BlobWire.Welcome(stream, clientNonce, providerNonce, head);
+
+        // A forged first response must not bind the wrong nonce, cipher, or counter.
+        foreach (int offset in new[] { 1, 9, 10, 42, welcome.Length - 1 })
+        {
+            byte[] tampered = welcome.ToArray();
+            tampered[offset] ^= 1;
+            Assert.False(session.TryOpen(tampered, stream, out _));
+        }
+
+        byte[] forgedHead = provider.Seal(asProvider: true, 10_000, BlobWire.Head(stream, 500, 1));
+        forgedHead[^1] ^= 1;
+        Assert.False(session.TryOpen(BlobWire.Welcome(stream, clientNonce, providerNonce, forgedHead), stream, out _));
+        Assert.True(session.TryOpen(welcome, stream, out BlobWire.Frame first));
+        Assert.Equal(500, first.TotalBytes);
+        Assert.False(session.TryOpen(welcome, stream, out _), "a Welcome is replay protected too");
+
+        byte[] otherNonce = RandomBytes(32);
+        var swapped = BlobWire.Cipher.For(psk, root, clientNonce, otherNonce)!;
+        byte[] swappedHead = swapped.Seal(asProvider: true, 100, BlobWire.Head(stream, 500, 1));
+        Assert.False(session.TryOpen(BlobWire.Welcome(stream, clientNonce, otherNonce, swappedHead), stream, out _));
+
+        byte[] chunk = provider.Seal(asProvider: true, 2, BlobWire.Chunk(stream, 0, RandomBytes(32), RandomBytes(500)));
+        Assert.True(session.TryOpen(chunk, stream, out _), "a rejected nonce swap does not poison the established session");
+
+        ulong nextStream = stream ^ 1;
+        byte[] nextHead = provider.Seal(asProvider: true, 3, BlobWire.Head(nextStream, 50, 1));
+        Assert.True(session.TryOpen(BlobWire.Welcome(nextStream, clientNonce, providerNonce, nextHead), nextStream, out _));
+        Assert.False(session.TryOpen(chunk, stream, out _), "switching directory streams must not reset replay state");
+    }
+
+    [Fact]
+    public async Task BlobEncryption_TransfersWithoutCoreEncryption()
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] data = RandomBytes(5000);
+            string src = Path.Combine(dir, "independent.bin");
+            await File.WriteAllBytesAsync(src, data);
+            var options = Offline() with { Encryption = PinholeEncryption.Disabled };
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = options });
+            Assert.NotNull(server.Ticket.PreSharedKey);
+            var result = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
+                options: new BlobDownloadOptions { NodeOptions = options }).WaitAsync(Timeout);
+            Assert.Equal(data, await File.ReadAllBytesAsync(result.Path));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -428,8 +538,10 @@ public sealed class BlobsTests
         }
     }
 
-    [Fact]
-    public async Task LegacyHello_EncryptedProvider_RefusesByHangingUp_AndKeepsServing()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task LegacyHello_EncryptedProvider_RefusesByHangingUp_AndKeepsServing(int version)
     {
         string dir = TempDir();
         try
@@ -448,11 +560,11 @@ public sealed class BlobsTests
 
             var legacy = BlobWire.Cipher.ForLegacyEmulation(ticket.PreSharedKey!, ticket.Root);
             ulong stream = BlobWire.StreamId(ticket.Root);
-            var legacyHello = new byte[9];
+            var legacyHello = new byte[version == 1 ? 9 : 41];
             legacyHello[0] = BlobWire.TypeHello;
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(legacyHello.AsSpan(1), stream);
 
-            conn.Send(legacy.Seal(asProvider: false, 1, legacyHello));
+            conn.Send(version == 1 ? legacy.Seal(asProvider: false, 1, legacyHello) : legacyHello);
             await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed); // fast, not the 20 s first-contact timeout
             Assert.Equal(0, server.ChunksServed); // nothing was served under the legacy key
 
@@ -523,7 +635,7 @@ public sealed class BlobsTests
     {
         byte[] sessionId = BlobWire.Cipher.FreshSessionId();
         var cipher = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
-            sessionId, new Pinhole.TransportBinding(3, 4))!;
+            sessionId, BlobWire.Cipher.FreshSessionId())!;
         byte[] plain = RandomNumberGenerator.GetBytes(200);
 
         byte[] wire = cipher.Seal(asProvider: true, 7, plain);
@@ -545,7 +657,7 @@ public sealed class BlobsTests
         Assert.False(cipher.TryOpen(fromProvider: true, fromDownloader, ref watermark, out _), "roles must not cross");
 
         var otherKey = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
-            BlobWire.Cipher.FreshSessionId(), new Pinhole.TransportBinding(3, 4))!;
+            BlobWire.Cipher.FreshSessionId(), BlobWire.Cipher.FreshSessionId())!;
         ulong otherWatermark = 0;
         Assert.False(otherKey.TryOpen(fromProvider: true, wire, ref otherWatermark, out _), "tickets never share keys");
     }
@@ -619,6 +731,7 @@ public sealed class BlobsTests
         public const uint EngineToken = 0x00C0FFEE;
         private ConnectionCrypto? _crypto;
         private BlobWire.Cipher? _cipher;
+        private readonly byte[] _providerNonce = BlobWire.Cipher.FreshSessionId();
         private ulong _blobCounter;
 
         public IPEndPoint Ep => (IPEndPoint)Sock.LocalEndPoint!;
@@ -710,14 +823,14 @@ public sealed class BlobsTests
                     continue;
                 }
 
-                // The same derivation the real provider performs: session id + the
-                // connection's transport binding (both engine tokens).
-                uint lo = Math.Min(clientToken, EngineToken);
-                uint hi = Math.Max(clientToken, EngineToken);
-                _cipher = BlobWire.Cipher.For(psk, root, sid, new Pinhole.TransportBinding(lo, hi))!;
-                _blobCounter = 0;
-
-                await SendBlobAsync(client, BlobWire.Head(stream, content.Length, totalChunks), ct).ConfigureAwait(false);
+                // Retries keep the same cipher and counter space, like a real provider.
+                _cipher ??= BlobWire.Cipher.For(psk, root, sid, _providerNonce)!;
+                byte[] head = _cipher.Seal(asProvider: true, ++_blobCounter, BlobWire.Head(stream, content.Length, totalChunks));
+                byte[] welcome = BlobWire.Welcome(stream, sid, _providerNonce, head);
+                byte[] forgedWelcome = welcome.ToArray();
+                forgedWelcome[42] ^= 1; // changed provider nonce, same sealed Head: must not bind the client
+                await SendSealedAsync(client, forgedWelcome, ct).ConfigureAwait(false);
+                await SendSealedAsync(client, welcome, ct).ConfigureAwait(false);
 
                 // The forgery: a chunk frame claiming counter 10_000 with a corrupted
                 // tag. It must be refused and consume nothing.

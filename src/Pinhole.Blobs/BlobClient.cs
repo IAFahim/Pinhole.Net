@@ -51,14 +51,11 @@ public static class BlobClient
         };
 
         await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
-        await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString).ConfigureAwait(false);
+        await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString, ct).ConfigureAwait(false);
 
-        // One random session id per connection rides the first Hello, and the connection's
-        // transport binding (both engine tokens, fresh from both endpoints) joins it in
-        // the key derivation — so simultaneous, reconnected, resumed, and even
-        // session-id-repeating downloads of the same ticket never share a (key, nonce) pair.
-        byte[] sessionId = BlobWire.Cipher.FreshSessionId();
-        BlobWire.Cipher? cipher = BlobWire.Cipher.For(ticket.PreSharedKey, ticket.Root, sessionId, conn.SessionBinding);
+        // Provider freshness is authenticated in Welcome. One session and replay watermark
+        // cover every file on this connection; neither depends on the engine's routing tokens.
+        var session = new BlobWire.DownloadSession(ticket.PreSharedKey, ticket.Root);
 
         if (ticket.Kind == BlobKind.File)
         {
@@ -68,7 +65,7 @@ public static class BlobClient
             var fileSend = new SendCounter();
             StreamDownloader? downloader = null;
             downloader = new StreamDownloader(conn, sink,
-                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, cipher, sessionId, ticket.Root);
+                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root);
             long bytes;
             try
             {
@@ -85,7 +82,7 @@ public static class BlobClient
 
         var send = new SendCounter();
         var manifestSink = new MemorySink();
-        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, cipher, sessionId, ticket.Root);
+        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root);
         try
         {
             await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
@@ -103,7 +100,7 @@ public static class BlobClient
         for (int i = 0; i < entries.Count; i++)
         {
             var sink = new FileSink(SafeJoin(rootDir, entries[i].Path), entries[i].Root);
-            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, cipher, sessionId, entries[i].Root, entries[i].Root);
+            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root);
             long bytes;
             try
             {
@@ -149,8 +146,7 @@ public static class BlobClient
         private readonly PinholeConnection _conn;
         private readonly Sink _sink;
         private readonly Action<long> _onVerified;
-        private readonly BlobWire.Cipher? _cipher;
-        private readonly byte[] _sessionId;
+        private readonly BlobWire.DownloadSession _session;
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly Dictionary<long, long> _requestedAt = new();
@@ -162,19 +158,17 @@ public static class BlobClient
         private long _totalChunks = -1;
         private long _verified;
         private long _lastVerifiedTicks;
-        private ulong _recvCounter;
 
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
         public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
-            BlobWire.Cipher? cipher, byte[] sessionId, byte[] expectedRoot, byte[]? streamRoot = null)
+            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null)
         {
             _conn = conn;
             _sink = sink;
             _onVerified = onVerified;
             _send = send;
-            _cipher = cipher;
-            _sessionId = sessionId;
+            _session = session;
             _expectedRoot = expectedRoot;
             _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
         }
@@ -227,8 +221,7 @@ public static class BlobClient
                     return; // connection closed; the control loop notices the quiet
                 }
 
-                if (!TryDecrypt(mem.Span, out byte[] plain) || !BlobWire.Frame.TryParse(plain, out BlobWire.Frame f)
-                    || f.Stream != _stream)
+                if (!_session.TryOpen(mem.Span, _stream, out BlobWire.Frame f))
                 {
                     continue; // garbage, tampered ciphertext, or another stream's frame
                 }
@@ -261,10 +254,9 @@ public static class BlobClient
                         throw new TimeoutException("the provider did not answer the ticket");
                     }
 
-                    // The Hello rides plaintext by design: it names the session id the
-                    // cipher derives from, so it cannot itself be sealed under it. The
-                    // session id is a salt, not a secret — only the PSK turns it into keys.
-                    _conn.Send(BlobWire.Hello(_stream, _sessionId));
+                    // Retries reuse the same downloader nonce. Welcome carries the
+                    // provider nonce and a Head authenticated with the resulting key.
+                    _conn.Send(BlobWire.Hello(_stream, _session.SessionId));
                 }
                 else
                 {
@@ -397,19 +389,7 @@ public static class BlobClient
 
         private void Send(byte[] plain)
         {
-            byte[] wire = _cipher is null ? plain : _cipher.Seal(asProvider: false, _send.Next(), plain);
-            _conn.Send(wire);
-        }
-
-        private bool TryDecrypt(ReadOnlySpan<byte> payload, out byte[] plain)
-        {
-            if (_cipher is null)
-            {
-                plain = payload.ToArray();
-                return true;
-            }
-
-            return _cipher.TryOpen(fromProvider: true, payload, ref _recvCounter, out plain);
+            _conn.Send(_session.Seal(_send.Next(), plain));
         }
     }
 

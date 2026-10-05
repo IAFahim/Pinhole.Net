@@ -99,6 +99,8 @@ public sealed class DecoderHardeningTests
         byte[][] frames =
         [
             BlobWire.Hello(stream, RandomNumberGenerator.GetBytes(BlobWire.SessionIdLength)),
+            BlobWire.Welcome(stream, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
+                RandomNumberGenerator.GetBytes(49)),
             BlobWire.Head(stream, 123_456, 121),
             BlobWire.Request(stream, 7, 64),
             BlobWire.Chunk(stream, 9, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(1024)),

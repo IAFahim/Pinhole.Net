@@ -110,6 +110,11 @@ file or a whole directory between machines, chunk-verified while streaming (BLAK
 end to end with a ticket-borne key so the public relays forward nothing but ciphertext.
 It connects anywhere the connection layer does — that's the point.
 
+Encrypted blob transfers use wire v3: both endpoints contribute a 32-byte session
+nonce, and the downloader authenticates the provider's first response before adopting
+the key. Upgrade both sides together; older encrypted blob peers are refused. Ticket
+format stays the same. See [compatibility notes](docs/BLOBS.md#compatibility-wire-v3).
+
 ```csharp
 using Pinhole.Blobs;
 

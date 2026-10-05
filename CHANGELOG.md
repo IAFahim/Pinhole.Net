@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.8.0 — blob wire v3: independent provider freshness
+
+The 1.7.1 blob key derivation depended on two random 32-bit routing tokens. Those
+tokens can repeat, and the engine's handshake transcript does not authenticate them.
+Repeated downloader IDs and token pairs therefore reproduced a blob key even across
+independent encrypted engine sessions. A regression against `839e12b` confirmed that
+one session opened the other's frames when its routing tokens were repeated.
+
+Blob wire v3 replaces that binding with an independent 256-bit provider nonce. Hello
+and Welcome carry explicit versions. Welcome contains the provider nonce and a sealed
+Head; the client adopts the nonce, cipher, and counter only after the Head authenticates.
+Hello retries and directory streams retain the connection's nonce and counter space.
+The downloader now shares its receive watermark across directory streams as well.
+
+Encrypted v1/v2 blob peers are refused without sending ciphertext under old keys;
+upgrade both sides. The ticket format and core transport wire are unchanged. Coverage
+includes repeated client nonces, retries, tampered Welcomes, nonce swaps, replay across
+directory streams, old-version refusal, and blob transfers with core encryption disabled.
+
 ## 1.7.1 — blob layer: the session layer's rules, applied to itself
 
 Follow-up to the 1.7.0 review of #19: two blob-layer findings, both the same class

@@ -155,8 +155,9 @@ public sealed class BlobServer : IAsyncDisposable
         var sendCounter = new Counter();
         ulong recvCounter = 0;   // per connection: every downloader gets a fresh replay window
         ulong legacyRecv = 0;    // the refusal path's watermark — never serves, just refuses
-        BlobWire.Cipher? cipher = null;          // per connection: bound to the Hello's session id
+        BlobWire.Cipher? cipher = null;
         byte[]? boundSession = null;
+        byte[]? providerNonce = null; // generated once per accepted blob connection, retained for retries
         BlobWire.Cipher.LegacyDetector? legacy = _psk is null ? null : BlobWire.Cipher.ForLegacy(_psk, _root);
         var files = new Dictionary<ulong, FileStream>();
         try
@@ -175,21 +176,22 @@ public sealed class BlobServer : IAsyncDisposable
                 }
                 else
                 {
-                    // The only plaintext an encrypting provider ever accepts is the Hello
-                    // that presents — or retries — the connection's session id: it names
-                    // part of the salt the cipher derives from, so it cannot itself be
-                    // sealed. Everything else must decrypt under the session-bound cipher.
+                    // Hello and the nonce prefix of Welcome bootstrap the ticket cipher.
+                    // They carry explicit versions; v1/v2 are refused without sealing anything.
                     if (BlobWire.Frame.TryParse(payload.Span, out f)
-                        && f.Type == BlobWire.TypeHello
-                        && f.SessionId is not null)
+                        && f.Type == BlobWire.TypeHello)
                     {
+                        if (f.Version != BlobWire.ProtocolVersion)
+                        {
+                            await conn.CloseAsync().ConfigureAwait(false);
+                            return;
+                        }
+
                         if (boundSession is null)
                         {
-                            boundSession = f.SessionId;
-                            // The transport binding (both engine tokens) joins the salt:
-                            // even a downloader that repeats an earlier session id gets a
-                            // different key, because this connection's tokens are new.
-                            cipher = BlobWire.Cipher.For(_psk, _root, f.SessionId, conn.SessionBinding);
+                            boundSession = f.SessionId!;
+                            providerNonce = BlobWire.Cipher.FreshSessionId();
+                            cipher = BlobWire.Cipher.For(_psk, _root, boundSession, providerNonce);
                         }
                         else if (!boundSession.AsSpan().SequenceEqual(f.SessionId))
                         {
@@ -217,34 +219,43 @@ public sealed class BlobServer : IAsyncDisposable
                     }
                 }
 
-            switch (f.Type)
-            {
-                case BlobWire.TypeHello:
-                    if (_streams.TryGetValue(f.Stream, out Served? served))
-                    {
-                        // Every Hello gets a Head: the downloader retries while its
-                        // first Head may have been lost on an unreliable path.
-                        await SendSealedAsync(conn, cipher, BlobWire.Head(f.Stream, served.TotalBytes, served.TotalChunks), sendCounter).ConfigureAwait(false);
-                    }
+                switch (f.Type)
+                {
+                    case BlobWire.TypeHello:
+                        if (_streams.TryGetValue(f.Stream, out Served? served))
+                        {
+                            byte[] head = BlobWire.Head(f.Stream, served.TotalBytes, served.TotalChunks);
+                            if (cipher is null)
+                            {
+                                conn.Send(head);
+                            }
+                            else
+                            {
+                                // Every retry keeps the same provider nonce but seals a
+                                // new Head with a fresh counter, including directory streams.
+                                byte[] sealedHead = cipher.Seal(asProvider: true, sendCounter.Next(), head);
+                                conn.Send(BlobWire.Welcome(f.Stream, boundSession!, providerNonce!, sealedHead));
+                            }
+                        }
 
-                    break;
-                case BlobWire.TypeReq:
-                    if (_streams.TryGetValue(f.Stream, out Served? item))
-                    {
-                        await ServeRangeAsync(conn, cipher, item, f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
-                    }
+                        break;
+                    case BlobWire.TypeReq:
+                        if (_streams.TryGetValue(f.Stream, out Served? item))
+                        {
+                            await ServeRangeAsync(conn, cipher, item, f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
+                        }
 
-                    break;
-                case BlobWire.TypeBye:
-                    if (files.Remove(f.Stream, out FileStream? closed))
-                    {
-                        await closed.DisposeAsync().ConfigureAwait(false);
-                    }
+                        break;
+                    case BlobWire.TypeBye:
+                        if (files.Remove(f.Stream, out FileStream? closed))
+                        {
+                            await closed.DisposeAsync().ConfigureAwait(false);
+                        }
 
-                    break;
+                        break;
+                }
             }
         }
-    }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException)
         {
             // The downloader vanished mid-transfer; the next ticket holder starts clean.

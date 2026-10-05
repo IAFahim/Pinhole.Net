@@ -23,15 +23,16 @@ internal static class BlobWire
     internal const byte TypeReq = 3;
     internal const byte TypeChunk = 4;
     internal const byte TypeBye = 5;
+    internal const byte TypeWelcome = 6;
+    internal const byte ProtocolVersion = 3;
 
     public const int MaxChunkData = Blake3.ChunkSize; // 1024
     public const int MaxRequestCount = 64;
 
-    /// <summary>A fresh per-connection session id: 32 random bytes the downloader puts in
-    /// its first Hello. Both sides derive the connection's cipher from it, so two
-    /// connections sharing one ticket never share a key — and therefore never reuse a
-    /// ChaCha20-Poly1305 (key, nonce) pair across connections.</summary>
+    /// <summary>The length of each endpoint's random per-connection nonce. The downloader
+    /// sends its nonce in Hello; the provider contributes an independent nonce in Welcome.</summary>
     public const int SessionIdLength = 32;
+    private const int SealedHeadLength = 8 + 25 + 16;
 
     public static ulong StreamId(byte[] root) => BinaryPrimitives.ReadUInt64BigEndian(root.AsSpan(0, 8));
 
@@ -50,10 +51,35 @@ internal static class BlobWire
     // in the lambda.
     public static byte[] Hello(ulong stream, ReadOnlySpan<byte> sessionId)
     {
-        byte[] frame = new byte[9 + sessionId.Length];
+        if (sessionId.Length != SessionIdLength)
+        {
+            throw new ArgumentException("session id must be 32 bytes", nameof(sessionId));
+        }
+
+        byte[] frame = new byte[10 + SessionIdLength];
         frame[0] = TypeHello;
         BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
-        sessionId.CopyTo(frame.AsSpan(9));
+        frame[9] = ProtocolVersion;
+        sessionId.CopyTo(frame.AsSpan(10));
+        return frame;
+    }
+
+    public static byte[] Welcome(ulong stream, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce,
+        ReadOnlySpan<byte> sealedHead)
+    {
+        if (sessionId.Length != SessionIdLength || providerNonce.Length != SessionIdLength
+            || sealedHead.Length != SealedHeadLength)
+        {
+            throw new ArgumentException("Welcome requires two 32-byte nonces and a sealed Head");
+        }
+
+        byte[] frame = new byte[10 + 2 * SessionIdLength + SealedHeadLength];
+        frame[0] = TypeWelcome;
+        BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
+        frame[9] = ProtocolVersion;
+        sessionId.CopyTo(frame.AsSpan(10));
+        providerNonce.CopyTo(frame.AsSpan(10 + SessionIdLength));
+        sealedHead.CopyTo(frame.AsSpan(10 + 2 * SessionIdLength));
         return frame;
     }
 
@@ -99,9 +125,11 @@ internal static class BlobWire
         public byte[]? ChunkCv { get; init; }
         public byte[]? ChunkData { get; init; }
 
-        /// <summary>The Hello's session id (32 bytes) — null on a legacy empty-body Hello,
-        /// the pre-2.0 wire an encrypting provider must refuse.</summary>
+        /// <summary>The downloader's 32-byte nonce, or null for a v1 Hello.</summary>
         public byte[]? SessionId { get; init; }
+        public byte Version { get; init; }
+        public byte[]? ProviderNonce { get; init; }
+        public byte[]? SealedHead { get; init; }
 
         public static bool TryParse(ReadOnlySpan<byte> frame, out Frame f)
         {
@@ -117,7 +145,8 @@ internal static class BlobWire
             switch (type)
             {
                 case TypeHello:
-                    if (body.Length is not (0 or SessionIdLength))
+                    if (body.Length is not (0 or SessionIdLength)
+                        && (body.Length != 1 + SessionIdLength || body[0] != ProtocolVersion))
                     {
                         return false;
                     }
@@ -126,7 +155,24 @@ internal static class BlobWire
                     {
                         Type = type,
                         Stream = stream,
-                        SessionId = body.IsEmpty ? null : body.ToArray(),
+                        Version = body.IsEmpty ? (byte)1 : body.Length == SessionIdLength ? (byte)2 : ProtocolVersion,
+                        SessionId = body.IsEmpty ? null : body.Length == SessionIdLength ? body.ToArray() : body[1..].ToArray(),
+                    };
+                    return true;
+                case TypeWelcome:
+                    if (body.Length != 1 + 2 * SessionIdLength + SealedHeadLength || body[0] != ProtocolVersion)
+                    {
+                        return false;
+                    }
+
+                    f = new Frame
+                    {
+                        Type = type,
+                        Stream = stream,
+                        Version = ProtocolVersion,
+                        SessionId = body.Slice(1, SessionIdLength).ToArray(),
+                        ProviderNonce = body.Slice(1 + SessionIdLength, SessionIdLength).ToArray(),
+                        SealedHead = body[(1 + 2 * SessionIdLength)..].ToArray(),
                     };
                     return true;
                 case TypeBye:
@@ -189,17 +235,77 @@ internal static class BlobWire
         }
     }
 
-    /// <summary>Per-direction frame encryption. The key is HKDF-SHA256 over the ticket's
-    /// pre-shared key, salted with the content root, the downloader's session id, and the
-    /// connection's transport binding — the two engine tokens, freshness contributed by
-    /// BOTH endpoints — so two tickets never share a stream cipher even when a caller
-    /// reuses a key, and two connections sharing one ticket never share a cipher either:
-    /// a downloader that repeats its session id still gets a different key, because the
-    /// server's token is fresh in every connection. That is what makes per-connection
-    /// counters restarting at 1 safe. Nonces are (role, 64-bit frame counter); the
-    /// counter rides in the clear ahead of the ciphertext and receivers reject replayed
-    /// or regressed counters — a replayer can at most duplicate a frame the ARQ layer
-    /// already de-duplicates.</summary>
+    /// <summary>Ticket-authenticated download state shared by all streams on a connection.
+    /// A Welcome's provider nonce is adopted only after its sealed Head authenticates.
+    /// The receive watermark is shared across directory streams, just like the send counter.</summary>
+    internal sealed class DownloadSession
+    {
+        private readonly byte[]? _psk;
+        private readonly byte[] _root;
+        private Cipher? _cipher;
+        private byte[]? _providerNonce;
+        private ulong _watermark;
+
+        public byte[] SessionId { get; }
+
+        public DownloadSession(byte[]? psk, byte[] root, byte[]? sessionId = null)
+        {
+            _psk = psk?.ToArray();
+            _root = root.ToArray();
+            SessionId = (sessionId ?? Cipher.FreshSessionId()).ToArray();
+        }
+
+        public byte[] Seal(ulong counter, byte[] plain)
+        {
+            if (_psk is null)
+            {
+                return plain;
+            }
+
+            return (_cipher ?? throw new InvalidOperationException("the provider has not authenticated a Welcome"))
+                .Seal(asProvider: false, counter, plain);
+        }
+
+        public bool TryOpen(ReadOnlySpan<byte> payload, ulong stream, out Frame frame)
+        {
+            frame = default;
+            if (_psk is null)
+            {
+                return Frame.TryParse(payload, out frame) && frame.Stream == stream;
+            }
+
+            // Try ordinary ciphertext first after negotiation. A failed open never changes
+            // the watermark, so an unsealed Welcome can safely be checked afterwards.
+            if (_cipher is not null && _cipher.TryOpen(fromProvider: true, payload, ref _watermark, out byte[] plain))
+            {
+                return Frame.TryParse(plain, out frame) && frame.Stream == stream;
+            }
+
+            if (!Frame.TryParse(payload, out Frame welcome) || welcome.Type != TypeWelcome || welcome.Stream != stream
+                || !welcome.SessionId.AsSpan().SequenceEqual(SessionId)
+                || (_providerNonce is not null && !_providerNonce.AsSpan().SequenceEqual(welcome.ProviderNonce)))
+            {
+                return false;
+            }
+
+            Cipher candidate = _cipher ?? Cipher.For(_psk, _root, SessionId, welcome.ProviderNonce!)!;
+            ulong candidateWatermark = _watermark;
+            if (!candidate.TryOpen(fromProvider: true, welcome.SealedHead!, ref candidateWatermark, out byte[] head)
+                || !Frame.TryParse(head, out frame) || frame.Type != TypeHead || frame.Stream != stream)
+            {
+                return false;
+            }
+
+            _cipher = candidate;
+            _providerNonce ??= welcome.ProviderNonce;
+            _watermark = candidateWatermark;
+            return true;
+        }
+    }
+
+    /// <summary>ChaCha20-Poly1305 frames with a key derived from the ticket PSK, content
+    /// root, and independent 256-bit nonces from the downloader and provider. Routing
+    /// tokens do not participate in key derivation. Direction and counter form the nonce.</summary>
     internal sealed class Cipher
     {
         private const byte DownloaderRole = 0;
@@ -208,23 +314,26 @@ internal static class BlobWire
 
         private Cipher(KeyParameter key) => _key = key;
 
-        /// <summary>The connection cipher: bound to the downloader's session id and to
-        /// the connection's transport binding, so every connection — simultaneous,
-        /// reconnected, resumed, or a hostile repeat of an earlier session id — seals
-        /// under its own key. Null when the ticket carries no PSK (plaintext mode).</summary>
-        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, TransportBinding transport)
+        /// <summary>The connection cipher, derived from both endpoints' nonces. Null for
+        /// a plaintext ticket. The provider generates its nonce once per connection.</summary>
+        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce)
         {
             if (psk is null)
             {
                 return null;
             }
 
-            var salt = new byte[root.Length + sessionId.Length + 8];
+            if (psk.Length != 32 || root.Length != 32 || sessionId.Length != SessionIdLength
+                || providerNonce.Length != SessionIdLength)
+            {
+                throw new ArgumentException("PSK, root, and each session nonce must be 32 bytes");
+            }
+
+            var salt = new byte[root.Length + 2 * SessionIdLength];
             root.CopyTo(salt, 0);
             sessionId.CopyTo(salt.AsSpan(root.Length));
-            BinaryPrimitives.WriteUInt32LittleEndian(salt.AsSpan(root.Length + sessionId.Length), transport.Lo);
-            BinaryPrimitives.WriteUInt32LittleEndian(salt.AsSpan(root.Length + sessionId.Length + 4), transport.Hi);
-            return Derive(psk, salt, "pinhole-blobs-v2");
+            providerNonce.CopyTo(salt.AsSpan(root.Length + SessionIdLength));
+            return Derive(psk, salt, "pinhole-blobs-v3");
         }
 
         /// <summary>The pre-v2 fixed per-ticket key, wrapped so it can only ever OPEN

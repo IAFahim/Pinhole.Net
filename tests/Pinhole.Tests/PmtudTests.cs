@@ -39,8 +39,9 @@ public sealed class PmtudTests
         PinholeConnection atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
         PinholeConnection atA = a.Connections.Single(c => c.PeerId == b.PeerId);
 
-        // Before any probe completes, the floor is the guarantee: 1200 payload + 37 overhead.
-        Assert.Equal(NodeEngine.PmtuBaseWire, atB.PathMtu);
+        // Discovery runs concurrently with the dial continuation: a probe may already
+        // have completed by the time ConnectAsync returns, but the floor is guaranteed.
+        Assert.InRange(atB.PathMtu, NodeEngine.PmtuBaseWire, 1472);
 
         // Loopback carries everything: the ladder should reach the Ethernet IPv4 plateau.
         await TestPoll.UntilAsync(Timeout, () => atB.PathMtu >= 1472 && atA.PathMtu >= 1472);
