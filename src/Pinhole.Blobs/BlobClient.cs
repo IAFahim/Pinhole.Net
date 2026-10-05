@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Net;
 using System.Threading.Channels;
 
 namespace Pinhole.Blobs;
@@ -20,6 +21,21 @@ public sealed record BlobDownloadOptions
     /// <summary>Full <see cref="Pinhole.PinholeOptions"/> override for the dedicated
     /// downloading node (offline tests pass infrastructure-empty options).</summary>
     public PinholeOptions? NodeOptions { get; init; }
+
+    /// <summary>Ceiling for this download's congestion window (default 1 MiB). The window
+    /// is a bound on outstanding requested-but-unverified chunk bytes — it starts small
+    /// and grows only as chunks verify. Must be at least 8 KiB.</summary>
+    public long MaxWindowBytes { get; init; } = 1024 * 1024;
+
+    /// <summary>The aggregate in-flight budget this download joins. Null (the default)
+    /// joins <see cref="BlobFlowBudget.Shared"/>, the process-wide 8 MiB pie; pass a
+    /// private budget to isolate a download's wire footprint from everything else.</summary>
+    public BlobFlowBudget? FlowBudget { get; init; }
+
+    /// <summary>Optional accumulator filled live during the transfer: verified vs
+    /// duplicate bytes, retransmits, loss events, RTT. Diagnostics and tests; null for
+    /// everyday downloads.</summary>
+    public BlobTransferStats? Stats { get; init; }
 }
 
 /// <summary>The receiving half of the ticket: dial the provider from the embedded
@@ -65,7 +81,8 @@ public static class BlobClient
             var fileSend = new SendCounter();
             StreamDownloader? downloader = null;
             downloader = new StreamDownloader(conn, sink,
-                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root);
+                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root,
+                options: options);
             long bytes;
             try
             {
@@ -82,7 +99,8 @@ public static class BlobClient
 
         var send = new SendCounter();
         var manifestSink = new MemorySink();
-        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root);
+        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root,
+            options: options);
         try
         {
             await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
@@ -100,7 +118,8 @@ public static class BlobClient
         for (int i = 0; i < entries.Count; i++)
         {
             var sink = new FileSink(SafeJoin(rootDir, entries[i].Path), entries[i].Root);
-            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root);
+            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root,
+                options: options);
             long bytes;
             try
             {
@@ -130,18 +149,19 @@ public static class BlobClient
 
     // ---------------------------------------------------------------- stream downloader
 
-    /// <summary>Receiver-driven ARQ over one blob stream: bounded in-flight range requests
-    /// anchored at the lowest unapplied chunk (a hostile sender cannot make us buffer the
-    /// far end of the file), per-chunk CV verification on arrival, stale re-requests, and
-    /// a stall clock that only verified progress resets.</summary>
+    /// <summary>Receiver-driven ARQ over one blob stream, paced by the congestion
+    /// controller: requests anchored at the lowest unapplied chunk (a hostile sender
+    /// cannot make us buffer the far end of the file), per-chunk CV verification on
+    /// arrival, RTT-derived re-requests, and a stall clock that only verified progress
+    /// resets.</summary>
     private sealed class StreamDownloader
     {
-        private const int RunLength = BlobWire.MaxRequestCount;
-        private const int MaxOutstanding = 4 * BlobWire.MaxRequestCount;
-        private static readonly TimeSpan Pace = TimeSpan.FromMilliseconds(250);
-        private static readonly TimeSpan ChunkTimeout = TimeSpan.FromMilliseconds(900);
+        private static readonly TimeSpan ControlTick = TimeSpan.FromMilliseconds(5);
+        private static readonly TimeSpan HelloPace = TimeSpan.FromMilliseconds(250);
+        private static readonly TimeSpan CheckpointPace = TimeSpan.FromMilliseconds(50);
         private static readonly TimeSpan FirstHeadTimeout = TimeSpan.FromSeconds(20);
         private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan BriefFlap = TimeSpan.FromMilliseconds(500);
 
         private readonly PinholeConnection _conn;
         private readonly Sink _sink;
@@ -149,10 +169,15 @@ public static class BlobClient
         private readonly BlobWire.DownloadSession _session;
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
-        private readonly Dictionary<long, long> _requestedAt = new();
+        private readonly BlobController _controller;
+        private readonly Dictionary<long, (long SentAtMs, int Retransmits, int PendingRecoveries)> _outstanding = new();
         private readonly SendCounter _send;
         private long _maxRequested = -1;
         private long _helloSince = -1;
+        private long _helloLastTicks;
+        private long _lastCheckpointTicks;
+        private IPEndPoint? _pathRemote;
+        private long _pathlessSinceMs = -1;
 
         private long _totalBytes = -1;
         private long _totalChunks = -1;
@@ -162,7 +187,8 @@ public static class BlobClient
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
         public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
-            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null)
+            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null,
+            BlobDownloadOptions? options = null)
         {
             _conn = conn;
             _sink = sink;
@@ -171,6 +197,9 @@ public static class BlobClient
             _session = session;
             _expectedRoot = expectedRoot;
             _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
+            options ??= new BlobDownloadOptions();
+            _controller = new BlobController(options.MaxWindowBytes, options.FlowBudget ?? BlobFlowBudget.Shared,
+                options.Stats, BlobTestHooks.ForceFixedWindow);
         }
 
         public async Task<long> RunAsync(CancellationToken ct)
@@ -237,79 +266,131 @@ public static class BlobClient
         private async Task<long> RunLoopAsync(ChannelReader<BlobWire.Frame> frames, CancellationToken ct)
         {
             _lastVerifiedTicks = Environment.TickCount64;
-            while (true)
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                long now = Environment.TickCount64;
-
-                if (_totalChunks < 0)
+                while (true)
                 {
-                    if (_helloSince < 0)
+                    ct.ThrowIfCancellationRequested();
+                    if (_conn.State == PinholeConnectionState.Closed)
                     {
-                        _helloSince = now;
+                        // Pathlessness is a wait; Closed is a verdict. The provider hung
+                        // up or the engine retired the connection — nothing rides out.
+                        throw new InvalidDataException("the connection went quiet before the transfer finished");
                     }
 
-                    if (now - _helloSince > (long)FirstHeadTimeout.TotalMilliseconds)
+                    long now = Environment.TickCount64;
+                    bool pathPresent = WatchPath(now);
+
+                    if (_totalChunks < 0)
                     {
-                        throw new TimeoutException("the provider did not answer the ticket");
+                        if (_helloSince < 0)
+                        {
+                            _helloSince = now;
+                        }
+
+                        if (now - _helloSince > (long)FirstHeadTimeout.TotalMilliseconds)
+                        {
+                            throw new TimeoutException("the provider did not answer the ticket");
+                        }
+
+                        // Retries reuse the same downloader nonce. Welcome carries the
+                        // provider nonce and a Head authenticated with the resulting key.
+                        if (pathPresent && now - _helloLastTicks >= (long)HelloPace.TotalMilliseconds)
+                        {
+                            _helloLastTicks = now;
+                            BlobWire.SendRidingOutPathlessness(_conn, BlobWire.Hello(_stream, _session.SessionId), CancellationToken.None);
+                        }
+                    }
+                    else
+                    {
+                        if (_sink.Applied >= _totalChunks)
+                        {
+                            break;
+                        }
+
+                        if (pathPresent)
+                        {
+                            TopUpRequests(now);
+                            SweepStale(now);
+                        }
+
+                        // The checkpoint is idempotent and tiny; a 50 ms gate keeps the
+                        // syscall rate sane, and the exit path below writes one final
+                        // checkpoint so a cancelled attempt always leaves its prefix —
+                        // resuming never depends on timer luck.
+                        if (now - _lastCheckpointTicks >= (long)CheckpointPace.TotalMilliseconds)
+                        {
+                            _lastCheckpointTicks = now;
+                            _sink.Checkpoint();
+                        }
                     }
 
-                    // Retries reuse the same downloader nonce. Welcome carries the
-                    // provider nonce and a Head authenticated with the resulting key.
-                    BlobWire.SendRidingOutPathlessness(_conn, BlobWire.Hello(_stream, _session.SessionId), CancellationToken.None);
+                    // Availability wait, not a consuming read: an abandoned WaitToReadAsync can
+                    // steal a signal but never an item — TryRead below is the only consumer.
+                    if (!frames.TryRead(out BlobWire.Frame f))
+                    {
+                        bool more;
+                        try
+                        {
+                            more = await frames.WaitToReadAsync(ct).AsTask().WaitAsync(ControlTick, ct).ConfigureAwait(false);
+                        }
+                        catch (TimeoutException)
+                        {
+                            CheckStall(now);
+                            continue;
+                        }
+
+                        if (!more || !frames.TryRead(out f))
+                        {
+                            throw new InvalidDataException("the connection went quiet before the transfer finished");
+                        }
+                    }
+
+                    switch (f.Type)
+                    {
+                        case BlobWire.TypeHead:
+                            if (_totalChunks < 0)
+                            {
+                                _totalBytes = f.TotalBytes;
+                                _totalChunks = f.TotalChunks;
+                                _sink.Init(_totalBytes, _totalChunks);
+                            }
+
+                            break;
+                        case BlobWire.TypeChunk:
+                            ReceiveChunk(f, now);
+                            break;
+                        case BlobWire.TypeBye:
+                            throw new InvalidDataException("the provider cancelled this stream");
+                    }
+
+                    CheckStall(now);
                 }
-                else
+            }
+            finally
+            {
+                // A stream that verified anything but is not finishing (cancelled,
+                // stalled, connection lost) writes one last checkpoint — resume must
+                // never depend on where the periodic timer happened to land.
+                if (_totalChunks > 0 && _sink.Applied is > 0 and var applied && applied < _totalChunks)
                 {
-                    if (_sink.Applied >= _totalChunks)
-                    {
-                        break;
-                    }
-
-                    TopUpRequests(now);
-                    SweepStale(now);
                     _sink.Checkpoint();
                 }
 
-                // Availability wait, not a consuming read: an abandoned WaitToReadAsync can
-                // steal a signal but never an item — TryRead below is the only consumer.
-                if (!frames.TryRead(out BlobWire.Frame f))
+                // Every reservation the budget still holds for this stream must come back:
+                // a stalled or cancelled download must not leak its share of the
+                // process-wide pie.
+                foreach (long idx in _outstanding.Keys)
                 {
-                    bool more;
-                    try
+                    long len = ChunkLength(idx);
+                    _controller.ReleaseReservation(len);
+                    for (int i = 0; i < _outstanding[idx].PendingRecoveries; i++)
                     {
-                        more = await frames.WaitToReadAsync(ct).AsTask().WaitAsync(Pace, ct).ConfigureAwait(false);
-                    }
-                    catch (TimeoutException)
-                    {
-                        CheckStall(now);
-                        continue;
-                    }
-
-                    if (!more || !frames.TryRead(out f))
-                    {
-                        throw new InvalidDataException("the connection went quiet before the transfer finished");
+                        _controller.OnRecoverySettled(len);
                     }
                 }
 
-                switch (f.Type)
-                {
-                    case BlobWire.TypeHead:
-                        if (_totalChunks < 0)
-                        {
-                            _totalBytes = f.TotalBytes;
-                            _totalChunks = f.TotalChunks;
-                            _sink.Init(_totalBytes, _totalChunks);
-                        }
-
-                        break;
-                    case BlobWire.TypeChunk:
-                        ReceiveChunk(f, now);
-                        break;
-                    case BlobWire.TypeBye:
-                        throw new InvalidDataException("the provider cancelled this stream");
-                }
-
-                CheckStall(now);
+                _outstanding.Clear();
             }
 
             byte[] root = _sink.Complete();
@@ -319,6 +400,45 @@ public static class BlobClient
             }
 
             return _totalBytes;
+        }
+
+        /// <summary>Path watching: returns whether a usable path exists right now. A path
+        /// change (endpoint moved — roam, relay failover) or a return from sustained
+        /// pathlessness resets the controller conservatively and refreshes every
+        /// outstanding request's timer, so the resume probes instead of flooding a fresh
+        /// path with a stale window's worth of re-requests.</summary>
+        private bool WatchPath(long now)
+        {
+            bool present = _conn.State is PinholeConnectionState.Open or PinholeConnectionState.Degraded;
+            if (!present)
+            {
+                _pathlessSinceMs = _pathlessSinceMs < 0 ? now : _pathlessSinceMs;
+                return false;
+            }
+
+            long pathlessFor = _pathlessSinceMs >= 0 ? now - _pathlessSinceMs : 0;
+            _pathlessSinceMs = -1;
+            Pinhole.PinholePath path = _conn.Path;
+            // The endpoint itself, not the engine's "since" stamp: a seamless adoption
+            // (the peer roamed while our state never left Open) moves the remote without
+            // ever transitioning, and that is exactly the migration to detect.
+            bool endpointChanged = path.Remote is { } remote && _pathRemote is { } known && !remote.Equals(known);
+            if (_pathRemote is null)
+            {
+                _pathRemote = path.Remote; // first observation: nothing to reset
+            }
+            else if (endpointChanged || pathlessFor >= (long)BriefFlap.TotalMilliseconds)
+            {
+                _pathRemote = path.Remote;
+                _controller.OnPathChanged();
+                long[] refresh = [.. _outstanding.Keys];
+                foreach (long idx in refresh)
+                {
+                    _outstanding[idx] = (now, _outstanding[idx].Retransmits, _outstanding[idx].PendingRecoveries);
+                }
+            }
+
+            return true;
         }
 
         private void ReceiveChunk(BlobWire.Frame f, long now)
@@ -341,8 +461,21 @@ public static class BlobClient
                 throw new InvalidDataException($"chunk {f.Index} failed verification");
             }
 
+            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, int PendingRecoveries) entry);
             bool fresh = _sink.Apply(f.Index, f.ChunkData);
-            _requestedAt.Remove(f.Index);
+            if (hadReservation && entry.Retransmits == 0)
+            {
+                // Karn's rule: only a first-attempt arrival measures the path's RTT — a
+                // retransmitted request's arrival time no longer bounds the original send.
+                _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(now - entry.SentAtMs, 1)));
+            }
+
+            for (int i = 0; hadReservation && i < entry.PendingRecoveries; i++)
+            {
+                _controller.OnRecoverySettled(len);
+            }
+
+            _controller.OnChunkArrived(len, hadReservation, fresh, now);
             if (fresh)
             {
                 _verified += len;
@@ -351,15 +484,39 @@ public static class BlobClient
             }
         }
 
+        private long ChunkLength(long index) =>
+            (long)Math.Min(Blake3.ChunkSize, _totalBytes - index * Blake3.ChunkSize);
+
         private void TopUpRequests(long now)
         {
-            while (_requestedAt.Count < MaxOutstanding && _maxRequested + 1 < _totalChunks)
+            // The token-bucket pacer admits as many runs as its credit allows inside one
+            // control tick — the pacer's rate, not the tick cadence, is the limit. Runs
+            // size themselves to the credit actually available, so issuance tracks the
+            // pacing rate smoothly instead of jumping in whole-run quanta.
+            while (_maxRequested + 1 < _totalChunks)
             {
                 long start = _maxRequested + 1;
-                int count = (int)Math.Min(Math.Min(RunLength, _totalChunks - start), MaxOutstanding - _requestedAt.Count);
+                int desired = (int)Math.Min(_controller.MaxRunChunks, _totalChunks - start);
+                int count = Math.Min(desired, _controller.AffordableChunks(desired));
+                if (count < 1)
+                {
+                    return; // pacer credit exhausted; retry next tick
+                }
+
+                long bytes = 0;
                 for (long idx = start; idx < start + count; idx++)
                 {
-                    _requestedAt[idx] = now;
+                    bytes += ChunkLength(idx);
+                }
+
+                if (!_controller.TryStartRun(bytes, now))
+                {
+                    return; // window or the shared budget is full; retry next tick
+                }
+
+                for (long idx = start; idx < start + count; idx++)
+                {
+                    _outstanding[idx] = (now, 0, 0);
                 }
 
                 Send(BlobWire.Request(_stream, start, count));
@@ -369,13 +526,22 @@ public static class BlobClient
 
         private void SweepStale(long now)
         {
-            foreach ((long idx, long at) in _requestedAt)
+            foreach ((long idx, (long sentAt, int retransmits, int pending)) in _outstanding)
             {
-                if (now - at >= (long)ChunkTimeout.TotalMilliseconds)
+                if (now - sentAt < (long)_controller.PtoFor(retransmits).TotalMilliseconds)
                 {
-                    _requestedAt[idx] = now;
-                    Send(BlobWire.Request(_stream, idx, 1));
+                    continue;
                 }
+
+                long bytes = ChunkLength(idx);
+                if (!_controller.TryStartRecovery(bytes))
+                {
+                    continue; // the aggregate budget is full; retry next tick
+                }
+
+                _controller.OnRetransmit(now);
+                _outstanding[idx] = (now, retransmits + 1, pending + 1);
+                Send(BlobWire.Request(_stream, idx, 1));
             }
         }
 

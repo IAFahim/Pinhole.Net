@@ -73,6 +73,11 @@ public sealed class BlobServer : IAsyncDisposable
     /// hashes to the CV it was advertised with.</summary>
     internal Action<long, byte[]>? CorruptChunk { get; set; }
 
+    /// <summary>Deterministic duplication seam for tests: when it returns true for an
+    /// index, the chunk frame is sent twice — a confused provider or a duplicating
+    /// network path, exercising the downloader's duplicate accounting.</summary>
+    internal Func<long, bool>? DuplicateChunk { get; set; }
+
     /// <summary>Hashes the file or directory tree at <paramref name="path"/> once, binds a
     /// dedicated serving node, and starts serving whoever presents the ticket — until this
     /// server is disposed. Throws <see cref="FileNotFoundException"/> when the path is
@@ -297,7 +302,13 @@ public sealed class BlobServer : IAsyncDisposable
 
             byte[] data = await item.ReadChunkAsync(idx, files, _stop.Token).ConfigureAwait(false);
             CorruptChunk?.Invoke(idx, data);
-            await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
+            byte[] frame = BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data);
+            await SendSealedAsync(conn, cipher, frame, counter).ConfigureAwait(false);
+            if (DuplicateChunk?.Invoke(idx) == true)
+            {
+                await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
+            }
+
             ChunksServed++;
         }
     }

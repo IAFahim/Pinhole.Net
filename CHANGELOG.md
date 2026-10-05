@@ -1,6 +1,32 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — blob congestion control (#20)
+
+Blob downloads are now congestion-controlled, receiver-side, with the wire unchanged
+(no new frames, no version bump — a controller-mode downloader talks to any v3
+provider). A byte-based window (32 KiB initial, slow start, AIMD halving on congestion
+evidence — expiry bursts or standing delay, never scattered random loss) bounds
+outstanding requested-but-unverified chunks; a token-bucket pacer issues request runs at
+window rate with run-sized burst caps; the retransmission timer is derived from measured
+RTT (SRTT/RTTVAR, Karn's rule, doubling backoff) instead of a flat 900 ms; duplicate
+responses are counted as real wire load (BlobTransferStats) rather than assumed away by
+request credits; path migration or sustained pathlessness resets the controller to its
+initial window with refreshed timers so the resume probes instead of flooding; and every
+download joins a process-wide 8 MiB in-flight budget (BlobFlowBudget) so concurrent
+downloads divide one pie. New options: MaxWindowBytes, FlowBudget, Stats.
+
+Why not a component: kcp2k's own README recommends leaving KCP congestion control
+disabled ("it seems to be broken"), LiteNetLib is a transport rather than a layer above
+one and has no congestion avoidance, and System.Net.Quic is native — the full selection
+table is in docs/BLOBS.md. Measured against the same-day fixed-window baseline
+(docs/BASELINES.md): thin queue 6–11×, 5% loss 3–7×, mixed RTT ~3.7× faster, loss
+ladder 1.5–3.5×; the one deficit is a clean fat pipe on a ~6-BDP file (0.89×, the
+slow-start climb) in exchange for near-empty queues where the fixed window bufferbloated.
+A recovery deadlock the new machinery exposed — re-requests gated on the window whose
+lost reservations held it shut — is fixed by letting timer-paced recovery bypass the
+window, bounded by the aggregate budget.
+
 ## 1.10.0 (unreleased) — connection resilience (#31)
 
 A connection object now survives everything short of disposal honestly: the punch

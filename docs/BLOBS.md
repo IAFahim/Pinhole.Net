@@ -81,20 +81,94 @@ connection (directory downloads).
 The largest plaintext frame (Chunk) is 9+8+32+1024 = 1073 bytes, sized to stay under the
 connection layer's 1200-byte datagram budget with the AEAD overhead included.
 
-### The transfer loop (downloader-driven ARQ)
+### The transfer loop (downloader-driven ARQ, congestion-controlled)
 
 - The downloader sends Hello until a Head arrives (inside Welcome for encrypted tickets;
-  20 s give-up), then requests ranges
-  from the **lowest unapplied chunk** upward — at most 4×64 chunks in flight, at most 64
-  per Req. A hostile sender cannot make the downloader buffer the far end of the file:
-  anything past a bounded reorder window (512 chunks) ahead of the applied cursor is
-  dropped and re-requested in order.
-- Missing chunks are re-requested individually after 900 ms without a verified arrival.
+  20 s give-up), then requests ranges from the **lowest unapplied chunk** upward, admitted
+  by the congestion controller (below). A hostile sender cannot make the downloader buffer
+  the far end of the file: anything past a bounded reorder window (512 chunks) ahead of
+  the applied cursor is dropped and re-requested in order.
+- Missing chunks are re-requested individually after an RTT-derived retransmission timer.
 - The whole download fails if **no chunk verifies** for 30 s (stall) — loss is healed,
   silence is fatal, honestly.
 - Directory downloads: stream 1 is the manifest (below), then each entry root downloads
   as its own stream over the same connection, sequentially, sharing one frame-counter
   space (see encryption).
+
+### The congestion controller (#20)
+
+The receiver drives all wire load — the requests it issues are the only thing that pulls
+data — so the controller lives on the downloader and the wire is unchanged (a
+controller-mode downloader talks to any v3 provider and vice versa; no frames were added,
+no version moved). What it does, all receiver-side:
+
+- **RTT measurement and PTO.** Every first-attempt arrival samples the RTT into
+  SRTT/RTTVAR (RFC 6298/9002-shaped); Karn's rule excludes retransmitted requests from
+  the estimate. The retransmission timer is `SRTT + max(4·RTTVAR, 50 ms)` clamped to
+  [150 ms, 3 s], doubling per retransmission of the same chunk. A duplicate-response
+  signal (the timer fired while the data was merely slow) inflates the timer, at most 4×,
+  and one clean loss-window relaxes it fully.
+- **Byte-based window, slow start, AIMD.** Outstanding requested-but-unverified chunk
+  bytes are capped by a window starting at 32 KiB, doubling per RTT in slow start
+  (paced against the path's *base* RTT so the climb is not throttled by the queue it is
+  building), then growing ~1 chunk per RTT. A congestion event halves it — at most once
+  per RTT, and only on congestion evidence: three expiries inside one loss window (a
+  burst died together — queue overflow) or standing delay ≥ 1.6× the base RTT. Scattered
+  random loss re-requests without halving; a steady 5% rung would otherwise ratchet the
+  window to the floor. After a reduction the window sits *below* the new threshold so
+  slow start rebounds exponentially instead of crawling.
+- **Pacing.** A token bucket fills at window rate (window bytes per RTT) with burst
+  credit capped at one run; runs size themselves to the credit actually available. Each
+  Req run — a back-to-back provider burst — is bounded by the window (≤ 1/8 of it,
+  clamped to [2, 64] chunks).
+- **Recovery is not load.** A lost chunk's original reservation holds window room until
+  it arrives, so its re-request bypasses the window and pacer (bounded instead by the
+  PTO cadence and the aggregate budget). Gating recovery on the window it is trying to
+  refill deadlocks — the fixed-window predecessor never hit this because it never
+  shrank.
+- **Duplicates are wire load.** Bytes that arrive for an index already held count as
+  `DuplicateBytes` in `BlobTransferStats` — request credits are never treated as proof
+  of a bounded response side.
+- **Migration and pathlessness.** An endpoint change (seamless adoption included — the
+  remote address is compared directly, since the state never has to leave Open to roam)
+  or a return from ≥ 500 ms of pathlessness resets the controller to its initial window
+  with clean timers and refreshes every outstanding request's clock: the resume probes
+  conservatively instead of flooding a fresh path with a stale window's re-requests.
+  Requesting pauses entirely while no path exists.
+- **Aggregate budget.** Every download joins `BlobFlowBudget.Shared` (8 MiB process-wide;
+  pass a private `BlobFlowBudget` via `BlobDownloadOptions.FlowBudget` to isolate one).
+  Opening more simultaneous downloads divides that pie instead of multiplying per-flow
+  windows. A stalled or cancelled download releases every reservation it holds.
+
+Tunables: `BlobDownloadOptions.MaxWindowBytes` (default 1 MiB) caps the window;
+`BlobDownloadOptions.Stats` fills a live `BlobTransferStats` (verified/duplicate bytes,
+retransmits, loss events, RTT, window) for diagnostics.
+
+The honest cost: on a clean fat pipe a *short* transfer (a few BDPs) pays the slow-start
+climb (~100 ms) that an instantly-flooded fixed window does not — measured below as the
+one rung where the controller trails the fixed window, with near-empty queues where the
+fixed window bufferbloated. The selected rules and measured tradeoffs are in
+[BASELINES.md](BASELINES.md); the reuse-first evaluation that led to building this
+controller instead of adopting a component is next.
+
+### Component selection (the reuse-first answer)
+
+Evaluated for "maintained, fully managed C#, sits above a datagram API" against
+maintenance, license, AOT/trimming, cancellation, bounded memory, pacing/loss recovery,
+congestion mode, and integration/wire compatibility:
+
+| Candidate | Verdict | Why |
+|---|---|---|
+| [kcp2k](https://github.com/MirrorNetworking/kcp2k) (MIT, actively maintained, Mirror's default transport) | **not adopted** | Its own README: "Congestion Control should be left disabled. It seems to be broken in KCP." Adopting it means adopting an ARQ whose congestion control is recommended off — the #20 requirements would still need a hand-written controller *plus* KCP's sender-driven byte-stream model, which discards the receiver-driven trust properties (anchored window, verify-on-arrival before buffering). |
+| [LiteNetLib](https://github.com/RevenantX/LiteNetLib) (MIT, maintained) | **not adopted** | A transport, not a layer above one: it owns sockets, connections, and its own framing — embedding it under Pinhole would be a second transport stack. Its reliable channel uses fixed-window resends with no congestion avoidance (no cwnd, no AIMD, no pacing). |
+| Lidgren / lidgren-genome | **not adopted** | Sparse-to-dormant maintenance; same transport-level mismatch. |
+| System.Net.Quic / MsQuic | **excluded** | Native OS bindings (full managed C# is a hard constraint) and a complete transport with its own handshake — it cannot sit above Pinhole's datagram API. |
+
+Conclusion, per the roadmap's escape hatch: no component fits; the controller above is
+the smallest justified adaptation of established algorithms (RFC 6298 RTO math, RFC 9002
+slow-start/IW/PTO/migration-reset thinking, RFC 8085 UDP congestion guidance, RFC 6675's
+one-reduction-per-window rule). It is not QUIC-compatible and claims to be nothing but
+itself.
 
 ### Directories
 
@@ -175,7 +249,7 @@ attempt replays those chunks through the tree and resumes at the gap. A state fi
 root or size does not match, or whose `data` is shorter than the prefix claims, restarts
 from zero. On success the part file is truncated to the exact size, promoted over the
 target, and the part directory is deleted. Checkpoints are written on the transfer's
-natural 250 ms pacing — resuming never redoes more than the last fraction of a second.
+50 ms control cadence — resuming never redoes more than a fraction of a second.
 
 ## Sample
 

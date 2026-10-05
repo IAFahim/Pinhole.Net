@@ -527,8 +527,8 @@ public sealed class RediscoveryTests
             if (reply.StartsWith("INTRO", StringComparison.Ordinal) && reply.Split(' ').Length == 3
                 && !reply.Contains(':')
                 && AddressRecord.TryParseVerified(Base64Url.Decode(reply.Split(' ')[2]), peerId, endpointKey,
-                    DateTimeOffset.UtcNow, out AddressRecord record)
-                && record.Endpoints.Any(e => e.Port == port))
+                    DateTimeOffset.UtcNow, out AddressRecord? record)
+                && record!.Endpoints.Any(e => e.Port == port))
             {
                 return;
             }

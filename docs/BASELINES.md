@@ -32,6 +32,36 @@ rungs exercise the same regimes a real constrained uplink does.
 Loss ladder (no bandwidth limit, zero-delay links, from the #22 lab):
 1% → 494 KiB/s, 5% → ~250 KiB/s, 20% → 82 KiB/s, Gilbert-Elliott 10% (burst 8) → 251 KiB/s.
 
+## Controller vs fixed window — same machine, same day (2026-10-06, #20)
+
+The receiver-side controller (`docs/BLOBS.md` § congestion controller) against the fixed
+window, both modes re-measured in the same Release run on the machine that recorded the
+table above (fixed-window numbers reproduce the #27 record within a few percent — the
+harness is stable). Reproduce either mode: `dotnet test -c Release --filter
+"FullyQualifiedName~BottleneckTests|FullyQualifiedName~LossLadderTests"`, adding
+`PINHOLE_BLOB_FIXED_WINDOW=1` for the baseline mode.
+
+| Rung | Fixed window | Controller | Ratio |
+|---|---|---|---|
+| deep queue | 1102 KiB/s | 986 KiB/s | 0.89× |
+| thin queue (16 pkt) | 31 KiB/s | 194–353 KiB/s | 6–11× |
+| 5% loss × 5 seeds | 31–43 KiB/s | 98–227 KiB/s | 3–7× |
+| mixed RTT (both flows) | 2.8 s | 0.7–0.8 s | ~3.7× faster |
+| ladder 1% | 566 KiB/s | 1992 KiB/s | 3.5× |
+| ladder 5% | 464 KiB/s | 691 KiB/s | 1.5× |
+| ladder 20% | 69 KiB/s | 195 KiB/s | 2.8× |
+| ladder GE 10% (burst 8) | 221 KiB/s | 474 KiB/s | 2.1× |
+
+The one deficit is the clean-fat-pipe rung, and it is the documented trade, not a
+surprise: the controller starts at a 32 KiB window and climbs (~100 ms on this rung)
+instead of flooding 256 KiB instantly, and the 512 KiB test file is only ~6.5 BDPs — on
+transfers large relative to the path's BDP the flow-phase rates are identical (the gap is
+entirely the climb). The compensation is in the counters: the controller's shaper queue
+stays at depth ≤ 3 the whole run where the fixed window bufferbloated 128–256 packets.
+An IW ≥ 96 KiB matches the fixed window's deep-queue number (1092–1097) but measurably
+hurts every lossy rung (the opening burst overflows thin queues deterministically) — 32
+KiB was chosen because the thin-queue collapse is the scenario the controller exists for.
+
 ## What the baselines already forced out
 
 - **A real lab bug**: the virtual scheduler delivered each 5 ms batch of delayed packets
@@ -44,7 +74,9 @@ Loss ladder (no bandwidth limit, zero-delay links, from the #22 lab):
 
 - **TCP competition** needs a real TCP sender sharing a kernel queue — in-process lab
   traffic only. It belongs to the root-gated real-network harness (#26's namespace
-  matrix), not this file.
+  matrix), not this file. The controller's claim is correspondingly narrow: AIMD-shaped
+  backoff and burst bounds against the fixed window, measured in the lab — not
+  "TCP-friendly" as a network claim, which only a real TCP competitor could establish.
 - Fairness between two *similar* Pinhole flows is observable in the mixed-RTT rung's
-  counters but not yet asserted as a ratio; that comparison becomes meaningful when a
-  controller exists to compare against this fixed-window baseline.
+  counters (both complete, far flow no longer starved: 0.7–0.8 s vs 2.8 s) but not yet
+  asserted as a bandwidth ratio.

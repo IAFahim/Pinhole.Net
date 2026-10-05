@@ -77,9 +77,12 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The curve itself: goodput at 2% must beat 10% and the bursty rung — the
-    /// property any future congestion control must at least preserve, measured in one
-    /// process so machine speed cancels out of the comparison.</summary>
+    /// <summary>The curve itself: goodput at 2% must beat 10%, and the bursty rung must
+    /// beat the 10% scattered rung — measured in one process so machine speed cancels
+    /// out. (The controller era inverted the old "bursty ≤ 2%" ordering: long clean
+    /// stretches between bursts let the window ramp, so GE(10%, burst 8) legitimately
+    /// runs near the clean rate — bursty loss is FRIENDLIER to a window-controlled
+    /// receiver than constant scatter, and the assertion now says so.)</summary>
     [Fact]
     public async Task LadderCurve_GoodputFallsAsLossRises()
     {
@@ -89,7 +92,7 @@ public sealed class LossLadderTests(ITestOutputHelper output)
 
         output.WriteLine($"ladder curve: 2% -> {at2:F0} B/s, 10% -> {at10:F0} B/s, GE(10%, burst 8) -> {burst:F0} B/s");
         Assert.True(at10 < at2, $"goodput at 10% loss ({at10:F0} B/s) must fall below 2% ({at2:F0} B/s)");
-        Assert.True(burst < at2, $"bursty-loss goodput ({burst:F0} B/s) must fall below 2% ({at2:F0} B/s)");
+        Assert.True(burst > at10, $"bursty-loss goodput ({burst:F0} B/s) must beat scattered 10% ({at10:F0} B/s)");
     }
 
     /// <summary>#14's pause/resume-under-loss box: bursty loss, then the path vanishes for

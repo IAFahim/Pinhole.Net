@@ -229,3 +229,31 @@ beacon) so a rebinded peer can be found again.
 does not heal in the lab — beacons flow but PACK replies do not return. The single-side
 variants (RoamingTests' rebind, the outage ladder above) all heal; the corner is recorded
 rather than claimed.
+
+
+## #20 — blob congestion control: selection, controller, acceptance
+
+The reuse-first survey is in `docs/BLOBS.md` § "Component selection": kcp2k (its own
+README recommends leaving KCP congestion control disabled), LiteNetLib (a transport, not
+a layer above one, no congestion avoidance), Lidgren (dormant), System.Net.Quic (native
+bindings, excluded by the full-managed constraint) — no component fits, so the
+receiver-side controller documented in `docs/BLOBS.md` is the smallest justified
+adaptation of RFC 6298/8085/9002/6675 ideas. The wire is unchanged.
+
+`CongestionTests.cs` (acceptance) and the re-measured `BottleneckTests`/`LossLadderTests`
+(evidence, `docs/BASELINES.md` § "Controller vs fixed window"):
+
+| Claim | Test | Proof |
+|---|---|---|
+| thin-queue collapse healed | `ThinQueue_ControllerAvoidsTheFixedWindowCollapse` | ≥ 90 KiB/s where the fixed window collapses to ~31 KiB/s (measured 194–353) |
+| beats the fixed window, same process | `LossyLink_ControllerOutperformsTheFixedWindow_InProcess` | both modes run back-to-back through identical links; controller finishes strictly faster (measured ~5×) |
+| response bytes accounted | `RetransmittedResponses_AreCountedAsWireLoad` | a duplicating provider (1 chunk in 8 twice) lands exactly 64 KiB of duplicate bytes in `BlobTransferStats`, counted as wire load, transfer still completes |
+| aggregate budget | `SharedBudget_ConcurrentDownloadsDivideOnePie` | two concurrent downloads share one 96 KiB `BlobFlowBudget`; a 5 ms sampler never observes the ledger past the cap, the pie is exercised, and it drains to zero |
+| migration resets conservatively | `ProviderRoamMidTransfer_...` | provider rebinds mid-transfer (fresh port, seamless adoption); ≥ 1 conservative resume recorded, transfer completes verified |
+| fixed-window mode re-runnable | `PINHOLE_BLOB_FIXED_WINDOW=1` env | rebuilds the recorded baseline behavior for same-day A/B runs |
+
+Engine-adjacent bugs the controller work surfaced and fixed: re-requests were gated on
+the same window whose lost reservations held it shut (a recovery deadlock — the fixed
+window could never hit it because it never shrank), the checkpoint cadence change
+initially wrote no state for sub-250 ms attempts (resume tests caught it), and
+connection-closed detection relied on `Send` throwing rather than an explicit check.
