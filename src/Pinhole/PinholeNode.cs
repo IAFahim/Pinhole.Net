@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 
 namespace Pinhole;
@@ -16,6 +17,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     private readonly NodeEngine _engine;
     private readonly PinholeOptions _options;
     private volatile NatHint _natHint = NatHint.Unknown;
+    private LanDiscovery? _lan;
 
     private PinholeNode(NodeEngine engine, PinholeOptions options)
     {
@@ -43,7 +45,59 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw;
         }
 
-        return new PinholeNode(engine, resolved);
+        var node = new PinholeNode(engine, resolved);
+        node.StartLanAnnouncement();
+        return node;
+    }
+
+    /// <summary>Announces on the LAN when <see cref="PinholeOptions.EnableLanDiscovery"/>
+    /// is set: the node becomes <c>&lt;peer-id&gt;._pinhole._udp.local</c> on the local
+    /// link, answerable by <see cref="DiscoverLanPeersAsync"/>. Off by default — announcing
+    /// is a network-visible behavior an app should choose. Never throws: a multicast-less
+    /// environment simply stays unannounced.</summary>
+    private void StartLanAnnouncement()
+    {
+        if (!_options.EnableLanDiscovery)
+        {
+            return;
+        }
+
+        try
+        {
+            var channel = new MulticastLanChannel();
+            _lan = new LanDiscovery(
+                channel,
+                PeerId,
+                StaticPublicKey,
+                () => LocalLanAddresses(),
+                LocalPort,
+                NatHint);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            // No multicast on this interface (common in containers): announcing is
+            // best-effort, never a bind failure.
+        }
+    }
+
+    private IReadOnlyList<IPAddress> LocalLanAddresses() =>
+        _engine.LocalCandidatesSnapshot()
+            .Where(c => c.Kind == CandidateKind.Direct && c.Address.AddressFamily == AddressFamily.InterNetwork)
+            .Select(c => c.Address.Address)
+            .Where(a => !IPAddress.IsLoopback(a))
+            .Distinct()
+            .ToList();
+
+    /// <summary>Asks the local link for pinhole nodes and collects who answers during the
+    /// window (both query responses and unsolicited announcements count). Each result is a
+    /// dialable peer — v2 strings carrying the announcer's static key when it runs
+    /// encryption, so discovered sessions are man-in-the-middle proof like any other.
+    /// Needs no node of your own; two queries a second apart cover ordinary loss.</summary>
+    public static async Task<IReadOnlyList<LanPeer>> DiscoverLanPeersAsync(TimeSpan window, CancellationToken ct = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(window, TimeSpan.FromMilliseconds(100));
+        using var channel = new MulticastLanChannel();
+        return await LanDiscovery.BrowseAsync(channel, window, ct).ConfigureAwait(false);
     }
 
     /// <summary>This peer's stable ID (random per bind).</summary>
@@ -212,13 +266,20 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// <see cref="NatDetector"/> results when the app knows better than the observations.</summary>
     public void SetNatHint(NatHint hint) => _natHint = hint;
 
-    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer), relays are released, and the socket is disposed. Idempotent.</summary>
+    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
+    /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
     public ValueTask DisposeAsync()
     {
+        _lan?.Dispose();
         _engine.Dispose();
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer), relays are released, and the socket is disposed. Idempotent.</summary>
-    public void Dispose() => _engine.Dispose();
+    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
+    /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
+    public void Dispose()
+    {
+        _lan?.Dispose();
+        _engine.Dispose();
+    }
 }

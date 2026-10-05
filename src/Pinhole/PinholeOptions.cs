@@ -108,6 +108,15 @@ public sealed record PinholeOptions
     /// worst-case payload budgets.</summary>
     public bool EnablePmtud { get; init; } = true;
 
+    /// <summary>Announce this node on the local network as
+    /// <c>&lt;peer-id&gt;._pinhole._udp.local</c> (default false) so peers running
+    /// <see cref="PinholeNode.DiscoverLanPeersAsync"/> find it with no server and no
+    /// clipboard. The announcement carries the peer ID, static public key, NAT hint, and
+    /// local addresses — discovered sessions get the same key pinning as shared-string
+    /// ones. Off by default: announcing is a network-visible behavior the app should
+    /// choose. Failures to announce (no multicast in containers) never fail the bind.</summary>
+    public bool EnableLanDiscovery { get; init; }
+
     /// <summary>Capacity of the per-connection receive buffer (default 0 = off). With a
     /// positive capacity every received datagram is copied into a bounded queue that exists
     /// from handshake time, so <see cref="PinholeConnection.ReceiveAsync"/> can drain
