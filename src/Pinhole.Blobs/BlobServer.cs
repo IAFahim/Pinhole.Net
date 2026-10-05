@@ -30,7 +30,6 @@ public sealed class BlobServer : IAsyncDisposable
     private readonly BlobServeOptions _options;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _acceptLoop;
-    private BlobWire.Cipher? _cipher; // per-ticket; set at construction
 
     private BlobServer(PinholeNode node, BlobServeOptions options)
     {
@@ -107,7 +106,6 @@ public sealed class BlobServer : IAsyncDisposable
                 _name = root.DisplayName,
                 _psk = options.Encrypt ? BlobWire.Cipher.FreshKey() : null,
             };
-            server._cipher = BlobWire.Cipher.For(server._psk, root.Root);
             server._streams[BlobWire.StreamId(root.Root)] = root;
             foreach (Served entry in root.Entries)
             {
@@ -155,47 +153,96 @@ public sealed class BlobServer : IAsyncDisposable
     private async Task ServeConnectionAsync(PinholeConnection conn, CancellationToken ct)
     {
         var sendCounter = new Counter();
-        ulong recvCounter = 0; // per connection: every downloader gets a fresh replay window
+        ulong recvCounter = 0;   // per connection: every downloader gets a fresh replay window
+        ulong legacyRecv = 0;    // the refusal path's watermark — never serves, just refuses
+        BlobWire.Cipher? cipher = null;          // per connection: bound to the Hello's session id
+        byte[]? boundSession = null;
+        BlobWire.Cipher? legacy = _psk is null ? null : BlobWire.Cipher.ForLegacy(_psk, _root);
         var files = new Dictionary<ulong, FileStream>();
         try
         {
             while (!ct.IsCancellationRequested
-                && await conn.ReceiveAsync(ct).ConfigureAwait(false) is { } payload)
+            && await conn.ReceiveAsync(ct).ConfigureAwait(false) is { } payload)
+        {
+            BlobWire.Frame f;
+            if (_psk is null)
             {
-                if (!TryDecrypt(payload.Span, ref recvCounter, out byte[] plain)
-                    || !BlobWire.Frame.TryParse(plain, out BlobWire.Frame f))
+                // Plaintext serving: any Hello body is fine — there is no cipher to bind.
+                if (!BlobWire.Frame.TryParse(payload.Span, out f))
                 {
-                    continue; // garbage costs one datagram, same rule as the engine
-                }
-
-                switch (f.Type)
-                {
-                    case BlobWire.TypeHello:
-                        if (_streams.TryGetValue(f.Stream, out Served? served))
-                        {
-                            // Every Hello gets a Head: the downloader retries while its
-                            // first Head may have been lost on an unreliable path.
-                            await SendAsync(conn, BlobWire.Head(f.Stream, served.TotalBytes, served.TotalChunks), sendCounter).ConfigureAwait(false);
-                        }
-
-                        break;
-                    case BlobWire.TypeReq:
-                        if (_streams.TryGetValue(f.Stream, out Served? item))
-                        {
-                            await ServeRangeAsync(conn, item, f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
-                        }
-
-                        break;
-                    case BlobWire.TypeBye:
-                        if (files.Remove(f.Stream, out FileStream? closed))
-                        {
-                            await closed.DisposeAsync().ConfigureAwait(false);
-                        }
-
-                        break;
+                    continue;
                 }
             }
+            else
+            {
+                // The only plaintext an encrypting provider ever accepts is the Hello
+                // that presents — or retries — the connection's session id: it names
+                // the salt the cipher derives from, so it cannot itself be sealed.
+                // Everything else must decrypt under the session-bound cipher.
+                if (BlobWire.Frame.TryParse(payload.Span, out f)
+                    && f.Type == BlobWire.TypeHello
+                    && f.SessionId is not null)
+                {
+                    if (boundSession is null)
+                    {
+                        boundSession = f.SessionId;
+                        cipher = BlobWire.Cipher.For(_psk, _root, f.SessionId);
+                    }
+                    else if (!boundSession.AsSpan().SequenceEqual(f.SessionId))
+                    {
+                        continue; // a session swap mid-connection: confused or hostile, ignored
+                    }
+                }
+                else if (cipher is not null
+                    && cipher.TryOpen(fromProvider: false, payload.Span, recvCounter, out byte[] plain, out recvCounter)
+                    && BlobWire.Frame.TryParse(plain, out f))
+                {
+                }
+                else if (legacy is not null
+                    && legacy.TryOpen(fromProvider: false, payload.Span, legacyRecv, out byte[] legacyPlain, out legacyRecv)
+                    && BlobWire.Frame.TryParse(legacyPlain, out f))
+                {
+                    // A pre-2.0 downloader: it seals under the fixed per-ticket key, which
+                    // reused (key, nonce) pairs across connections. Refuse loudly with a
+                    // Bye it can read, never serve a byte under that construction.
+                    await SendSealedAsync(conn, legacy, BlobWire.Bye(f.Stream), sendCounter).ConfigureAwait(false);
+                    await conn.CloseAsync().ConfigureAwait(false);
+                    return;
+                }
+                else
+                {
+                    continue; // nothing decryptable: garbage costs one datagram
+                }
+            }
+
+            switch (f.Type)
+            {
+                case BlobWire.TypeHello:
+                    if (_streams.TryGetValue(f.Stream, out Served? served))
+                    {
+                        // Every Hello gets a Head: the downloader retries while its
+                        // first Head may have been lost on an unreliable path.
+                        await SendSealedAsync(conn, cipher, BlobWire.Head(f.Stream, served.TotalBytes, served.TotalChunks), sendCounter).ConfigureAwait(false);
+                    }
+
+                    break;
+                case BlobWire.TypeReq:
+                    if (_streams.TryGetValue(f.Stream, out Served? item))
+                    {
+                        await ServeRangeAsync(conn, cipher, item, f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
+                    }
+
+                    break;
+                case BlobWire.TypeBye:
+                    if (files.Remove(f.Stream, out FileStream? closed))
+                    {
+                        await closed.DisposeAsync().ConfigureAwait(false);
+                    }
+
+                    break;
+            }
         }
+    }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException)
         {
             // The downloader vanished mid-transfer; the next ticket holder starts clean.
@@ -209,24 +256,13 @@ public sealed class BlobServer : IAsyncDisposable
         }
     }
 
-    private bool TryDecrypt(ReadOnlySpan<byte> payload, ref ulong counter, out byte[] plain)
+    private Task SendSealedAsync(PinholeConnection conn, BlobWire.Cipher? cipher, byte[] plain, Counter counter)
     {
-        if (_cipher is null)
-        {
-            plain = payload.ToArray();
-            return true;
-        }
-
-        return _cipher.TryOpen(fromProvider: false, payload, counter, out plain, out counter);
-    }
-
-    private Task SendAsync(PinholeConnection conn, byte[] plain, Counter counter)
-    {
-        byte[] wire = _cipher is null ? plain : _cipher.Seal(asProvider: true, counter.Next(), plain);
+        byte[] wire = cipher is null ? plain : cipher.Seal(asProvider: true, counter.Next(), plain);
         return Task.Run(() => conn.Send(wire), _stop.Token);
     }
 
-    private async Task ServeRangeAsync(PinholeConnection conn, Served item, long start, int count, Dictionary<ulong, FileStream> files, Counter counter)
+    private async Task ServeRangeAsync(PinholeConnection conn, BlobWire.Cipher? cipher, Served item, long start, int count, Dictionary<ulong, FileStream> files, Counter counter)
     {
         long end = Math.Min(start + count, item.TotalChunks);
         for (long idx = start; idx < end; idx++)
@@ -238,7 +274,7 @@ public sealed class BlobServer : IAsyncDisposable
 
             byte[] data = await item.ReadChunkAsync(idx, files, _stop.Token).ConfigureAwait(false);
             CorruptChunk?.Invoke(idx, data);
-            await SendAsync(conn, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
+            await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
             ChunksServed++;
         }
     }

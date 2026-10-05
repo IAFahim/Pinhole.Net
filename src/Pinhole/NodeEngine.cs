@@ -47,7 +47,7 @@ internal sealed class ConnState
     public IPEndPoint? RelayRemote;          // peer's relayed address
     public volatile bool RelayReady;         // permission for RelayRemote exists on our allocation
     public readonly List<PinholeCandidate> PeerCandidates = new(); // guarded by engine gate
-    public bool SymmetricHint;               // peer advertised a symmetric NAT: skip the punch
+    public bool SymmetricHint;               // peer advertised a symmetric NAT: relay-first scheduling
     public uint RemoteToken;                 // learned from the peer's frames; staleness filter
     public bool RemoteTokenKnown;
     public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
@@ -122,6 +122,7 @@ internal sealed class NodeEngine : IDisposable
 
     private static readonly TimeSpan PunchPace = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan UpgradePace = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan SymmetricDirectTrickle = TimeSpan.FromSeconds(1);
     private const int MaxUpgradeAttempts = 120; // then passive: peer frames can still open direct
     private static readonly TimeSpan RelayRetryBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RecoverDebounce = TimeSpan.FromSeconds(1);
@@ -1056,6 +1057,7 @@ internal sealed class NodeEngine : IDisposable
     {
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, c.Dead.Token);
         int upgradeAttempts = 0;
+        DateTimeOffset lastDirectPunch = DateTimeOffset.MinValue;
         try
         {
             while (!stop.IsCancellationRequested && Volatile.Read(ref c.PunchGeneration) == gen)
@@ -1088,6 +1090,18 @@ internal sealed class NodeEngine : IDisposable
                     candidates = c.PeerCandidates.ToArray();
                 }
 
+                // A symmetric hint is scheduling advice, not a ban: relay candidates carry
+                // the session — per-destination mappings make public reflexives hopeless —
+                // while direct candidates keep a one-second trickle. LAN peers (no NAT in
+                // the way) and router-mapped endpoints (punch-anywhere by construction)
+                // still connect directly even when the hint says the NAT maps
+                // per-destination; the hopeless cases cost one datagram per second.
+                bool punchDirects = !c.SymmetricHint || DateTimeOffset.UtcNow - lastDirectPunch >= SymmetricDirectTrickle;
+                if (punchDirects)
+                {
+                    lastDirectPunch = DateTimeOffset.UtcNow;
+                }
+
                 foreach (PinholeCandidate candidate in candidates)
                 {
                     if (stop.IsCancellationRequested)
@@ -1095,7 +1109,7 @@ internal sealed class NodeEngine : IDisposable
                         return;
                     }
 
-                    if (c.SymmetricHint && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay))
+                    if (!punchDirects && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay))
                     {
                         continue;
                     }

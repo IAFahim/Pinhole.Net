@@ -20,6 +20,7 @@ public sealed class BlobsTests
         Relays = [],
         IrohRelayUrls = [],
         EnableNetworkWatch = false,
+        EnablePortMapping = false,
     };
 
     private static string TempDir()
@@ -300,6 +301,118 @@ public sealed class BlobsTests
     }
 
     [Fact]
+    public void Cipher_SessionIdBindsTheKey_TwoConnectionsNeverShareOne()
+    {
+        // Two connections on one ticket used to restart the same per-ticket key with the
+        // same counters — ChaCha20-Poly1305 (key, nonce) reuse across connections. The
+        // session id in each connection's first Hello must fork the key per connection.
+        byte[] psk = RandomNumberGenerator.GetBytes(32);
+        byte[] root = RandomNumberGenerator.GetBytes(32);
+        byte[] sidA = BlobWire.Cipher.FreshSessionId();
+        byte[] sidB = BlobWire.Cipher.FreshSessionId();
+
+        BlobWire.Cipher? providerA = BlobWire.Cipher.For(psk, root, sidA);
+        BlobWire.Cipher? downloaderA = BlobWire.Cipher.For(psk, root, sidA); // same connection, both ends
+        BlobWire.Cipher? connectionB = BlobWire.Cipher.For(psk, root, sidB);
+        Assert.NotNull(providerA);
+        Assert.NotNull(downloaderA);
+        Assert.NotNull(connectionB);
+
+        // Connection A's first provider frame (counter 1): its own far end opens it...
+        byte[] wireA = providerA!.Seal(asProvider: true, 1, "chunk-of-A"u8.ToArray());
+        Assert.True(downloaderA!.TryOpen(fromProvider: true, wireA, 0, out byte[] plain, out _));
+        Assert.Equal("chunk-of-A"u8.ToArray(), plain);
+
+        // ...connection B must not — same ticket, same role, same counter, different key.
+        Assert.False(connectionB!.TryOpen(fromProvider: true, wireA, 0, out _, out _),
+            "a second connection on the same ticket must not read the first one's frames");
+
+        // And B sealing at its own counter 1 is a distinct (key, nonce) pair, not a collision.
+        byte[] wireB = connectionB.Seal(asProvider: true, 1, "chunk-of-B"u8.ToArray());
+        Assert.False(providerA.TryOpen(fromProvider: true, wireB, 0, out _, out _));
+    }
+
+    [Fact]
+    public async Task SameTicket_SimultaneousDownloads_BothVerify()
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] data = RandomBytes(200_000);
+            string src = Path.Combine(dir, "shared.bin");
+            await File.WriteAllBytesAsync(src, data);
+
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+            byte[] expected = data;
+            BlobDownloadResult[] results = await Task.WhenAll(
+                Task.Run(() => BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out1"),
+                    options: new BlobDownloadOptions { NodeOptions = Offline() })),
+                Task.Run(() => BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out2"),
+                    options: new BlobDownloadOptions { NodeOptions = Offline() }))).WaitAsync(Timeout);
+
+            foreach (BlobDownloadResult result in results)
+            {
+                Assert.Equal(expected.Length, result.Bytes);
+            }
+
+            Assert.Equal(expected, await File.ReadAllBytesAsync(Path.Combine(dir, "out1", "shared.bin")));
+            Assert.Equal(expected, await File.ReadAllBytesAsync(Path.Combine(dir, "out2", "shared.bin")));
+            Assert.True(server.ConnectionsAccepted >= 2, "both downloads got their own connection");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyHello_EncryptedProvider_RefusesWithAReadableBye()
+    {
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "legacy.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(4096));
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+            BlobTicket ticket = server.Ticket;
+
+            // A pre-v2 downloader: it seals under the fixed per-ticket key and sends a
+            // Hello with an empty body. The provider must refuse loudly — a Bye the
+            // legacy peer can read — and hang up, never serving under the old construction.
+            await using var node = await PinholeNode.BindAsync(Offline() with { Listen = false, ReceiveBufferCapacity = 64 });
+            await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString);
+
+            var legacy = BlobWire.Cipher.ForLegacy(ticket.PreSharedKey!, ticket.Root);
+            ulong stream = BlobWire.StreamId(ticket.Root);
+            var legacyHello = new byte[9];
+            legacyHello[0] = BlobWire.TypeHello;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(legacyHello.AsSpan(1), stream);
+
+            var bye = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ulong recv = 0;
+            conn.Received += p =>
+            {
+                if (legacy.TryOpen(fromProvider: true, p, recv, out byte[] plain, out recv)
+                    && BlobWire.Frame.TryParse(plain, out BlobWire.Frame f)
+                    && f.Type == BlobWire.TypeBye)
+                {
+                    bye.TrySetResult(plain);
+                }
+            };
+
+            conn.Send(legacy.Seal(asProvider: false, 1, legacyHello));
+            await bye.Task.WaitAsync(Timeout); // refused fast, not a 20 s first-contact timeout
+
+            await TestPoll.UntilAsync(Timeout, () => conn.State == PinholeConnectionState.Closed);
+            Assert.Equal(0, server.ChunksServed); // nothing was served under the legacy key
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Ticket_Roundtrips_AndRejectsGarbage()
     {
         var ticket = new BlobTicket
@@ -350,7 +463,8 @@ public sealed class BlobsTests
     [Fact]
     public void Cipher_RejectsTamperingReplayAndRoleConfusion()
     {
-        var cipher = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32))!;
+        byte[] sessionId = BlobWire.Cipher.FreshSessionId();
+        var cipher = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), sessionId)!;
         byte[] plain = RandomNumberGenerator.GetBytes(200);
 
         byte[] wire = cipher.Seal(asProvider: true, 7, plain);
@@ -368,7 +482,7 @@ public sealed class BlobsTests
         byte[] fromDownloader = cipher.Seal(asProvider: false, 1, plain);
         Assert.False(cipher.TryOpen(fromProvider: true, fromDownloader, 0, out _, out _), "roles must not cross");
 
-        var otherKey = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32))!;
+        var otherKey = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), BlobWire.Cipher.FreshSessionId())!;
         Assert.False(otherKey.TryOpen(fromProvider: true, wire, 0, out _, out _), "tickets never share keys");
     }
 

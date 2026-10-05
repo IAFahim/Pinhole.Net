@@ -217,6 +217,154 @@ public class CryptoTests
         Assert.False(receiver.Open(frames[0], scratch, out _)); // replayed counter, refused
     }
 
+    [Fact]
+    public void FrameSealer_ForgedFarFutureCounter_IsRejectedWithoutPoisoningTheWindow()
+    {
+        // The token rides in the clear, so an on-path forger can shape frames with any
+        // counter it likes. A forged far-future counter must die on authentication
+        // alone: the replay window may advance only when a frame authenticates
+        // (RFC 4303 §3.4.3), or one forged packet starves every legitimate frame
+        // behind it for the rest of the epoch.
+        var sender = new FrameSealer(FixtureKeys(), iAmLo: true, sending: true);
+        var receiver = new FrameSealer(FixtureKeys(), iAmLo: false, sending: false);
+
+        byte[] Frame()
+        {
+            var f = new byte[13 + 8 + 4 + 16];
+            f[0] = 0x52;
+            sender.Seal(f.AsSpan(13), f.AsSpan(0, 13), [1, 2, 3, 4]);
+            return f;
+        }
+
+        byte[] scratch = new byte[64];
+        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 1
+
+        byte[] forged = Frame(); // counter 2 on the wire, claimed as 100
+        BinaryPrimitives.WriteUInt64LittleEndian(forged.AsSpan(13), 100);
+        Assert.False(receiver.Open(forged, scratch, out _));
+
+        Assert.True(receiver.Open(Frame(), scratch, out _), "a rejected forged counter must not starve the frames behind it");
+        Assert.True(receiver.Open(Frame(), scratch, out _));
+    }
+
+    [Fact]
+    public void FrameSealer_ForgedNextEpochCounter_IsRejectedWithoutRatchetingTheKey()
+    {
+        // The same forger one epoch ahead: the epoch ratchet may adopt the next epoch's
+        // key only when a frame sealed under it authenticates. Committing the ratchet
+        // on a forged counter would strand every legitimate frame still sealed under
+        // the previous epoch's key — a one-packet kill of the receive direction.
+        var keys = new SessionKeys
+        {
+            TranscriptHash = new byte[32],
+            LoToHiKey = RandomNumberGenerator.GetBytes(32),
+            HiToLoKey = RandomNumberGenerator.GetBytes(32),
+            LoToHiSalt = new byte[4],
+            HiToLoSalt = new byte[4],
+            LoConfirm = new byte[16],
+            HiConfirm = new byte[16],
+        };
+        var sender = new FrameSealer(keys, iAmLo: true, sending: true, epochFrames: 8);
+        var receiver = new FrameSealer(keys, iAmLo: false, sending: false, epochFrames: 8);
+
+        byte[] Frame()
+        {
+            var f = new byte[13 + 8 + 4 + 16];
+            f[0] = 0x52;
+            sender.Seal(f.AsSpan(13), f.AsSpan(0, 13), [1, 2, 3, 4]);
+            return f;
+        }
+
+        byte[] scratch = new byte[64];
+        for (int i = 0; i < 4; i++)
+        {
+            Assert.True(receiver.Open(Frame(), scratch, out _)); // counters 1..4, epoch 0
+        }
+
+        byte[] forged = Frame(); // counter 5 on the wire, claimed as 9 = epoch 1
+        BinaryPrimitives.WriteUInt64LittleEndian(forged.AsSpan(13), 9);
+        Assert.False(receiver.Open(forged, scratch, out _));
+
+        // Genuine epoch-0 frames still open: the key was not ratcheted by the forgery.
+        for (int i = 0; i < 4; i++)
+        {
+            Assert.True(receiver.Open(Frame(), scratch, out _), $"counter {5 + i} must open after the forged epoch jump");
+        }
+
+        // And the genuine epoch transition still ratchets, on an authenticated frame.
+        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 9, epoch 1
+        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 10
+    }
+
+    [Fact]
+    public void FrameSealer_ReorderAcrossEpochBoundary_StragglerStillOpens()
+    {
+        // UDP legitimately reorders. When the window crosses an epoch boundary, a
+        // straggler from the previous epoch is still inside the replay window and must
+        // open under the retained previous-epoch key.
+        var keys = new SessionKeys
+        {
+            TranscriptHash = new byte[32],
+            LoToHiKey = RandomNumberGenerator.GetBytes(32),
+            HiToLoKey = RandomNumberGenerator.GetBytes(32),
+            LoToHiSalt = new byte[4],
+            HiToLoSalt = new byte[4],
+            LoConfirm = new byte[16],
+            HiConfirm = new byte[16],
+        };
+        var sender = new FrameSealer(keys, iAmLo: true, sending: true, epochFrames: 8);
+        var receiver = new FrameSealer(keys, iAmLo: false, sending: false, epochFrames: 8);
+
+        var frames = new List<byte[]>();
+        for (int i = 0; i < 10; i++)
+        {
+            var f = new byte[13 + 8 + 4 + 16];
+            f[0] = 0x52;
+            sender.Seal(f.AsSpan(13), f.AsSpan(0, 13), [(byte)i, 0, 0, 0]);
+            frames.Add(f);
+        }
+
+        byte[] scratch = new byte[64];
+        Assert.True(receiver.Open(frames[0], scratch, out _)); // epoch 0
+        Assert.True(receiver.Open(frames[1], scratch, out _));
+        Assert.True(receiver.Open(frames[8], scratch, out _)); // epoch 1: ratchet commits
+        Assert.True(receiver.Open(frames[9], scratch, out _));
+        for (int i = 2; i < 8; i++)
+        {
+            Assert.True(receiver.Open(frames[i], scratch, out _),
+                $"straggler counter {i + 1} from the previous epoch must open under the retained key");
+        }
+    }
+
+    [Fact]
+    public async Task FrameSealer_DisposeDuringOpens_RefusesQuietlyNeverThrows()
+    {
+        var sender = new FrameSealer(FixtureKeys(), iAmLo: true, sending: true);
+        var receiver = new FrameSealer(FixtureKeys(), iAmLo: false, sending: false);
+
+        var frames = new List<byte[]>();
+        for (int i = 0; i < 500; i++)
+        {
+            var f = new byte[13 + 8 + 4 + 16];
+            f[0] = 0x52;
+            sender.Seal(f.AsSpan(13), f.AsSpan(0, 13), [1, 2, 3, 4]);
+            frames.Add(f);
+        }
+
+        var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            byte[] scratch = new byte[64];
+            foreach (byte[] f in frames)
+            {
+                receiver.Open(f, scratch, out _);
+            }
+        })).ToArray();
+        receiver.Dispose(); // races the opens; nothing may throw
+        await Task.WhenAll(tasks);
+
+        Assert.False(receiver.Open(frames[0], new byte[64], out _)); // refused, not thrown
+    }
+
     // ---------------------------------------------------------------- end to end
 
     [Fact]
@@ -544,9 +692,10 @@ public class CryptoTests
 
         // The genuine frame is delivered exactly once. Its exact replay is refused by the
         // replay window, and a fresh frame whose tag was corrupted in flight is refused by
-        // authentication. (A flipped clone that arrives BEFORE the original also kills the
-        // original — a burned counter is burned, exactly like IPsec — so the genuine frame
-        // goes first, as a real in-flight bit flip replaces a frame rather than duplicating it.)
+        // authentication — and only refused: a corrupted tag consumes nothing, so the
+        // ordering here (genuine first) is just determinism, not a workaround. The
+        // corrupted-clone-before-genuine order is covered by
+        // WireOracle_CorruptedCloneDoesNotBurnTheCounter.
         byte[] real = oracle.SealFrame(0x52, "genuine"u8);
         byte[] replay = (byte[])real.Clone();
         byte[] forged = oracle.SealFrame(0x52, "forged"u8);
@@ -566,6 +715,36 @@ public class CryptoTests
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 2);
         Assert.Equal(1, conn.Stats.DatagramsReceived); // the replay did not double-deliver
+    }
+
+    [Fact]
+    public async Task WireOracle_CorruptedCloneDoesNotBurnTheCounter()
+    {
+        // A frame corrupted in flight carries the genuine counter. The receiver must
+        // refuse the corrupted clone on its tag and still deliver the genuine frame
+        // that follows: the replay window advances only on authenticated frames
+        // (RFC 4303 §3.4.3), so the clone consumes nothing.
+        await using PinholeNode node = await PinholeNode.BindAsync(Opts(o => o with { ConnectTimeout = TimeSpan.FromSeconds(5) }));
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
+        await oracle.ShakeHandsAsync(node);
+        PinholeConnection conn = await dial;
+
+        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        conn.Received += p => got.TrySetResult(p.ToArray());
+
+        var nodeEp = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
+        byte[] genuine = oracle.SealFrame(0x52, "genuine"u8);
+        byte[] corrupted = (byte[])genuine.Clone();
+        corrupted[^1] ^= 0xFF;
+        oracle.Sock.SendTo(corrupted, nodeEp); // the clone lands first
+        oracle.Sock.SendTo(genuine, nodeEp);
+
+        Assert.Equal("genuine"u8.ToArray(), await got.Task.WaitAsync(Timeout));
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 1);
+        Assert.Equal(1, conn.Stats.DatagramsReceived); // delivered once, the clone refused
     }
 
     [Fact]

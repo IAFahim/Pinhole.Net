@@ -293,9 +293,11 @@ Console.WriteLine($"{s.DatagramsSent} sent, {s.DatagramsReceived} received, " +
 The node classifies its own NAT from its ordinary bind-time STUN probes: when two or
 more servers observe the same mapping the NAT is a cone (the reflexive candidate is
 punchable); when they observe different mappings it is symmetric, and the hint is
-embedded in future connection strings so dialers skip the hopeless punch and go
-straight to relay. The classification repeats on every STUN refresh, so a network
-change is picked up without re-dialing, and a manual override always wins:
+embedded in future connection strings so dialers go relay-first — public reflexive
+punching is hopeless per-destination, but LAN and router-mapped candidates keep a
+one-second trickle and still connect directly. The classification repeats on every
+STUN refresh, so a network change is picked up without re-dialing, and a manual
+override always wins:
 
 ```csharp
 Console.WriteLine(node.NatHint);   // Unknown / Cone / Symmetric — already in the string
@@ -417,7 +419,7 @@ carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 |---|---|---|---|
 | Any (IPv6) | Any (IPv6) | Yes | Direct IPv6 |
 | Cone/EIM NAT | Cone/EIM NAT | Yes — simultaneous open, both sides punch at each other | Direct UDP |
-| Cone NAT | Symmetric NAT | Skipped — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` (now derived automatically from the STUN observations) says so, so the dialer doesn't waste the attempt. Exception: a peer whose router granted a port mapping advertises a punch-anywhere endpoint and honestly hints cone | Relay (unless the peer holds a router mapping) |
+| Cone NAT | Symmetric NAT | Demoted to a one-second trickle — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` (derived automatically from the STUN observations) says so, so the dialer goes relay-first; LAN and router-mapped candidates keep the trickle and still connect directly when they exist | Relay (unless the peer holds a router mapping or shares your LAN) |
 | Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
 | Symmetric NAT | Symmetric NAT | No | Relay |
 | UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
@@ -445,7 +447,7 @@ universal discovery artifact everywhere else.
 | A relay dies or is unreachable | Best-effort: the remaining configured relays carry the fallback; the dropped relay reconnects forever with capped exponential backoff (~1 s doubling to 30 s, ±10% jitter, reset on success — no synchronized retry storm); direct paths never notice |
 | A datagram is lost | Nothing. It's an unreliable datagram protocol — retransmit at the app layer if you care |
 | A machine in the middle substitutes the answering key, or strips the handshake | The dial dies loudly (`HandshakeFailed` / `ConnectAsync` faults with the reason) — there is no downgrade window to fall into |
-| A tampered, replayed, or forged frame arrives | Dropped silently and counted in `FramesRejected`; a burned counter is burned (IPsec semantics), and steady zero is the healthy number |
+| A tampered, replayed, or forged frame arrives | Dropped silently and counted in `FramesRejected`; replay-window state advances only on authenticated frames (RFC 4303 §3.4.3), so a forged counter — however far future — starves nothing, and steady zero is the healthy number |
 | The peer closes (`CloseAsync`) | `Bye` frame, both sides end up `Closed`; `Closed` tasks complete |
 
 ## The libraries

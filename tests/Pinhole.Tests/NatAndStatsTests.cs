@@ -51,8 +51,11 @@ public sealed class NatDetectorTests
     }
 
     [Fact]
-    public async Task SymmetricHint_DialerSkipsHopelessPunch()
+    public async Task SymmetricHint_ReachableDirectCandidateStillConnects()
     {
+        // The symmetric hint is scheduling advice, not a ban: a LAN peer (private
+        // address, no NAT in the way) must still connect directly even when the string
+        // says the publisher's NAT maps per-destination.
         await using PinholeNode a = await PinholeNode.BindAsync(new PinholeOptions
         {
             StunServers = [],
@@ -70,11 +73,83 @@ public sealed class NatDetectorTests
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
-        // Direct candidates exist and would even work on loopback — but the symmetric
-        // hint says punching at them is hopeless and there is no relay to fall back to.
-        string doomed = new ConnectionString(
+        Task<PinholeConnection> accept = a.AcceptAsync();
+        string lan = new ConnectionString(
             a.PeerId,
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, a.LocalPort))],
+            NatHint.Symmetric,
+            staticKey: a.StaticPublicKey).ToString();
+
+        await using PinholeConnection atB = await b.ConnectAsync(lan).WaitAsync(Timeout);
+        await using PinholeConnection atA = await accept.WaitAsync(Timeout);
+
+        Assert.Equal(PinholeConnectionState.Open, atB.State);
+        Assert.Equal(PathKind.Direct, atB.Path.Kind);
+    }
+
+    [Fact]
+    public async Task SymmetricHint_ReflexiveMappingStillConnects()
+    {
+        // The same for a kind-2 candidate — on a real network a router port mapping
+        // (PCP/NAT-PMP/UPnP) is advertised exactly this way, punchable from anywhere
+        // even behind a symmetric NAT, so the hint must not suppress it.
+        await using PinholeNode a = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [],
+            Relays = [],
+            IrohRelayUrls = [],
+            ConnectTimeout = TimeSpan.FromSeconds(2),
+            EnableNetworkWatch = false, EnablePortMapping = false,
+        });
+        await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [],
+            Relays = [],
+            IrohRelayUrls = [],
+            ConnectTimeout = TimeSpan.FromSeconds(2),
+            EnableNetworkWatch = false, EnablePortMapping = false,
+        });
+
+        Task<PinholeConnection> accept = a.AcceptAsync();
+        string mapped = new ConnectionString(
+            a.PeerId,
+            [new PinholeCandidate(CandidateKind.Reflexive, new IPEndPoint(IPAddress.Loopback, a.LocalPort))],
+            NatHint.Symmetric,
+            staticKey: a.StaticPublicKey).ToString();
+
+        await using PinholeConnection atB = await b.ConnectAsync(mapped).WaitAsync(Timeout);
+        await using PinholeConnection atA = await accept.WaitAsync(Timeout);
+
+        Assert.Equal(PinholeConnectionState.Open, atB.State);
+        Assert.Equal(PathKind.Direct, atB.Path.Kind);
+    }
+
+    [Fact]
+    public async Task SymmetricHint_NothingReachable_StopsWithinBudget()
+    {
+        // With the trickle punching instead of the blanket ban, the dial must still
+        // give up on its ConnectTimeout budget when nothing is reachable: no relay
+        // fallback and a direct candidate that will never answer.
+        await using PinholeNode a = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [],
+            Relays = [],
+            IrohRelayUrls = [],
+            ConnectTimeout = TimeSpan.FromSeconds(2),
+            EnableNetworkWatch = false, EnablePortMapping = false,
+        });
+        await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [],
+            Relays = [],
+            IrohRelayUrls = [],
+            ConnectTimeout = TimeSpan.FromSeconds(2),
+            EnableNetworkWatch = false, EnablePortMapping = false,
+        });
+
+        string doomed = new ConnectionString(
+            a.PeerId,
+            [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Parse("192.0.2.10"), 9999))],
             NatHint.Symmetric,
             staticKey: a.StaticPublicKey).ToString();
 

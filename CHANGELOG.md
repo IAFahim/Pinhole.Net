@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.7.0 — authenticate before you commit
+
+Three correctness fixes from the source review (#19). No public API changes; one
+wire change (blobs v2, with loud compatibility behavior).
+
+### Sealed frames: state commits only on authenticated frames
+
+`FrameSealer.Open` used to advance the replay window (and the epoch ratchet) before
+the AES-GCM tag was verified, and never rolled back. Since the per-connection token
+rides the wire in the clear, an on-path forger could present any counter it liked:
+one forged far-future counter starved every legitimate frame behind it for up to 2^28
+frames, and one forged next-epoch counter ratcheted the receive key forward,
+stranding the old epoch entirely — a one-packet kill of the receive direction. The
+1.6.0 claim that this was "exactly like IPsec" was backwards: RFC 4303 §3.4.3 marks
+a sequence number only after its ICV verifies. Now the window checks eligibility
+without mutating, authenticates against a candidate key, and commits replay and key
+state only on success; the previous epoch's cipher is retained for the replay window
+so frames reordered across an epoch boundary still open; and disposal is safe under
+concurrent receives (everything, decryption included, runs under the direction lock).
+Regression tests cover forged far-future counters, forged epoch jumps, reorder across
+the boundary, corrupted-clone-before-genuine at the wire level, and disposal races.
+
+### Blobs: per-connection keys (wire v2)
+
+The blob cipher was derived once per ticket (`HKDF(psk, root)`), and every connection
+restarted its frame counters at 1 — so simultaneous downloads, reconnects, and
+resumed downloads of one ticket re-used ChaCha20-Poly1305 (key, nonce) pairs across
+connections, potentially over different plaintexts. Wire v2: the downloader's first
+Hello carries a fresh 32-byte session id (plaintext by design — it names the salt,
+and only the PSK turns it into keys) and both sides fork the connection's cipher
+through it (`HKDF(psk, root ‖ sessionId, "pinhole-blobs-v2")`). A v2 provider
+recognizes a pre-2.0 downloader's first frame under the old fixed key and refuses it
+with a Bye that key can read — the legacy derivation serves that refusal only. Tests
+prove two connections on one ticket never read each other's frames, that simultaneous
+downloads of one ticket both verify, and that the legacy refusal is fast and serves
+nothing.
+
+### Symmetric-NAT hint: scheduling, not suppression
+
+`PunchLoop` dropped every non-relay candidate when the peer's string hinted a
+symmetric NAT — which also killed the candidates that stay reachable through one:
+same-LAN peers (no NAT in the way) and router-mapped endpoints (punch-anywhere by
+construction). The hint now demotes direct candidates to a one-second trickle while
+relay candidates keep full pace: LAN and mapped candidates still connect directly,
+the truly hopeless public reflexives cost one datagram per second, and the
+`ConnectTimeout` budget still bounds the dial. Tests cover direct and reflexive
+candidates connecting under a symmetric hint and the budget timeout with nothing
+reachable.
+
 ## 1.6.0 — the non-goals, demolished
 
 Four things this library said it would never do, done: wire encryption, path-MTU

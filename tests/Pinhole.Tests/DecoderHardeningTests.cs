@@ -98,7 +98,7 @@ public sealed class DecoderHardeningTests
         ulong stream = 0x0102030405060708;
         byte[][] frames =
         [
-            BlobWire.Hello(stream),
+            BlobWire.Hello(stream, RandomNumberGenerator.GetBytes(BlobWire.SessionIdLength)),
             BlobWire.Head(stream, 123_456, 121),
             BlobWire.Request(stream, 7, 64),
             BlobWire.Chunk(stream, 9, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(1024)),

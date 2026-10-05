@@ -71,7 +71,7 @@ connection (directory downloads).
 
 | Type | Body |
 |---|---|
-| `1` Hello | empty — "announce the head for this stream"; answered with Head every time, so a lost first Head costs one retransmit |
+| `1` Hello | `sessionId[32]` — a fresh random id per connection; the frame rides **plaintext** (it names the salt the cipher derives from, so it cannot be sealed under it; the id is a salt, not a secret — only the PSK turns it into keys). Answered with Head every time, so a lost first Head costs one retransmit. An empty body is the pre-2.0 shape, kept parseable only so an encrypting provider can refuse it (below) |
 | `2` Head | `totalBytes i64 LE`, `totalChunks i64 LE` |
 | `3` Req | `startChunk i64 LE`, `count u16 LE` (1..64) |
 | `4` Chunk | `chunkIndex i64 LE`, `cv[32]`, `data[≤1024]` |
@@ -105,23 +105,40 @@ are rejected, so a hostile manifest cannot write outside the destination directo
 
 ## Encryption
 
-When the ticket carries a PSK (the default), every frame in both directions is sealed
-with ChaCha20-Poly1305 under `HKDF-SHA256(psk, salt = content root, info =
-"pinhole-blobs-v1")` — two tickets never share a stream cipher even when a caller
-reuses a key. Wire form: `[counter u64 LE][ciphertext][tag 16]`. The 12-byte nonce is
+When the ticket carries a PSK (the default), every frame except the Hello is sealed in
+both directions with ChaCha20-Poly1305 under `HKDF-SHA256(psk, salt = content root ‖
+sessionId, info = "pinhole-blobs-v2")` — the connection's cipher is forked per
+connection by the downloader's Hello-borne session id, so two tickets never share a
+stream cipher even when a caller reuses a key, and **two connections sharing one
+ticket never share a cipher either**. That is what makes per-connection counters
+restarting at 1 safe: without the fork (the pre-2.0 wire), simultaneous, reconnected,
+and resumed downloads of one ticket re-used (key, nonce) pairs across connections.
+Wire form: `[counter u64 LE][ciphertext][tag 16]`. The 12-byte nonce is
 `[role u8][counter u64 LE][zero × 3]` where role separates provider (`1`) from
 downloader (`0`) — reflected frames cannot decrypt.
 
-The counter is per-connection and per-direction, monotonic, shared across all streams on
-the connection (directory downloads move between streams; a per-stream counter would
-look like a replay). Receivers reject `counter ≤ max seen` outright: the ARQ layer
-tolerates loss, not lies — a replayer can at most duplicate a frame the sink already
-de-duplicates, and a tag failure drops the frame silently, costing the sender one
-retransmit cycle. The counter is in the clear (needed to build the nonce) and reveals
-only rough progress. Replay safety and integrity hold even against the relay itself.
+The counter is per-connection and per-direction, monotonic, shared across all streams
+on the connection (directory downloads move between streams; a per-stream counter
+would look like a replay). Receivers reject `counter ≤ max seen` outright: the ARQ
+layer tolerates loss, not lies — a replayer can at most duplicate a frame the sink
+already de-duplicates, and a tag failure drops the frame silently, costing the sender
+one retransmit cycle. The counter is in the clear (needed to build the nonce) and
+reveals only rough progress. Replay safety and integrity hold even against the relay
+itself.
 
 With `Encrypt = false` (trusted high-speed LANs) frames go out as plaintext — the
 verification story is unchanged, only confidentiality is given up.
+
+### Compatibility (wire v2)
+
+- A v2 provider **refuses a pre-2.0 downloader loudly**: the first frame that opens
+  under the old fixed per-ticket key (`pinhole-blobs-v1`) is answered with a Bye that
+  key can read, and the connection is closed — the legacy key derivation is retained
+  for that refusal only and never serves a byte.
+- A pre-2.0 provider cannot parse the v2 Hello, so a v2 downloader against one fails
+  with the ordinary first-contact timeout — upgrade both sides.
+- Plaintext serving (`Encrypt = false`) accepts any Hello body: with no cipher there
+  is nothing to fork.
 
 ## Resume
 

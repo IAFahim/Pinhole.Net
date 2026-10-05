@@ -53,6 +53,12 @@ public static class BlobClient
         await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
         await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString).ConfigureAwait(false);
 
+        // One random session id per connection: it rides the first Hello and salts the
+        // connection's cipher, so simultaneous, reconnected, and resumed downloads of the
+        // same ticket never share a (key, nonce) pair.
+        byte[] sessionId = BlobWire.Cipher.FreshSessionId();
+        BlobWire.Cipher? cipher = BlobWire.Cipher.For(ticket.PreSharedKey, ticket.Root, sessionId);
+
         if (ticket.Kind == BlobKind.File)
         {
             string fileName = string.IsNullOrWhiteSpace(ticket.Name) ? "pinhole-download" : ticket.Name;
@@ -60,8 +66,8 @@ public static class BlobClient
             var sink = new FileSink(target, ticket.Root);
             var fileSend = new SendCounter();
             StreamDownloader? downloader = null;
-            downloader = new StreamDownloader(conn, ticket, sink,
-                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, ticket.Root);
+            downloader = new StreamDownloader(conn, sink,
+                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, cipher, sessionId, ticket.Root);
             long bytes;
             try
             {
@@ -78,7 +84,7 @@ public static class BlobClient
 
         var send = new SendCounter();
         var manifestSink = new MemorySink();
-        var manifestDownloader = new StreamDownloader(conn, ticket, manifestSink, _ => { }, send, ticket.Root);
+        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, cipher, sessionId, ticket.Root);
         try
         {
             await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
@@ -96,7 +102,7 @@ public static class BlobClient
         for (int i = 0; i < entries.Count; i++)
         {
             var sink = new FileSink(SafeJoin(rootDir, entries[i].Path), entries[i].Root);
-            StreamDownloader entryDownloader = new(conn, ticket, sink, _ => { }, send, entries[i].Root, entries[i].Root);
+            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, cipher, sessionId, entries[i].Root, entries[i].Root);
             long bytes;
             try
             {
@@ -140,10 +146,10 @@ public static class BlobClient
         private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(30);
 
         private readonly PinholeConnection _conn;
-        private readonly BlobTicket _ticket;
         private readonly Sink _sink;
         private readonly Action<long> _onVerified;
         private readonly BlobWire.Cipher? _cipher;
+        private readonly byte[] _sessionId;
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly Dictionary<long, long> _requestedAt = new();
@@ -159,17 +165,17 @@ public static class BlobClient
 
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
-        public StreamDownloader(PinholeConnection conn, BlobTicket ticket, Sink sink, Action<long> onVerified,
-            SendCounter send, byte[] expectedRoot, byte[]? streamRoot = null)
+        public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
+            BlobWire.Cipher? cipher, byte[] sessionId, byte[] expectedRoot, byte[]? streamRoot = null)
         {
             _conn = conn;
-            _ticket = ticket;
             _sink = sink;
             _onVerified = onVerified;
             _send = send;
+            _cipher = cipher;
+            _sessionId = sessionId;
             _expectedRoot = expectedRoot;
-            _cipher = BlobWire.Cipher.For(ticket.PreSharedKey, ticket.Root);
-            _stream = BlobWire.StreamId(streamRoot ?? ticket.Root);
+            _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
         }
 
         public async Task<long> RunAsync(CancellationToken ct)
@@ -254,7 +260,10 @@ public static class BlobClient
                         throw new TimeoutException("the provider did not answer the ticket");
                     }
 
-                    Send(BlobWire.Hello(_stream));
+                    // The Hello rides plaintext by design: it names the session id the
+                    // cipher derives from, so it cannot itself be sealed under it. The
+                    // session id is a salt, not a secret — only the PSK turns it into keys.
+                    _conn.Send(BlobWire.Hello(_stream, _sessionId));
                 }
                 else
                 {

@@ -113,9 +113,13 @@ After the handshake every frame type (Data, Ping, Pong, Announce, Bye) is:
 - Nonce = direction's salt (4 B) ‖ counter (8 B). Counters start at 1 and strictly
   increase, so nonces never repeat. AAD = header + token + counter (21 B) — frame
   type, sender, token, and ordering are all tamper-evident.
-- The receiver keeps a 64-frame IPsec-style replay window. A frame that fails
-  authentication still consumes its counter — a burned counter is burned, exactly
-  like IPsec — so replays and in-flight bit flips die without side effects.
+- The receiver keeps a 64-frame IPsec-style replay window — but a sequence number is
+  marked only after the frame authenticates (RFC 4303 §3.4.3), so a forged frame with
+  any counter it likes (the token rides the wire in the clear) starves nothing behind
+  it. The same rule guards the epoch ratchet: the next epoch's key is derived as a
+  candidate and adopted only when a frame sealed under it authenticates, and the
+  previous epoch's cipher is retained for the window, so a frame reordered across an
+  epoch boundary still opens. Replays and in-flight bit flips die without side effects.
 - Key ratchet: every 2^28 frames per direction the key chains forward through
   HKDF-SHA256 (info `"pinhole-rekey-v1"`, salt = transcript). Both sides step
   identically with no wire negotiation.
@@ -155,9 +159,12 @@ cache-flush bit on unique records.
 ## Connection lifecycle
 
 1. **Punch.** The dialer sends `Punc` to every candidate (direct, reflexive, relay)
-   every 200 ms. A symmetric-NAT hint in the connection string suppresses the
-   hopeless direct candidates. Both sides doing this simultaneously is the
-   hole-punch: each NAT sees a permitted outbound flow before the inbound packet.
+   every 200 ms. A symmetric-NAT hint in the connection string demotes direct
+   candidates to a one-second trickle (relay candidates keep full pace): LAN peers
+   and router-mapped endpoints remain directly punchable, while the per-destination
+   mappings that make public reflexives hopeless cost one datagram per second. Both
+   sides doing this simultaneously is the hole-punch: each NAT sees a permitted
+   outbound flow before the inbound packet.
 2. **Handshake.** The responder answers `Pack`; each side now holds the other's
    token. Either path confirms: direct ⇒ `Open`, relayed ⇒ `Degraded` (relay works,
    direct upgrade continues at 1 s pacing for up to 120 attempts, then passively).
@@ -205,7 +212,8 @@ non-strict base64url.
 `natHint` is derived automatically (a manual `SetNatHint` override wins): when two
 or more configured STUN servers answer, identical observed mappings classify a cone
 NAT (endpoint-independent mapping — the reflexive candidate is punchable) and
-divergent ones a symmetric NAT (per-destination mapping — dialers skip the punch and
+divergent ones a symmetric NAT (per-destination mapping — dialers go relay-first with
+a direct trickle and
 go straight to relay). A pass where fewer than two servers answer never overwrites
 an earlier, better-informed classification.
 

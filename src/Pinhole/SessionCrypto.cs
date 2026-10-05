@@ -198,7 +198,8 @@ internal static class KeySchedule
 /// <summary>One direction of an established session: a strictly-increasing frame counter
 /// (so AES-GCM nonces never repeat), an epoch ratchet that chains the key forward every
 /// 2^28 frames, and — on the receive side — an IPsec-style replay window. Thread-safe:
-/// sends may come from any app thread, receives from any transport thread.</summary>
+/// sends may come from any app thread, receives from any transport thread, disposal from
+/// any of them; the direction lock serializes all three.</summary>
 internal sealed class FrameSealer : IDisposable
 {
     private const int DefaultEpochFrames = 1 << 28;
@@ -211,7 +212,9 @@ internal sealed class FrameSealer : IDisposable
 
     private byte[] _key;
     private AesGcm? _aes;
+    private AesGcm? _prevAes; // the previous epoch's cipher: stragglers still inside the replay window
     private uint _epoch;
+    private bool _disposed;
 
     // Send side: the next counter to seal with. Receive side: the highest accepted and its
     // 64-frame window bitmap. A sealer is one direction only, so the halves never mix.
@@ -219,6 +222,13 @@ internal sealed class FrameSealer : IDisposable
     private ulong _highest;
     private ulong _bitmap;
 
+    /// <summary>Builds one direction of a session.</summary>
+    /// <param name="keys">the handshake's derived session keys.</param>
+    /// <param name="iAmLo">whether this side is the "lo" role (smaller peer ID).</param>
+    /// <param name="sending">true for the send direction, false for the receive direction.</param>
+    /// <param name="epochFrames">frames per epoch. Replay retention covers one epoch back,
+    /// which holds exactly while this value is ≥ the 64-frame window — true of the
+    /// production default (2^28) by six orders of magnitude.</param>
     public FrameSealer(SessionKeys keys, bool iAmLo, bool sending, int epochFrames = DefaultEpochFrames)
     {
         _transcriptHash = keys.TranscriptHash;
@@ -237,6 +247,11 @@ internal sealed class FrameSealer : IDisposable
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(FrameSealer));
+            }
+
             ulong counter = _nextCounter++;
             uint epoch = (uint)((counter - 1) / (ulong)_epochFrames);
             if (_aes is null)
@@ -274,7 +289,14 @@ internal sealed class FrameSealer : IDisposable
     /// <summary>Opens one sealed frame. <paramref name="frame"/> is the full wire frame
     /// ([header][token][counter][ciphertext||tag]); the plaintext is written to
     /// <paramref name="plaintext"/> and its length returned. Returns false on tampering,
-    /// replay, or an epoch too far ahead — each costs the frame, nothing more.</summary>
+    /// replay, an unreachable epoch, or disposal — each costs the frame, nothing more.
+    /// The frame is authenticated <em>before</em> any state moves (RFC 4303 §3.4.3: the
+    /// anti-replay window marks a sequence number only once its packet has
+    /// authenticated): the token rides the wire in the clear, so a forger can present any
+    /// counter it likes, and a window watermark or epoch ratchet committed on an
+    /// unauthenticated counter would let one forged packet starve every legitimate frame
+    /// behind it. The previous epoch's cipher is retained for the replay window, so a
+    /// frame reordered across an epoch boundary still opens under the key that sealed it.</summary>
     public bool Open(ReadOnlySpan<byte> frame, Span<byte> plaintext, out int plaintextLength)
     {
         plaintextLength = 0;
@@ -291,16 +313,25 @@ internal sealed class FrameSealer : IDisposable
         }
 
         uint epoch = (uint)((counter - 1) / (ulong)_epochFrames);
-        AesGcm aes;
         lock (_gate)
         {
-            if (!ReplayAccept(counter))
+            if (_disposed)
             {
                 return false;
             }
 
-            // The 64-deep replay window cannot straddle more than two adjacent epochs, so a
-            // frame from anything beyond _epoch+1 is bogus regardless of its tag.
+            if (!ReplayEligible(counter))
+            {
+                return false; // stale replay or duplicate: no authentication needed to see that
+            }
+
+            // Pick the candidate cipher without committing anything: the current epoch's,
+            // the previous epoch's (a legitimately reordered straggler inside the window),
+            // or a derived candidate for the next epoch — adopted only if it authenticates.
+            // Anything further away is unreachable: the 64-frame window cannot straddle
+            // more than two adjacent epochs.
+            AesGcm aes;
+            byte[]? candidateKey = null;
             if (epoch == _epoch)
             {
                 _aes ??= new AesGcm(_key, CryptoWire.TagLength);
@@ -308,72 +339,113 @@ internal sealed class FrameSealer : IDisposable
             }
             else if (epoch == _epoch + 1)
             {
-                _key = KeySchedule.Rekey(_key, _transcriptHash);
-                _epoch = epoch;
-                _aes?.Dispose();
-                aes = _aes = new AesGcm(_key, CryptoWire.TagLength);
+                candidateKey = KeySchedule.Rekey(_key, _transcriptHash);
+                aes = new AesGcm(candidateKey, CryptoWire.TagLength);
+            }
+            else if (epoch + 1 == _epoch && _prevAes is not null)
+            {
+                aes = _prevAes;
             }
             else
             {
                 return false;
             }
-        }
 
-        ReadOnlySpan<byte> ciphertext = sealedBody[CryptoWire.CounterLength..];
-        int plainLen = ciphertext.Length - CryptoWire.TagLength;
-        if (plaintext.Length < plainLen)
-        {
-            return false; // caller-provided destination cannot hold this frame
-        }
+            ReadOnlySpan<byte> ciphertext = sealedBody[CryptoWire.CounterLength..];
+            int plainLen = ciphertext.Length - CryptoWire.TagLength;
+            if (plaintext.Length < plainLen)
+            {
+                if (candidateKey is not null)
+                {
+                    aes.Dispose();
+                }
 
-        Span<byte> nonce = stackalloc byte[12];
-        _nonceSalt.CopyTo(nonce);
-        BinaryPrimitives.WriteUInt64LittleEndian(nonce[4..], counter);
-        try
-        {
-            aes.Decrypt(nonce, ciphertext[..^CryptoWire.TagLength], ciphertext[^CryptoWire.TagLength..], plaintext[..plainLen],
-                frame[..(CryptoWire.HeaderLength + CryptoWire.TokenLength + CryptoWire.CounterLength)]);
-        }
-        catch (CryptographicException)
-        {
-            return false; // tag mismatch: forged or corrupted in flight
-        }
+                return false; // caller-provided destination cannot hold this frame
+            }
 
-        plaintextLength = plainLen;
-        return true;
+            Span<byte> nonce = stackalloc byte[12];
+            _nonceSalt.CopyTo(nonce);
+            BinaryPrimitives.WriteUInt64LittleEndian(nonce[4..], counter);
+            bool opened;
+            try
+            {
+                aes.Decrypt(nonce, ciphertext[..^CryptoWire.TagLength], ciphertext[^CryptoWire.TagLength..], plaintext[..plainLen],
+                    frame[..(CryptoWire.HeaderLength + CryptoWire.TokenLength + CryptoWire.CounterLength)]);
+                opened = true;
+            }
+            catch (CryptographicException)
+            {
+                opened = false; // forged or corrupted in flight: no counter burned, no key adopted
+            }
+
+            if (!opened)
+            {
+                if (candidateKey is not null)
+                {
+                    aes.Dispose(); // the unadopted next-epoch candidate dies with the frame
+                }
+
+                return false;
+            }
+
+            // Authenticated: now, and only now, the frame's state may commit.
+            CommitReplay(counter);
+            if (candidateKey is not null)
+            {
+                _prevAes?.Dispose();
+                _prevAes = _aes; // retained until the window can no longer reach the old epoch
+                _aes = aes;
+                _key = candidateKey;
+                _epoch = epoch;
+            }
+
+            plaintextLength = plainLen;
+            return true;
+        }
     }
 
     public void Dispose()
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
             _aes?.Dispose();
+            _prevAes?.Dispose();
         }
     }
 
-    private bool ReplayAccept(ulong counter)
+    /// <summary>Pure eligibility check — decides nothing, mutates nothing. A frame is
+    /// eligible when it extends the window or lands on an unmarked slot inside it.</summary>
+    private bool ReplayEligible(ulong counter)
+    {
+        if (counter > _highest)
+        {
+            return true;
+        }
+
+        ulong delta = _highest - counter;
+        return delta < Window && (_bitmap >> (int)delta & 1) == 0;
+    }
+
+    /// <summary>Marks an authenticated frame in the window. Called only after the GCM tag
+    /// has verified, exactly like RFC 4303 marks a sequence number after its ICV passes.</summary>
+    private void CommitReplay(ulong counter)
     {
         if (counter > _highest)
         {
             ulong shift = counter - _highest;
             _bitmap = shift >= Window ? 1 : (_bitmap << (int)shift) | 1;
             _highest = counter;
-            return true;
         }
-
-        ulong delta = _highest - counter;
-        if (delta >= Window)
+        else
         {
-            return false; // older than the window: a stale replay
+            _bitmap |= 1UL << (int)(_highest - counter);
         }
-
-        if ((_bitmap >> (int)delta & 1) != 0)
-        {
-            return false; // already seen
-        }
-
-        _bitmap |= 1UL << (int)delta;
-        return true;
     }
 }
 
