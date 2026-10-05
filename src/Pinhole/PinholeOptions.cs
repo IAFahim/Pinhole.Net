@@ -99,6 +99,15 @@ public sealed record PinholeOptions
     /// Default 3 — one lost probe or a busy moment never degrades a live path.</summary>
     public int PathValidationMaxUnansweredProbes { get; init; } = 3;
 
+    /// <summary>Discover the direct path's MTU (default true), RFC 8899-style: padded
+    /// token-checked pings climb from the guaranteed 1200-byte payload floor, a matching
+    /// pong confirms a size, and three unanswered probes abandon it for a cooldown. A
+    /// confirmed size raises <see cref="PinholeConnection.PathMtu"/> — and with it the
+    /// largest payload <see cref="PinholeConnection.Send"/> accepts above the floor. Probing
+    /// restarts whenever the connection moves off its direct path. Disable for exact
+    /// worst-case payload budgets.</summary>
+    public bool EnablePmtud { get; init; } = true;
+
     /// <summary>Capacity of the per-connection receive buffer (default 0 = off). With a
     /// positive capacity every received datagram is copied into a bounded queue that exists
     /// from handshake time, so <see cref="PinholeConnection.ReceiveAsync"/> can drain

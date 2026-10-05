@@ -80,6 +80,20 @@ internal sealed class ConnState
     public long PathProbesSent;          // Interlocked; separate from caller ping stats
     public long PathProbeReplies;        // Interlocked; only matched, direct-endpoint replies
 
+    // RFC 8899-style path MTU discovery. The 1200-byte API floor is presumed good; padded
+    // pings climb from there, and a confirmed size raises the app payload ceiling. All
+    // fields are guarded by Gate except the counters.
+    public int PmtuWire;                   // Gate; confirmed wire capacity (0 = unprobed)
+    public bool PmtuOutstanding;           // Gate
+    public long PmtuProbeNonce;            // Gate; TickCount64 | PmtuProbeMarker
+    public int PmtuProbeSize;              // Gate; wire bytes of the outstanding probe
+    public int PmtuProbeTries;             // Gate
+    public long PmtuDeadlineTicks;         // Gate
+    public SocketAddress? PmtuProbeTarget; // Gate; the endpoint the probe went to
+    public long PmtuNextProbeTicks;        // Gate; cooldown after failure / ceiling
+    public long PmtuProbesSent;            // Interlocked
+    public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
+
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
     public Action<PinholeConnectionState>? StateChanged;
@@ -111,6 +125,19 @@ internal sealed class NodeEngine : IDisposable
     private static readonly TimeSpan RelayRetryBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RecoverDebounce = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(2);
+
+    // Path MTU discovery. The frame overhead every sealed payload pays, the presumed-good
+    // floor (the 1200-byte API guarantee), and the Ethernet plateaus probed up to. The
+    // nonce marker is positive — path probes took the sign bit — and cannot collide with
+    // caller pings, whose timestamps are TickCount64 readings.
+    internal const int PmtuOverhead = HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead;
+    internal const int PmtuBaseWire = MaxPayload + PmtuOverhead;
+    private const int PmtuCeilingV4 = 1472; // Ethernet IPv4: 1500 - 20 - 8
+    private const int PmtuCeilingV6 = 1452; // Ethernet IPv6: 1500 - 40 - 8
+    private const int PmtuStepBytes = 128;
+    private const int PmtuProbeAttempts = 3;
+    private const long PmtuReprobeDelayMs = 300_000; // RFC 8899: re-probe a settled path periodically
+    private const long PmtuProbeMarker = 1L << 62;
 
     private readonly ulong _peerId;
     private readonly PinholeOptions _options;
@@ -1121,6 +1148,7 @@ internal sealed class NodeEngine : IDisposable
         long refreshMs = (long)_options.StunRefreshInterval.TotalMilliseconds;
         bool refresh = refreshMs > 0;
         bool validate = _options.EnablePathValidation;
+        bool pmtud = _options.EnablePmtud;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -1140,11 +1168,19 @@ internal sealed class NodeEngine : IDisposable
 
             _portMap?.Tick(Environment.TickCount64);
 
-            if (validate)
+            if (validate || pmtud)
             {
                 foreach (ConnState c in ConnectionsSnapshot())
                 {
-                    ValidatePath(c);
+                    if (validate)
+                    {
+                        ValidatePath(c);
+                    }
+
+                    if (pmtud)
+                    {
+                        DiscoverPathMtu(c);
+                    }
                 }
             }
         }
@@ -1314,6 +1350,115 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    // ------------------------------------------------------------------ path MTU discovery
+
+    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
+    /// size upward, a matching pong confirms a size, and three unanswered probes abandon a
+    /// size for a long cooldown. Only direct paths are probed — relays tunnel whatever they
+    /// are handed — and leaving the direct path forgets everything: a new path may have a
+    /// smaller MTU than the last one proved.</summary>
+    private void DiscoverPathMtu(ConnState c)
+    {
+        long now = Environment.TickCount64;
+        SocketAddress? target;
+        long nonce;
+        int size;
+        lock (c.Gate)
+        {
+            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null)
+            {
+                if (c.PmtuWire != 0 || c.PmtuOutstanding)
+                {
+                    c.PmtuWire = 0;
+                    c.PmtuOutstanding = false;
+                    c.PmtuNextProbeTicks = 0;
+                }
+                return;
+            }
+
+            if (c.PmtuOutstanding)
+            {
+                if (now < c.PmtuDeadlineTicks)
+                {
+                    return; // this probe's pong may still land
+                }
+
+                if (++c.PmtuProbeTries >= PmtuProbeAttempts)
+                {
+                    // The size never answered: keep the confirmed floor and cool down. An
+                    // over-MTU probe is silently dropped by the network, not errored, so
+                    // absence of a pong IS the measurement.
+                    c.PmtuOutstanding = false;
+                    c.PmtuNextProbeTicks = now + PmtuReprobeDelayMs;
+                    return;
+                }
+            }
+            else
+            {
+                if (now < c.PmtuNextProbeTicks)
+                {
+                    return;
+                }
+
+                int next = NextPmtuSizeLocked(c);
+                if (next <= 0)
+                {
+                    c.PmtuNextProbeTicks = now + PmtuReprobeDelayMs; // ceiling reached; re-climb later
+                    return;
+                }
+
+                c.PmtuProbeSize = next;
+                c.PmtuProbeTries = 0;
+                c.PmtuOutstanding = true;
+            }
+
+            c.PmtuProbeNonce = now | PmtuProbeMarker;
+            c.PmtuDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
+            c.PmtuProbeTarget = c.DirectRemote;
+            target = c.PmtuProbeTarget;
+            nonce = c.PmtuProbeNonce;
+            size = c.PmtuProbeSize;
+        }
+
+        SendPmtuProbe(c, target!, nonce, size);
+    }
+
+    /// <summary>The next wire size worth probing: one step above what is confirmed, capped
+    /// by the remote address family's Ethernet plateau. Zero means the ceiling is proven.
+    /// The endpoint form decides the family — the dual-mode socket reports even IPv4 peers
+    /// as v4-mapped IPv6 sockaddrs, and mapping back recovers the true 1472-byte budget.</summary>
+    private static int NextPmtuSizeLocked(ConnState c)
+    {
+        int ceiling = PmtuCeilingLocked(c);
+        int floor = Math.Max(c.PmtuWire, PmtuBaseWire);
+        return floor >= ceiling ? 0 : Math.Min(ceiling, floor + PmtuStepBytes);
+    }
+
+    private static int PmtuCeilingLocked(ConnState c) =>
+        c.DirectRemoteEp is { Address.AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork }
+            ? PmtuCeilingV4
+            : PmtuCeilingV6;
+
+    /// <summary>One padded Ping: the nonce in front, zero padding behind, sized so the
+    /// whole sealed frame lands on the probe size. The peer echoes the nonce in its Pong —
+    /// small, cheap, and proof the full-size datagram traversed the path.</summary>
+    private void SendPmtuProbe(ConnState c, SocketAddress target, long nonce, int size)
+    {
+        Span<byte> body = stackalloc byte[size - PmtuOverhead];
+        BitConverter.TryWriteBytes(body, nonce); // the padding behind it stays zero
+        Span<byte> frame = stackalloc byte[size];
+        int len = BuildFrame(c, FrameType.Ping, body, frame);
+        try
+        {
+            SendToWire(target, frame[..len]);
+            Interlocked.Increment(ref c.PmtuProbesSent);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            // An unsendable probe just goes unanswered; the attempt accounting handles it.
+        }
+    }
+
     private static bool SameEndPoint(SocketAddress? left, SocketAddress? right)
     {
         if (ReferenceEquals(left, right))
@@ -1336,7 +1481,14 @@ internal sealed class NodeEngine : IDisposable
     public void Send(ConnState c, ReadOnlySpan<byte> payload)
     {
         ArgumentOutOfRangeException.ThrowIfZero(payload.Length); // a zero-length Data frame is undeliverable by definition
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(payload.Length, MaxPayload);
+        int ceiling;
+        lock (c.Gate)
+        {
+            // PMTUD may have proven the path can carry more than the API floor; it can never
+            // prove less — 1200 bytes are guaranteed from the moment the session opens.
+            ceiling = c.PmtuWire > 0 ? c.PmtuWire - PmtuOverhead : MaxPayload;
+        }
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(payload.Length, ceiling);
         switch (c.State)
         {
             case PinholeConnectionState.Punching:
@@ -1555,6 +1707,11 @@ internal sealed class NodeEngine : IDisposable
         if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
         {
             return; // test hook: the direct path to this peer is a black hole; relayed frames still pass
+        }
+
+        if (c is { DropAboveBytes: > 0 } && frame.Length > c.DropAboveBytes)
+        {
+            return; // test hook: a size-selective black hole — an over-MTU network, exactly
         }
 
         if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
@@ -1940,6 +2097,17 @@ internal sealed class NodeEngine : IDisposable
         if (!arrival.ViaRelay)
         {
             DirectPathConfirmed(c, arrival.Direct!);
+            // Inbound evidence cuts both ways: a datagram this size arrived, so the path
+            // carries it. Cap at the probe ceiling — this only ever replaces a probe, and
+            // keeps buffer sizing honest on loopback's 64k MTU.
+            lock (c.Gate)
+            {
+                int ceiling = PmtuCeilingLocked(c);
+                if (frame.Length > c.PmtuWire && frame.Length <= ceiling)
+                {
+                    c.PmtuWire = frame.Length;
+                }
+            }
         }
 
         Span<byte> pong = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
@@ -1977,6 +2145,30 @@ internal sealed class NodeEngine : IDisposable
             if (!arrival.ViaRelay && arrival.Direct is { } direct)
             {
                 DirectPathConfirmed(c, direct);
+            }
+
+            return;
+        }
+
+        if ((echoed & PmtuProbeMarker) != 0)
+        {
+            // A PMTUD probe's pong: confirm the probe size only when the nonce matches the
+            // outstanding probe AND the reply came from the endpoint it was sent to — the
+            // same discipline path probes apply, for the same reason.
+            lock (c.Gate)
+            {
+                if (c.PmtuOutstanding && c.PmtuProbeNonce == echoed
+                    && !arrival.ViaRelay && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
+                {
+                    c.PmtuOutstanding = false;
+                    c.PmtuWire = Math.Max(c.PmtuWire, c.PmtuProbeSize);
+                    c.PmtuNextProbeTicks = 0; // climb again on the next tick
+                }
+            }
+
+            if (!arrival.ViaRelay && arrival.Direct is { } pmtuDirect)
+            {
+                DirectPathConfirmed(c, pmtuDirect); // a confirmed probe is path liveness too
             }
 
             return;

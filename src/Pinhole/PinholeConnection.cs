@@ -126,6 +126,22 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>The wire size in bytes the direct path is proven to carry — starts at the
+    /// 1237-byte floor (the 1200-byte <see cref="MaxPayload"/> guarantee plus frame
+    /// overhead) and rises as path-MTU discovery confirms bigger sizes. The largest payload
+    /// <see cref="Send"/> accepts is <see cref="PathMtu"/> minus 37; resets to the floor
+    /// whenever the connection leaves its direct path.</summary>
+    public int PathMtu
+    {
+        get
+        {
+            lock (_c.Gate)
+            {
+                return _c.PmtuWire > 0 ? _c.PmtuWire : NodeEngine.PmtuBaseWire;
+            }
+        }
+    }
+
     /// <summary>Current lifecycle state; changes are also surfaced on <see cref="StateChanged"/>.</summary>
     public PinholeConnectionState State => _c.State;
 

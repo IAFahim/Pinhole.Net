@@ -199,8 +199,10 @@ public sealed class NodeConnectionTests
     [Fact]
     public async Task MaxPayload_Guards_InsteadOfDyingInTheNetwork()
     {
-        await using PinholeNode a = await PinholeNode.BindAsync(Opts());
-        await using PinholeNode b = await PinholeNode.BindAsync(Opts());
+        // PMTUD off: this test pins the STATIC floor. With discovery on, the ceiling would
+        // climb past 1200 within the first maintenance ticks and legitimately accept more.
+        await using PinholeNode a = await PinholeNode.BindAsync(Opts() with { EnablePmtud = false });
+        await using PinholeNode b = await PinholeNode.BindAsync(Opts() with { EnablePmtud = false });
         (PinholeConnection conn, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         Assert.Equal(1200, PinholeConnection.MaxPayload);
