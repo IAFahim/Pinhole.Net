@@ -63,8 +63,25 @@ public sealed record PinholeOptions
 
     /// <summary>The 32-byte private seed of this node's long-term X25519 identity. Leave
     /// null for a fresh identity per process; persist and pass one when peer identity should
-    /// survive restarts (peers pin the public half from connection strings).</summary>
+    /// survive restarts (peers pin the public half from connection strings). The seed is
+    /// also the root of the Ed25519 endpoint identity: with a seed, the peer ID, static key,
+    /// and endpoint key are all stable across restarts, and peers holding an old connection
+    /// string can rediscover this node through a lookup provider instead of a new ticket.</summary>
     public byte[]? IdentityKeySeed { get; init; }
+
+    /// <summary>Endpoints of <c>Pinhole.Rendezvous</c> introducers used as the built-in
+    /// address-lookup provider. Null and empty (default) disable it. Requires a persisted
+    /// <see cref="IdentityKeySeed"/> to be useful across restarts; publishing additionally
+    /// requires <see cref="Listen"/>. See docs/REDISCOVERY.md for the trust model — the
+    /// introducer is never trusted, only the record signatures are.</summary>
+    public IReadOnlyList<IPEndPoint>? RendezvousEndpoints { get; init; }
+
+    /// <summary>Application-supplied lookup providers (signed DNS, pkarr, an iroh-style
+    /// directory — anything implementing <see cref="IPinholeLookupProvider"/>), consulted
+    /// alongside any <see cref="RendezvousEndpoints"/>. All providers are queried in
+    /// parallel and the first record that verifies against the dialer's pinned endpoint key
+    /// wins; a provider that is down or lying can only deny availability.</summary>
+    public IReadOnlyList<IPinholeLookupProvider>? LookupProviders { get; init; }
 
     /// <summary>Budget for the bind-time STUN probes and relay allocation. Failures are
     /// tolerated: the node comes up with whatever candidates were observed. Default 5 s.</summary>
@@ -204,6 +221,8 @@ public sealed record PinholeOptions
     {
         if (options.IdentityKeySeed is { Length: not NodeIdentity.KeyLength })
             throw new ArgumentOutOfRangeException(nameof(options), $"IdentityKeySeed must be {NodeIdentity.KeyLength} bytes");
+        if (options.LookupProviders is { } providers && providers.Any(p => p is null))
+            throw new ArgumentOutOfRangeException(nameof(options), "LookupProviders must not contain null entries");
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationIdle, TimeSpan.FromMilliseconds(50));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationProbeInterval, TimeSpan.FromMilliseconds(20));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationMaxUnansweredProbes, 1);

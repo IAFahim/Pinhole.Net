@@ -75,13 +75,22 @@ public sealed class ConnectionString
     /// dialers fall back to plaintext when the local policy allows it.</summary>
     public byte[]? StaticKey { get; }
 
+    /// <summary>The peer's Ed25519 endpoint public key (32 bytes, v3): the key its signed
+    /// address records are verified against, letting a dialer adopt rediscovered endpoints
+    /// from a lookup provider without ever trusting the provider. Requires
+    /// <see cref="StaticKey"/>; null on v1/v2 strings, whose dialers never adopt
+    /// provider-supplied addresses.</summary>
+    public byte[]? EndpointKey { get; }
+
     /// <summary>Every address the peer is reachable on — direct, reflexive, and relay entries as published.</summary>
     public IReadOnlyList<PinholeCandidate> Candidates { get; }
 
     /// <summary>Assembles a string from a peer ID, its candidates, a NAT hint, and optionally
-    /// the peer's 32-byte static public key. Throws <see cref="ArgumentOutOfRangeException"/>
-    /// above <see cref="MaxCandidates"/> candidates or for a malformed key.</summary>
-    public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown, byte[]? staticKey = null)
+    /// the peer's 32-byte static public key (making a v2 string) plus its 32-byte endpoint
+    /// public key (making a v3 string). Throws <see cref="ArgumentOutOfRangeException"/>
+    /// above <see cref="MaxCandidates"/> candidates or for malformed keys.</summary>
+    public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown,
+        byte[]? staticKey = null, byte[]? endpointKey = null)
     {
         if (candidates.Count > MaxCandidates)
         {
@@ -93,20 +102,34 @@ public sealed class ConnectionString
             throw new ArgumentOutOfRangeException(nameof(staticKey), $"static keys are {NodeIdentity.KeyLength} bytes");
         }
 
+        if (endpointKey is not null && endpointKey.Length != AddressRecord.EndpointKeyLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(endpointKey), $"endpoint keys are {AddressRecord.EndpointKeyLength} bytes");
+        }
+
+        if (endpointKey is not null && staticKey is null)
+        {
+            throw new ArgumentOutOfRangeException(nameof(endpointKey), "an endpoint key requires the static key it is published with");
+        }
+
         PeerId = peerId;
         NatHint = natHint;
         StaticKey = staticKey;
+        EndpointKey = endpointKey;
         Candidates = candidates;
     }
 
-    /// <summary>Encodes as "pinhole1:..." (base64url, no padding). Payloads with a static
-    /// key are version 2; without, version 1 — the same envelope either way.</summary>
+    /// <summary>Encodes as "pinhole1:..." (base64url, no padding). Payloads carrying both a
+    /// static and an endpoint key are version 3; static only, version 2; neither, version 1 —
+    /// the same envelope either way.</summary>
     public override string ToString()
     {
         bool keyed = StaticKey is not null;
-        var payload = new MemoryStream(64 + Candidates.Count * 32 + (keyed ? NodeIdentity.KeyLength : 0));
-        payload.WriteByte(keyed ? Version2 : Version1);
-        payload.WriteByte((byte)(keyed ? FlagsHasStaticKey : 0));
+        bool epKeyed = EndpointKey is not null;
+        var payload = new MemoryStream(64 + Candidates.Count * 32 + (keyed ? NodeIdentity.KeyLength : 0) + (epKeyed ? AddressRecord.EndpointKeyLength : 0));
+        byte version = epKeyed ? Version3 : keyed ? Version2 : Version1;
+        payload.WriteByte(version);
+        payload.WriteByte((byte)((keyed ? FlagsHasStaticKey : 0) | (epKeyed ? FlagsHasEndpointKey : 0)));
         WriteU64(payload, PeerId);
         payload.WriteByte((byte)NatHint);
         payload.WriteByte((byte)Candidates.Count);
@@ -118,6 +141,11 @@ public sealed class ConnectionString
         if (keyed)
         {
             payload.Write(StaticKey!);
+        }
+
+        if (epKeyed)
+        {
+            payload.Write(EndpointKey!);
         }
 
         return Scheme + ":" + Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
@@ -157,13 +185,15 @@ public sealed class ConnectionString
         }
 
         byte[] payload = Base64Url.Decode(text[(colon + 1)..]);
-        if (payload.Length < 13 || payload[0] is not (Version1 or Version2))
+        if (payload.Length < 13 || payload[0] is not (Version1 or Version2 or Version3))
         {
             throw new FormatException("unsupported connection string version");
         }
 
         byte flags = payload[1];
-        if (payload[0] == Version2 && flags != FlagsHasStaticKey)
+        if ((payload[0] == Version2 && flags != FlagsHasStaticKey)
+            || (payload[0] == Version3 && flags != (FlagsHasStaticKey | FlagsHasEndpointKey))
+            || (payload[0] == Version1 && flags != 0))
         {
             throw new FormatException("unknown connection string flags");
         }
@@ -189,6 +219,7 @@ public sealed class ConnectionString
         }
 
         byte[]? staticKey = null;
+        byte[]? endpointKey = null;
         if (payload[0] == Version2)
         {
             if (payload.Length - reader.Position != NodeIdentity.KeyLength)
@@ -198,17 +229,29 @@ public sealed class ConnectionString
 
             staticKey = payload[^NodeIdentity.KeyLength..];
         }
+        else if (payload[0] == Version3)
+        {
+            if (payload.Length - reader.Position != NodeIdentity.KeyLength + AddressRecord.EndpointKeyLength)
+            {
+                throw new FormatException("v3 connection string must end with 32-byte static and endpoint keys");
+            }
+
+            staticKey = payload[^(NodeIdentity.KeyLength + AddressRecord.EndpointKeyLength)..^AddressRecord.EndpointKeyLength];
+            endpointKey = payload[^AddressRecord.EndpointKeyLength..];
+        }
         else if (!reader.AtEnd)
         {
             throw new FormatException("trailing bytes in connection string");
         }
 
-        return new ConnectionString(peerId, candidates, hint, staticKey);
+        return new ConnectionString(peerId, candidates, hint, staticKey, endpointKey);
     }
 
     private const byte Version1 = 1;
     private const byte Version2 = 2;
+    private const byte Version3 = 3;
     private const byte FlagsHasStaticKey = 1;
+    private const byte FlagsHasEndpointKey = 2;
 
     private static void WriteU64(MemoryStream payload, ulong value)
     {

@@ -23,6 +23,16 @@ internal sealed class RelayIdentity
         PeerId = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(PublicKey));
     }
 
+    /// <summary>Signs an arbitrary body with the Ed25519 endpoint key — used for signed
+    /// address records, distinct from the relay handshake's challenge authentication.</summary>
+    public byte[] SignBody(ReadOnlySpan<byte> body)
+    {
+        var signer = new Ed25519Signer();
+        signer.Init(true, _secret);
+        signer.BlockUpdate(body.ToArray(), 0, body.Length);
+        return signer.GenerateSignature();
+    }
+
     public byte[] Authenticate(ReadOnlySpan<byte> challenge)
     {
         if (challenge.Length != 16) throw new InvalidDataException("invalid iroh relay challenge");

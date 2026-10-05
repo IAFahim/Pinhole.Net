@@ -154,7 +154,7 @@ internal sealed class NodeEngine : IDisposable
     private readonly Channel<ConnState>? _incoming;
     private readonly List<RelaySlot> _relays = new();
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
-    private readonly RelayIdentity? _relayIdentity;
+    private readonly RelayIdentity? _endpointIdentity; // Ed25519 endpoint key; null = random per-bind peer id only
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
     private IPEndPoint? _mappedEndpoint;                              // router-granted mapping (UPnP/PMP/PCP), guarded by _gate
@@ -162,6 +162,23 @@ internal sealed class NodeEngine : IDisposable
     private PortMappingService? _portMap;
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
+    // Address-lookup providers (built-in rendezvous + application-supplied). Empty unless
+    // configured: rediscovery is opt-in infrastructure, never a default network behavior.
+    private readonly List<IPinholeLookupProvider> _lookup = [];
+    // Replay/rollback guard for adopted records: highest sequence per peer. Bounded by
+    // MaxCachedSequences; a cache that fills simply stops protecting new peers (their
+    // records still verify by signature, expiry, and pin — the guard is hardening, not the
+    // authentication boundary).
+    private readonly ConcurrentDictionary<ulong, ulong> _recordSequence = new();
+    private const int MaxCachedSequences = 1024;
+    private static readonly TimeSpan PublishInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PublishMaxBackoff = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RecordTtl = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan LookupBudget = TimeSpan.FromSeconds(3);
+    private Task? _publishLoop; // one publisher for the whole node, dies with shutdown
+    private int _publishing;          // single-flight guard for publish operations
+    private int _publishKick;         // single-flight guard for event-triggered publishes
+    private long _lastPublishTicks;   // rate limit for event-triggered publishes
 
     // Volatile: sends and the receive loop read it per frame without taking _gate. A rebind
     // swaps in a fresh socket; a sender briefly racing the swap gets the old socket and a
@@ -177,12 +194,23 @@ internal sealed class NodeEngine : IDisposable
 
     public NodeEngine(PinholeOptions options)
     {
-        if ((options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
-            _relayIdentity = new RelayIdentity();
-        _peerId = _relayIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        // The Ed25519 endpoint identity exists whenever the node has iroh relays (they
+        // authenticate with it) or a persisted seed (which derives it stably). A persisted
+        // seed therefore also stabilizes the peer ID — it is the hash of the endpoint key.
+        byte[]? endpointSeed = EndpointIdentity.DeriveEndpointSeed(options.IdentityKeySeed);
+        if (endpointSeed is not null || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
+            _endpointIdentity = new RelayIdentity(endpointSeed);
+        _peerId = _endpointIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
+        if (options.RendezvousEndpoints is { Count: > 0 } || options.LookupProviders is { Count: > 0 })
+        {
+            List<IPinholeLookupProvider> providers = new(options.LookupProviders ?? []);
+            if (options.RendezvousEndpoints is { Count: > 0 } endpoints)
+                providers.Add(new RendezvousLookup(_peerId, endpoints));
+            _lookup = providers;
+        }
     }
 
     public ulong PeerId => _peerId;
@@ -190,6 +218,11 @@ internal sealed class NodeEngine : IDisposable
     /// <summary>This node's long-term X25519 public key (32 bytes), embedded in v2 connection
     /// strings and used to authenticate every session's far end; null on plaintext nodes.</summary>
     public byte[]? StaticPublicKey => _identity?.PublicKey;
+
+    /// <summary>This node's Ed25519 endpoint public key (32 bytes), embedded in v3 connection
+    /// strings and used to sign its address records; null when neither a persisted identity
+    /// seed nor iroh relays gave the node an endpoint identity.</summary>
+    public byte[]? EndpointPublicKey => _endpointIdentity?.PublicKey;
 
     public bool HasRelay
     {
@@ -247,6 +280,15 @@ internal sealed class NodeEngine : IDisposable
 
         RefreshLocalCandidates();
         _ = PermitCatalogRelaysAsync(CancellationToken.None);
+
+        // Signed address records: the bind-time RefreshLocalCandidates kick above publishes
+        // once the first candidate set exists; this loop keeps it fresh on a jittered
+        // heartbeat with backoff. Publishing needs a listening node with an endpoint
+        // identity — a dial-only node has no address worth serving.
+        if (_lookup.Count > 0 && _options.Listen && _endpointIdentity is not null)
+        {
+            _publishLoop = PublishLoopAsync(_shutdown.Token);
+        }
 
         // Router port mapping (UPnP/PMP/PCP): entirely background, entirely best-effort.
         // A loopback bind can never be reached through a router, so it skips the chatter.
@@ -373,6 +415,11 @@ internal sealed class NodeEngine : IDisposable
         {
             RefreshLocalCandidatesNoLock();
         }
+
+        // Every path that changes reachability funnels through here — bind, rebind, STUN
+        // mapping moves, router port-mapping changes — so this is the one hook that
+        // republishes the signed address record after a roam or restart.
+        PublishAddressRecordSoon();
     }
 
     /// <summary>Caller must hold <see cref="_gate"/>. Split out so the STUN refresh can
@@ -410,11 +457,11 @@ internal sealed class NodeEngine : IDisposable
             }
         }
 
-        if (_relayIdentity is not null)
+        if (_endpointIdentity is not null)
         {
             foreach (IrohRelay relay in _irohRelays.Values.Where(r => r.IsAlive))
                 _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
-                    new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _relayIdentity.PublicKey));
+                    new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _endpointIdentity.PublicKey));
         }
     }
 
@@ -659,13 +706,13 @@ internal sealed class NodeEngine : IDisposable
 
     private IrohRelay? IrohRelayFor(Uri url)
     {
-        if (_relayIdentity is null || _disposed) return null;
+        if (_endpointIdentity is null || _disposed) return null;
         IrohRelay relay;
         lock (_gate)
         {
             if (_irohRelays.TryGetValue(url, out relay!)) return relay;
             if (_irohRelays.Count >= ConnectionString.MaxCandidates) return null;
-            relay = new IrohRelay(url, _relayIdentity);
+            relay = new IrohRelay(url, _endpointIdentity);
             relay.Received += HandleIrohData;
             relay.Changed += IrohChanged;
             _irohRelays.Add(url, relay);
@@ -864,6 +911,268 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
+    // ------------------------------------------------------------------ signed address records
+
+    /// <summary>Keeps the node's signed address record fresh at every lookup provider:
+    /// publish, wait one interval (plus jitter), repeat. A publish nobody acknowledges
+    /// doubles the wait up to <see cref="PublishMaxBackoff"/>; the first success resets it —
+    /// bounded provider access even when every provider is down.</summary>
+    private async Task PublishLoopAsync(CancellationToken ct)
+    {
+        TimeSpan backoff = PublishInterval;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                bool anyAlive = await PublishAddressRecordAsync(ct).ConfigureAwait(false);
+                if (anyAlive)
+                {
+                    backoff = PublishInterval;
+                }
+                else
+                {
+                    TimeSpan doubled = TimeSpan.FromTicks(backoff.Ticks * 2);
+                    backoff = doubled < PublishMaxBackoff ? doubled : PublishMaxBackoff;
+                }
+                int jitterMs = Random.Shared.Next(0, 2000);
+                await Task.Delay(backoff + TimeSpan.FromMilliseconds(jitterMs), ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>One signed record of the node's current direct/reflexive reachability,
+    /// delivered to every provider. Single-flight: a loop heartbeat and an event kick
+    /// racing each other collapse into one datagram burst.</summary>
+    private async Task<bool> PublishAddressRecordAsync(CancellationToken ct)
+    {
+        if (_endpointIdentity is null || _lookup.Count == 0 || _disposed)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _publishing, 1) != 0)
+        {
+            return true; // a publish in flight counts as alive
+        }
+
+        try
+        {
+            byte[]? wire = BuildSignedRecord();
+            if (wire is null)
+            {
+                return false;
+            }
+
+            Task<bool>[] sends = _lookup.Select(p => SafePublishAsync(p, wire, ct)).ToArray();
+            bool[] results = await Task.WhenAll(sends).ConfigureAwait(false);
+            Volatile.Write(ref _lastPublishTicks, Environment.TickCount64);
+            return results.Any(ok => ok);
+        }
+        finally
+        {
+            Volatile.Write(ref _publishing, 0);
+        }
+    }
+
+    /// <summary>Event-triggered publish (route change, rebind, port-mapping change): debounced,
+    /// rate-limited to one burst per five seconds so candidate churn never becomes a
+    /// provider flood. The heartbeat loop is separate and unaffected.</summary>
+    private void PublishAddressRecordSoon()
+    {
+        if (_lookup.Count == 0 || _endpointIdentity is null || !_options.Listen || _disposed)
+        {
+            return;
+        }
+
+        if (Environment.TickCount64 - Volatile.Read(ref _lastPublishTicks) < 5000)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _publishKick, 1) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(250, _shutdown.Token).ConfigureAwait(false); // collapse event bursts
+                await PublishAddressRecordAsync(_shutdown.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException or TimeoutException)
+            {
+                // Publishing is best-effort; the heartbeat loop retries with backoff.
+            }
+            finally
+            {
+                Volatile.Write(ref _publishKick, 0);
+            }
+        });
+    }
+
+    private byte[]? BuildSignedRecord()
+    {
+        List<IPEndPoint> endpoints = new(AddressRecord.MaxEndpoints);
+        HashSet<IPEndPoint> seen = new();
+        foreach (PinholeCandidate candidate in LocalCandidatesSnapshot())
+        {
+            // Records carry direct/reflexive reachability only: relay candidates embed
+            // TURN credentials (a secret a public directory must never hold) and iroh
+            // relays are locator configuration, both already shared in the ticket.
+            if (candidate.Kind is not (CandidateKind.Direct or CandidateKind.Reflexive))
+            {
+                continue;
+            }
+
+            if (seen.Add(candidate.Address) && endpoints.Count < AddressRecord.MaxEndpoints)
+            {
+                endpoints.Add(candidate.Address);
+            }
+        }
+
+        if (endpoints.Count == 0)
+        {
+            return null;
+        }
+
+        return new AddressRecord
+        {
+            PeerId = _peerId,
+            EndpointKey = _endpointIdentity!.PublicKey,
+            Sequence = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ExpiresAtUtc = DateTimeOffset.UtcNow.Add(RecordTtl),
+            Endpoints = endpoints,
+        }.EncodeSigned(_endpointIdentity);
+    }
+
+    private static async Task<bool> SafePublishAsync(IPinholeLookupProvider provider, byte[] wire, CancellationToken ct)
+    {
+        try
+        {
+            await provider.PublishAsync(wire, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false; // one dead provider never blocks the others or the caller
+        }
+    }
+
+    /// <summary>Races every lookup provider for the peer's current record and returns the
+    /// first one that verifies against the pinned endpoint key — a lying or stale provider
+    /// result is simply not first-verified. The overall budget bounds provider access.</summary>
+    private async Task<AddressRecord?> ResolveVerifiedRecordAsync(ulong peerId, byte[] pinnedKey, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
+        deadline.CancelAfter(LookupBudget);
+        List<Task<byte[]?>> pending = _lookup.Select(p => SafeResolveAsync(p, peerId, deadline.Token)).ToList();
+        try
+        {
+            while (pending.Count > 0)
+            {
+                Task<byte[]?> done = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(done);
+                if (done.IsCompletedSuccessfully
+                    && done.Result is { Length: > 0 } wire
+                    && AddressRecord.TryParseVerified(wire, peerId, pinnedKey, DateTimeOffset.UtcNow, out AddressRecord? record)
+                    && record is not null)
+                {
+                    return record;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        return null;
+    }
+
+    private static async Task<byte[]?> SafeResolveAsync(IPinholeLookupProvider provider, ulong peerId, CancellationToken ct)
+    {
+        try
+        {
+            return await provider.ResolveAsync(peerId, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null; // providers are availability dependencies, never error paths
+        }
+    }
+
+    /// <summary>Adopts a verified record's endpoints into a live dial's candidate list. The
+    /// record already passed signature, pin, and expiry checks; the per-peer sequence cache
+    /// adds rollback protection — a record strictly older than the newest adopted for the
+    /// peer is a rollback, while re-adopting the same sequence is an idempotent retry (a
+    /// redial inside one publish interval still finds its record useful).</summary>
+    internal bool AcceptRecordSequence(ulong peerId, ulong sequence)
+    {
+        if (_recordSequence.TryGetValue(peerId, out ulong seen) && sequence < seen)
+        {
+            return false;
+        }
+
+        if (_recordSequence.Count < MaxCachedSequences || _recordSequence.ContainsKey(peerId))
+        {
+            _recordSequence[peerId] = sequence;
+        }
+
+        return true;
+    }
+
+    /// <summary>Runs beside a dial: while the punch loop races the ticket's own (possibly
+    /// dead) candidates, this asks the lookup providers where the peer is now and, when a
+    /// record verifies against the ticket's pinned endpoint key, merges its fresh endpoints
+    /// into the punch. Best-effort by construction — no result simply leaves the dial on its
+    /// original candidates.</summary>
+    private async Task ResolveViaLookupAsync(ConnState c, byte[] pinnedKey, CancellationToken ct)
+    {
+        try
+        {
+            AddressRecord? record = await ResolveVerifiedRecordAsync(c.PeerId, pinnedKey, ct).ConfigureAwait(false);
+            if (record is null || !AcceptRecordSequence(c.PeerId, record.Sequence))
+            {
+                return;
+            }
+
+            bool added = false;
+            lock (_gate)
+            {
+                if (c.State is PinholeConnectionState.Dead or PinholeConnectionState.Closed)
+                {
+                    return;
+                }
+
+                HashSet<IPEndPoint> known = new(c.PeerCandidates.Select(x => x.Address));
+                foreach (IPEndPoint ep in record.Endpoints)
+                {
+                    if (known.Add(ep))
+                    {
+                        c.PeerCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
+                        added = true;
+                    }
+                }
+            }
+
+            if (added)
+            {
+                KickPunch(c);
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SocketException or ObjectDisposedException or FormatException)
+        {
+        }
+    }
+
     public ConnState ConnectAsync(ConnectionString cs, CancellationToken ct)
     {
         var c = new ConnState
@@ -920,6 +1229,14 @@ internal sealed class NodeEngine : IDisposable
             // Relay candidates need our own allocation to send through, and the peer's
             // allocation needs a permission for our relay server's IP before it delivers.
             _ = WarmRelayForDialAsync(cs, ct);
+        }
+
+        // A v3 ticket pins the peer's endpoint key, so its candidates can be rediscovered:
+        // race the lookup providers alongside the punch for the peer's current record. v1/v2
+        // tickets pin nothing, so nothing a provider says about them is adoptable.
+        if (_lookup.Count > 0 && cs.EndpointKey is { } pinnedKey)
+        {
+            _ = ResolveViaLookupAsync(c, pinnedKey, ct);
         }
 
         KickPunch(c);

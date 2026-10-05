@@ -196,18 +196,20 @@ A peer punches them identically; no wire semantics differ.
 
 ## Connection string
 
-`pinhole1:<base64url>` (unpadded). Two payload versions share the envelope:
+`pinhole1:<base64url>` (unpadded). Three payload versions share the envelope:
 
 ```
 version:u8 (=1)  flags:u8 (=0)  peerId:u64 LE  natHint:u8 (0 unknown, 1 cone, 2 symmetric)
-candidateCount:u8  candidate TLVs...  [v2 only: staticKey (32 B)]
+candidateCount:u8  candidate TLVs...  [v2: staticKey (32 B)]  [v3: endpointKey (32 B)]
 ```
 
 Version 2 sets flags = 1 and ends with the announcer's 32-byte X25519 static public
-key — the pin that makes every dial man-in-the-middle proof. v1 parses as legacy
-(`StaticKey` null); a default node refuses to *dial* one. At most 32 candidates, at
-most 8192 encoded characters; parsers reject trailing bytes, unknown kinds, and
-non-strict base64url.
+key — the pin that makes every dial man-in-the-middle proof. Version 3 sets flags = 3
+and appends the 32-byte Ed25519 endpoint public key on top: the pin that lets dialers
+adopt [rediscovered addresses](REDISCOVERY.md) without trusting the lookup provider.
+v1 parses as legacy (`StaticKey` null); a default node refuses to *dial* one. At most
+32 candidates, at most 8192 encoded characters; parsers reject trailing bytes, unknown
+kinds, and non-strict base64url.
 
 `natHint` is derived automatically (a manual `SetNatHint` override wins): when two
 or more configured STUN servers answer, identical observed mappings classify a cone

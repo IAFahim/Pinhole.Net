@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.10.0 (unreleased) — persistent identity, authenticated rediscovery (#29)
+
+One persisted 32-byte seed (`IdentityKeySeed`) now restores the *full* endpoint
+identity across restarts: the X25519 static key (the seed itself, as before), an
+Ed25519 endpoint key (HKDF-derived, its own domain), and a stable peer ID. Connection
+strings gain a v3 payload that pins the endpoint key alongside the static key.
+
+On top of that: signed address records. A node with an endpoint identity publishes
+{peer id, endpoint key, monotonic sequence, 90 s expiry, direct/reflexive endpoints},
+Ed25519-signed, to any number of lookup providers — the built-in `Pinhole.Rendezvous`
+UDP introducer (which now stores and forwards records without validating them) and/or
+application-supplied `IPinholeLookupProvider` implementations fronting signed DNS,
+pkarr, or an iroh-style directory. A dialer holding a stale v3 ticket races the lookup
+alongside its punch; a record is adopted only after it verifies against the ticket's
+pinned endpoint key, so a malicious provider — or the introducer itself — can only deny
+availability, never impersonate or redirect. The acceptance criterion — two pinned
+peers reconnecting after both changed address, without a human exchanging a new
+ticket — is `RediscoveryTests.ReconnectAfterRestart_NoNewTicket`, alongside poisoning,
+forgery, rollback, staleness, provider-outage, and multi-provider proofs. Design,
+threat model, privacy, and seed-storage guidance: `docs/REDISCOVERY.md`.
+
 ## 1.9.0 — the topology/loss lab, and the three gaps it found (#20, part 1)
 
 An in-process virtual internet — NATs that really translate and filter, Gilbert-Elliott

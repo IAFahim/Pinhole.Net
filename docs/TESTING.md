@@ -146,3 +146,27 @@ protocol, duration, healed-path note) and the captured server logs under
   harness; the scenarios exist virtually and the tools are external, so the remaining
   work is a TOML scenario set + runner permissions (needs `CAP_NET_ADMIN`), no new
   simulator. A Linux-namespace run will never be reported as Windows/macOS validation.
+
+## #29 — rediscovery (persistent identity, signed address records)
+
+`RediscoveryTests.cs` runs on real loopback sockets with an in-process
+`Pinhole.Rendezvous` introducer — no virtual network, no external processes.
+
+| Scenario | Test | Proof |
+|---|---|---|
+| Identity persistence | `SameSeed_FullIdentityStableAcrossRestart` | same seed ⇒ same peer ID, static key, endpoint key across binds; v3 ticket round-trips; truncated v3 refused |
+| Record authentication | `RecordVerification_AcceptsGoodRecordOnly` | good record passes; wrong pin, wrong peer id, any tampered byte, expiry, truncation all fail |
+| Rollback protection | `RecordRollback_RejectedBySequenceCache` | strictly-older sequence rejected, same sequence retried, per-peer independence |
+| Introducer passthrough | `RendezvousServer_PassesRecordsThroughAndStaysLegacyCompatible` | record served verbatim; legacy clients keep the endpoint form; hostile payloads ignored |
+| Restart without a new ticket | `ReconnectAfterRestart_NoNewTicket` | the acceptance criterion: same seed revived on a fresh port, old ticket still connects, identity identical |
+| Simultaneous roam | `BothPeersRoamSimultaneously_EitherDirectionReconnects` | both peers rebind; both stale tickets heal, both directions |
+| All cached addresses dead | `AllCachedAddressesDead_RediscoveredRecordCarriesTheDial` | the fresh port demonstrably enters the dialer's candidate set |
+| Poisoning | `PoisonedRecord_CannotImpersonate_OnlyDeniesAvailability` | a live impostor's self-consistent record and a forged-signature record are both refused; the impostor node never sees a session |
+| Stale records | `StaleRecord_DeadEndpoints_TimesOutWithoutImpersonating` | an authentic record pointing at a dead address: honest timeout |
+| Provider outage | `ProviderOutage_AllProvidersDown_DialFailsCleanlyAndBounded` | dead introducer + throwing provider ⇒ bounded, honest timeout |
+| Multiple providers | `MultipleProviders_DeadFirst_LiveSecondStillHeals` | first-verified-wins across a dead and a live provider |
+
+The "relay restart with changed TURN addresses" case from the issue is covered at the
+reachability-record level by `AllCachedAddressesDead_...` (every cached address replaced);
+relay *failure* recovery itself is #30's scope, and records deliberately carry no relay
+candidates (they would embed TURN credentials).

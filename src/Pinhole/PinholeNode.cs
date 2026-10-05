@@ -100,7 +100,9 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return await LanDiscovery.BrowseAsync(channel, window, ct).ConfigureAwait(false);
     }
 
-    /// <summary>This peer's stable ID (random per bind).</summary>
+    /// <summary>This peer's stable ID — random per bind, or stable across restarts when a
+    /// persisted <see cref="PinholeOptions.IdentityKeySeed"/> is configured (the ID is the
+    /// hash of the endpoint key the seed derives).</summary>
     public ulong PeerId => _engine.PeerId;
 
     /// <summary>The bound UDP port.</summary>
@@ -113,13 +115,24 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// Persist a seed via <see cref="PinholeOptions.IdentityKeySeed"/> for identity across restarts.</summary>
     public byte[]? StaticPublicKey => _engine.StaticPublicKey;
 
+    /// <summary>This node's Ed25519 endpoint public key (32 bytes), embedded in v3 connection
+    /// strings: the key its signed address records are verified against, which is what lets
+    /// a peer holding an old ticket adopt this node's rediscovered addresses without
+    /// trusting the lookup provider. Null when the node has no endpoint identity (neither a
+    /// persisted seed nor iroh relays).</summary>
+    public byte[]? EndpointPublicKey => _engine.EndpointPublicKey;
+
     /// <summary>The single discovery artifact: "pinhole1:..." carrying this peer's ID, its
-    /// static key, and direct/reflexive/relay candidates. Regenerate and re-share after roaming.</summary>
+    /// static and endpoint keys, and direct/reflexive/relay candidates. When both peers run
+    /// lookup providers (see <see cref="PinholeOptions.RendezvousEndpoints"/>), an old string
+    /// keeps working across reboots and address changes — the peer's current record is
+    /// fetched and verified instead of a new ticket being exchanged.</summary>
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
         NatHint,
-        _engine.StaticPublicKey).ToString();
+        _engine.StaticPublicKey,
+        _engine.EndpointPublicKey).ToString();
 
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();

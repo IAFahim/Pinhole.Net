@@ -457,7 +457,7 @@ universal discovery artifact everywhere else.
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, automatic NAT classification, PCP/NAT-PMP/UPnP router port mapping, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, automatic NAT classification, PCP/NAT-PMP/UPnP router port mapping, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md); persistent identity and authenticated address rediscovery in [docs/REDISCOVERY.md](docs/REDISCOVERY.md)
 - `src/Pinhole.Blobs` — file & directory transfer above the core (`Pinhole.Blobs` package, net8.0 + net10.0, AOT-compatible): one-ticket serving/downloading, BLAKE3 verified streaming, receiver-driven loss healing, resume sidecars, per-ticket ChaCha20-Poly1305; wire format documented in [docs/BLOBS.md](docs/BLOBS.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
