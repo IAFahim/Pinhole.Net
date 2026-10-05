@@ -1,6 +1,21 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — connection resilience (#31)
+
+A connection object now survives everything short of disposal honestly: the punch
+budget runs on the monotonic clock (a suspend cannot condemn a dial before its
+post-wake probe), the confirmed PMTU is re-verified on a cycle (`PmtuReprobeInterval`,
+default 5 min) so a mid-connection MTU shrink falls back to the guaranteed floor
+instead of black-holing every large datagram, a path migration forgets the old path's
+confirmed MTU and re-earns it, a faulted dial can never be zombie-revived into `Open`
+by later traffic, total STUN silence at the periodic refresh itself drives bounded
+revalidation (for platforms whose network notifications are absent or late), and a
+`Dead` connection keeps 1/s beacons for five minutes (completed handshakes only) so a
+rebinded peer can still find it. `docs/PROTOCOL.md` gains the full state-transition
+table and the suspend-vs-restart distinction; nine scenario tests in
+`ResilienceTests.cs`, one known lab gap documented rather than claimed.
+
 ## 1.10.0 (unreleased) — relay failover and changed allocations (#30)
 
 A relay is an availability dependency; several independent relays should not be. The

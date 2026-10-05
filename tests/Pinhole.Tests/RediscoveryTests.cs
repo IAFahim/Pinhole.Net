@@ -301,15 +301,23 @@ public sealed class RediscoveryTests
     {
         await using RendezvousServer server = StartRendezvous();
         byte[] seed = NewSeed();
-        await using PinholeNode victim = await PinholeNode.BindAsync(Options(seed, [Loopback(server)]));
+
+        string ticket;
+        int oldPort;
+        await using (PinholeNode victim = await PinholeNode.BindAsync(Options(seed, [Loopback(server)])))
+        {
+            ticket = victim.ConnectionString;
+            oldPort = victim.LocalPort;
+        }
+
         await using PinholeNode dialer = await PinholeNode.BindAsync(Options(NewSeed(), [Loopback(server)]));
 
-        string ticket = victim.ConnectionString;
-        int oldPort = victim.LocalPort;
-
-        // The victim "roams" without notice: same identity, new address, fresh record.
+        // The victim "roams" without notice: same identity, new address, fresh record. Its
+        // old socket is gone — the ticket's only endpoint is dead, so the record is the
+        // only route. (The victim must actually be disposed here: a live node keeps
+        // republishing its own record under the same peer id, and the last writer wins.)
         await using PinholeNode moved = await BindOnFreshPortAsync(Options(seed, [Loopback(server)]), oldPort, _output);
-        await UntilRecordServedAsync(server, moved.PeerId);
+        await UntilRecordServesPortAsync(server, moved.PeerId, moved.EndpointPublicKey!, moved.LocalPort);
 
         // The ticket only knows the dead port; the connection can only exist via the record.
         await using PinholeConnection conn = await dialer.ConnectAsync(ticket);
@@ -502,6 +510,33 @@ public sealed class RediscoveryTests
         }
 
         throw new TimeoutException($"no record published for peer {peerId:x16}");
+    }
+
+    /// <summary>Waits until the record the server currently serves is the fresh one — the
+    /// decoded, verified record carries the expected port. Any earlier record under the
+    /// same peer id (a disposed predecessor's) must not satisfy this wait.</summary>
+    private static async Task UntilRecordServesPortAsync(
+        RendezvousServer server, ulong peerId, byte[] endpointKey, int port)
+    {
+        using Socket probe = TalkSocket();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            await SendAsync(probe, $"WANT 0 {peerId:x16}", server);
+            string reply = await RecvAsync(probe, TimeSpan.FromSeconds(1));
+            if (reply.StartsWith("INTRO", StringComparison.Ordinal) && reply.Split(' ').Length == 3
+                && !reply.Contains(':')
+                && AddressRecord.TryParseVerified(Base64Url.Decode(reply.Split(' ')[2]), peerId, endpointKey,
+                    DateTimeOffset.UtcNow, out AddressRecord record)
+                && record.Endpoints.Any(e => e.Port == port))
+            {
+                return;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"served record for peer {peerId:x16} never carried port {port}");
     }
 
     private static Socket TalkSocket()

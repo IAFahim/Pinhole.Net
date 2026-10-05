@@ -194,6 +194,33 @@ Kind `2` (reflexive) covers both truths that make a public endpoint reachable:
 STUN-observed mappings and endpoints granted by [router port mapping](#router-port-mapping).
 A peer punches them identically; no wire semantics differ.
 
+## Connection lifecycle across outages
+
+The five connection states and their full transition set:
+
+| State | Meaning | Leaves via |
+|---|---|---|
+| `Punching` | dialing / no usable path yet (also the wounded-pending state after path loss) | → `Open` (direct frame), → `Degraded` (relay leg), → `Dead` (punch budget, monotonic clock) |
+| `Open` | authenticated traffic flowing on the direct path | → `Degraded` (path suspect + relay leg exists), → `Punching` (path suspect, no leg; rebind) |
+| `Degraded` | traffic flowing, but relay-carried | → `Open` (direct revival), → `Punching` (relay leg condemned), → `Dead` |
+| `Dead` | honest "no usable path"; **the same object can return** | → `Open`/`Degraded` (authenticated frame from the peer; bounded 1/s beacons for 5 min after dying keep telling the peer where we are) |
+| `Closed` | terminal, only ever reached by closing | nothing — late frames create a NEW authenticated connection, never a resurrection |
+
+`Send` throws during `Punching`/`Dead` (pathlessness is visible, never silently queued at
+the datagram layer; the blobs layer rides such windows out with its own bounded budget).
+
+**Suspend**: a suspended process exchanges no traffic until it can run again. On wake, the
+engine's single scheduler compares absolute monotonic deadlines, so each maintenance chore
+runs once — no replayed timer backlog — and no cryptographic state resets: session keys,
+counters, and the replay window survive the pause untouched. A `Punching` connection's
+budget is monotonic for exactly this reason: the wall clock jumping across a sleep cannot
+condemn it before a post-wake probe has had its chance.
+
+**Process restart** is a different event from roaming: no connection object survives it.
+Restart recovery is the #29 redial: a persisted identity seed plus signed address records
+lets the peer reconnect you without a new ticket — an authenticated fresh handshake, never
+object preservation.
+
 ## Connection string
 
 `pinhole1:<base64url>` (unpadded). Three payload versions share the envelope:

@@ -95,6 +95,13 @@ public sealed record PinholeOptions
     /// are never torn down by a refresh. Default 1 minute; zero or negative disables.</summary>
     public TimeSpan StunRefreshInterval { get; init; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>How often PMTUD re-verifies the confirmed path MTU (RFC 8899 suggests
+    /// five minutes; the default matches). A path whose MTU SHRANK after confirmation — a
+    /// VPN or tunnel engaged mid-connection — is caught by this re-verification and falls
+    /// back to the guaranteed floor before re-climbing. Values below one second are for
+    /// tests that need to compress the cycle.</summary>
+    public TimeSpan PmtuReprobeInterval { get; init; } = TimeSpan.FromMinutes(5);
+
     /// <summary>Validate silent direct-path death (default true). NAT mappings expire and
     /// firewalls drop packets without any send error, so a connection that has received
     /// nothing on its direct path for <see cref="PathValidationIdle"/> is probed with the
@@ -232,6 +239,8 @@ public sealed record PinholeOptions
             throw new ArgumentOutOfRangeException(nameof(options), "StunRefreshInterval must be zero (off) or at least 100 ms");
         if (options.KeepaliveInterval > TimeSpan.Zero && options.KeepaliveInterval < TimeSpan.FromMilliseconds(100))
             throw new ArgumentOutOfRangeException(nameof(options), "KeepaliveInterval must be zero (off) or at least 100 ms");
+        if (options.PmtuReprobeInterval < TimeSpan.FromSeconds(1))
+            throw new ArgumentOutOfRangeException(nameof(options), "PmtuReprobeInterval must be at least 1 s");
     }
 
     private static async Task<IPEndPoint[]> ResolveStunCatalogAsync(PinholeOptions options, CancellationToken ct)

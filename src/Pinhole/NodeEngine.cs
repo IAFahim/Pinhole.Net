@@ -55,10 +55,11 @@ internal sealed class ConnState
     public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
     public bool HsckSent;                    // Gate: our confirm went out in an Hsck frame
     public bool Announced;
-    public DateTimeOffset LastKick = DateTimeOffset.UtcNow;
+    public long LastKickTicks = Environment.TickCount64; // monotonic: suspend-proof punch budget
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
     public int PunchGeneration;
     public long LastLookupTicks;           // Gate; cadence for punch-time record lookups
+    public long DeadSinceTicks;            // Gate; when the punch budget condemned the connection
     public int PermitInFlight;               // single-flight guard for TURN permission round trips
     public IrohRelay? Iroh;
     public byte[]? IrohPeerKey;
@@ -87,6 +88,7 @@ internal sealed class ConnState
     // pings climb from there, and a confirmed size raises the app payload ceiling. All
     // fields are guarded by Gate except the counters.
     public int PmtuWire;                   // Gate; confirmed wire capacity (0 = unprobed)
+    public bool PmtuVerifiedSize;          // Gate; the confirmed size itself was (re)verified
     public bool PmtuOutstanding;           // Gate
     public long PmtuProbeNonce;            // Gate; TickCount64 | PmtuProbeMarker
     public int PmtuProbeSize;              // Gate; wire bytes of the outstanding probe
@@ -126,6 +128,8 @@ internal sealed class NodeEngine : IDisposable
     private static readonly TimeSpan PunchPace = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan UpgradePace = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SymmetricDirectTrickle = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan DeadBeaconPace = TimeSpan.FromSeconds(1);
+    private const long DeadBeaconBudgetMs = 300_000; // five minutes of post-Dead beacons
     private const int MaxUpgradeAttempts = 120; // then passive: peer frames can still open direct
     private static readonly TimeSpan RelayRetryBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RelayMaxBackoff = TimeSpan.FromMinutes(5);
@@ -142,7 +146,8 @@ internal sealed class NodeEngine : IDisposable
     private const int PmtuCeilingV6 = 1452; // Ethernet IPv6: 1500 - 40 - 8
     private const int PmtuStepBytes = 128;
     private const int PmtuProbeAttempts = 3;
-    private const long PmtuReprobeDelayMs = 300_000; // RFC 8899: re-probe a settled path periodically
+    // RFC 8899 re-probe cadence comes from PmtuReprobeInterval (default 5 min): a settled
+    // path re-verifies its confirmed size, catching a mid-connection MTU shrink.
     private const long PmtuProbeMarker = 1L << 62;
 
     private readonly ulong _peerId;
@@ -1463,7 +1468,7 @@ internal sealed class NodeEngine : IDisposable
     {
         lock (c.Gate)
         {
-            c.LastKick = DateTimeOffset.UtcNow;
+            c.LastKickTicks = Environment.TickCount64;
         }
 
         int gen = Interlocked.Increment(ref c.PunchGeneration);
@@ -1493,12 +1498,33 @@ internal sealed class NodeEngine : IDisposable
                 {
                     lock (c.Gate)
                     {
-                        if (DateTimeOffset.UtcNow - c.LastKick > _options.ConnectTimeout)
+                        // Monotonic clock on purpose: after a suspend/wake the wall clock jumps
+                        // forward by the sleep, and a UtcNow comparison would condemn the
+                        // punch before a single post-wake probe could answer.
+                        if (Environment.TickCount64 - c.LastKickTicks > (long)_options.ConnectTimeout.TotalMilliseconds)
                         {
                             Transition(c, PinholeConnectionState.Dead);
-                            return;
+                            c.DeadSinceTicks = Environment.TickCount64;
+                            // Dead is revivable, and the peer can only revive us if our
+                            // frames keep telling it where we now are — after a rebind the
+                            // old candidates it holds are dead, so an announce has nowhere
+                            // to land. A real session (its dial or handshake completed)
+                            // therefore keeps a slow beacon: one paced round per second for
+                            // five minutes, after which it goes quiet and stays passively
+                            // revivable. Stranger-flood husks never completed a handshake
+                            // and never beacon — no reflection amplification.
+                            if (!c.Connected.Task.IsCompleted || Environment.TickCount64 - c.DeadSinceTicks > DeadBeaconBudgetMs)
+                            {
+                                return;
+                            }
                         }
                     }
+                }
+
+                if (c.State == PinholeConnectionState.Dead
+                    && Environment.TickCount64 - c.DeadSinceTicks > DeadBeaconBudgetMs)
+                {
+                    return; // beacon budget spent; passive revival still works
                 }
 
                 PinholeCandidate[] candidates;
@@ -1565,7 +1591,13 @@ internal sealed class NodeEngine : IDisposable
                     }
                 }
 
-                await Task.Delay(c.State == PinholeConnectionState.Degraded ? UpgradePace : PunchPace, stop.Token).ConfigureAwait(false);
+                TimeSpan pace = c.State switch
+                {
+                    PinholeConnectionState.Dead => DeadBeaconPace,
+                    PinholeConnectionState.Degraded => UpgradePace,
+                    _ => PunchPace,
+                };
+                await Task.Delay(pace, stop.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1682,15 +1714,32 @@ internal sealed class NodeEngine : IDisposable
             IPEndPoint[] perServer = await ProbeStunObservedAsync(ct).ConfigureAwait(false);
             if (perServer.Length == 0)
             {
+                // Every configured STUN server went silent while at least one used to
+                // answer: this is the bounded periodic revalidation for platforms whose
+                // network-change notifications are absent or delayed. The mapping-change
+                // logic below cannot fire from zero observations, so a network that went
+                // away entirely would otherwise stay unnoticed until a dial fails.
+                // RecoverAsync probes, rebinds only on confirmed silence, and debounces.
+                if (_reflexive.Count > 0)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(RecoverDebounce, _shutdown.Token).ConfigureAwait(false);
+                            await RecoverAsync(forceRebind: false, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                        }
+                    });
+                }
+
                 return;
             }
 
             ObserveNatHint(perServer);
             IPEndPoint[] observed = new HashSet<IPEndPoint>(perServer).ToArray();
-            if (observed.Length == 0)
-            {
-                return;
-            }
 
             bool changed;
             lock (_gate)
@@ -1962,11 +2011,25 @@ internal sealed class NodeEngine : IDisposable
 
                 if (++c.PmtuProbeTries >= PmtuProbeAttempts)
                 {
-                    // The size never answered: keep the confirmed floor and cool down. An
-                    // over-MTU probe is silently dropped by the network, not errored, so
-                    // absence of a pong IS the measurement.
+                    // The size never answered. An over-MTU probe is silently dropped by the
+                    // network, not errored, so absence of a pong IS the measurement.
                     c.PmtuOutstanding = false;
-                    c.PmtuNextProbeTicks = now + PmtuReprobeDelayMs;
+                    if (c.PmtuProbeSize == c.PmtuWire && c.PmtuWire > PmtuBaseWire)
+                    {
+                        // The CONFIRMED size no longer traverses: the path's MTU shrank
+                        // under us. Fall back to the guaranteed floor and re-climb —
+                        // app-sized sends stop blackholing within one probe cycle.
+                        c.PmtuWire = PmtuBaseWire;
+                        c.PmtuVerifiedSize = false;
+                        c.PmtuNextProbeTicks = 0;
+                        return;
+                    }
+
+                    // A failed climb starts the cooldown; the cycle after EVERY cooldown
+                    // re-verifies the confirmed size first (VerifiedSize reset here), so a
+                    // path that shrank later is caught on the next cooldown, not never.
+                    c.PmtuVerifiedSize = false;
+                    c.PmtuNextProbeTicks = now + (long)_options.PmtuReprobeInterval.TotalMilliseconds;
                     return;
                 }
             }
@@ -1977,11 +2040,24 @@ internal sealed class NodeEngine : IDisposable
                     return;
                 }
 
-                int next = NextPmtuSizeLocked(c);
-                if (next <= 0)
+                int next;
+                if (c.PmtuWire > PmtuBaseWire && !c.PmtuVerifiedSize)
                 {
-                    c.PmtuNextProbeTicks = now + PmtuReprobeDelayMs; // ceiling reached; re-climb later
-                    return;
+                    // RFC 8899 size re-verification: prove the CONFIRMED size still
+                    // traverses before climbing further. A path whose MTU shrank after the
+                    // confirmation (a VPN or tunnel engaged mid-connection) silently drops
+                    // app-sized frames while small validation probes keep passing — without
+                    // this, the stale confirmation would blackhole large payloads forever.
+                    next = c.PmtuWire;
+                }
+                else
+                {
+                    next = NextPmtuSizeLocked(c);
+                    if (next <= 0)
+                    {
+                        c.PmtuNextProbeTicks = now + (long)_options.PmtuReprobeInterval.TotalMilliseconds; // ceiling reached; re-climb later
+                        return;
+                    }
                 }
 
                 c.PmtuProbeSize = next;
@@ -2770,7 +2846,16 @@ internal sealed class NodeEngine : IDisposable
                     && !arrival.ViaRelay && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
                 {
                     c.PmtuOutstanding = false;
-                    c.PmtuWire = Math.Max(c.PmtuWire, c.PmtuProbeSize);
+                    if (c.PmtuProbeSize > c.PmtuWire)
+                    {
+                        c.PmtuWire = c.PmtuProbeSize;
+                        c.PmtuVerifiedSize = false; // the new size earns its own re-verification later
+                    }
+                    else
+                    {
+                        c.PmtuVerifiedSize = true; // the confirmed size re-verified; keep climbing
+                    }
+
                     c.PmtuNextProbeTicks = 0; // climb again on the next tick
                 }
             }
@@ -3042,6 +3127,22 @@ internal sealed class NodeEngine : IDisposable
             c.DirectRemote = adopted;
             c.DirectRemoteEp = ToEndpoint(adopted);
             Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
+            // Migration: the endpoint changed (roam, family switch), so the confirmed MTU
+            // belongs to the OLD path. Forget it and re-climb — a v6 path's plateau and a
+            // freshly-engaged VPN's overhead say so independently.
+            if (c.PmtuWire != 0 || c.PmtuOutstanding)
+            {
+                c.PmtuWire = 0;
+                c.PmtuOutstanding = false;
+                c.PmtuVerifiedSize = false;
+                c.PmtuNextProbeTicks = 0;
+            }
+
+            if (c.Connected.Task.IsFaulted)
+            {
+                return; // the dial faulted (pin mismatch, refused handshake): this husk is not revivable
+            }
+
             if (c.State != PinholeConnectionState.Open)
             {
                 c.State = PinholeConnectionState.Open;

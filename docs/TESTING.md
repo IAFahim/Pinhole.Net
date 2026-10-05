@@ -198,3 +198,34 @@ witness; the in-place heal above supersedes it operationally.
 Real-infrastructure coverage: the #26 harness (`docs/TESTING.md` § #26) still runs
 iroh-relay and coturn processes on real sockets; a second coturn instance for
 cross-server permission behavior is the remaining env-gated gap (COTURN_BIN).
+
+
+## #31 — resilience: outages, suspend-like pauses, MTU changes
+
+`ResilienceTests.cs`, virtual lab, engine timers compressed below the outage durations
+(the long-outage cell's real wait stands in for the issue's five-minute regime by
+exceeding every configurable budget):
+
+| Scenario | Test | Proof |
+|---|---|---|
+| 1 s outage | `BriefOutage_1s_...` | under the validation budget: never left `Open`, no ceremony |
+| 30 s outage | `Outage30s_...` | honest wounded state, bounded datagram spend (no storm), same-object heal |
+| Outage past every budget | `OutageLongerThanEveryBudget_...` | honest `Dead`, same-object revival when the route returns (crypto counters/replay window intact) |
+| Suspend-like pause | `SuspendLikePause_...` | 12 s total silence; timers fire once after wake (no storm, bounded probes), traffic returns |
+| No network notifications | `NoNetworkWatch_TotalStunSilence_...` | total STUN silence at the periodic refresh itself drives the bounded revalidation/rebind; reflexives recover with visibility |
+| MTU shrinks mid-flow | `MtuShrankMidFlow_...` | RFC 8899 re-verification catches the shrink, falls back to the floor, keeps flowing |
+| MTU across migration | `MtuClimbResetsOnPathMigration` | rebind (endpoint change) forgets the old path's confirmed MTU and re-climbs |
+| Faulted dial stays dead | `FaultedDial_IsNeverZombieRevived` | a pin-refused dial is never revived into `Open` by later traffic |
+| Dispose wins | `DisposeDuringRecovery_...` | disposal mid-recovery silences the node; its peer never comes back to life |
+
+Engine changes that surfaced here: the punch budget is monotonic (suspend-proof), PMTU
+re-verification (`PmtuReprobeInterval`, default 5 min) detects a mid-connection MTU shrink
+and falls back, path migration resets the PMTU climb, total-STUN-silence at the refresh
+triggers recovery when OS notifications are absent, and a `Dead` connection keeps bounded
+1/s beacons for five minutes (completed handshakes only — stranger-flood husks never
+beacon) so a rebinded peer can be found again.
+
+**Known gap**: a BOTH-sides-`Dead` rebind while the STUN path is dark (stale reflexives)
+does not heal in the lab — beacons flow but PACK replies do not return. The single-side
+variants (RoamingTests' rebind, the outage ladder above) all heal; the corner is recorded
+rather than claimed.

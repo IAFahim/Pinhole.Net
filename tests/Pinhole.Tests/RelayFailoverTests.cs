@@ -19,14 +19,21 @@ public sealed class RelayFailoverTests
     private readonly ITestOutputHelper _output;
     private const int Lifetime = 12; // seconds: refresh ticks clamp to 5s; expiry leaves two spare ticks, and a dead server is declared after 3 missed ticks (≈15s)
 
+    // A relay-first dial is a chain of TURN round trips (allocation, permission, sealed
+    // handshake); under a fully parallel suite its honest duration stretches past the 15 s
+    // production default, and the engine would condemn its own dial. This class measures
+    // failover behavior, not dial latency — the dials get headroom, and passing runs never
+    // wait for it (the awaits complete the moment the handshake lands).
+    private static readonly TimeSpan RelayHandshake = TimeSpan.FromSeconds(45);
+
     public RelayFailoverTests(ITestOutputHelper output) => _output = output;
 
     private static async Task<(PinholeConnection DialerSide, PinholeConnection ListenerSide)> ConnectAsync(
         PinholeNode listener, PinholeNode dialer, string? listenerString = null)
     {
         Task<PinholeConnection> accept = listener.AcceptAsync();
-        PinholeConnection dialerSide = await dialer.ConnectAsync(listenerString ?? listener.ConnectionString).WaitAsync(TestBudget.Handshake);
-        PinholeConnection listenerSide = await accept.WaitAsync(TestBudget.Handshake);
+        PinholeConnection dialerSide = await dialer.ConnectAsync(listenerString ?? listener.ConnectionString).WaitAsync(RelayHandshake);
+        PinholeConnection listenerSide = await accept.WaitAsync(RelayHandshake);
         return (dialerSide, listenerSide);
     }
 
@@ -54,12 +61,17 @@ public sealed class RelayFailoverTests
     }
 
     /// <summary>Binds a relay-only node: every direct datagram dies in the virtual internet,
-    /// so the session physically cannot exist without the TURN path.</summary>
+    /// so the session physically cannot exist without the TURN path. The dial budget matches
+    /// <see cref="RelayHandshake"/> so the engine does not condemn its own relay-first dial
+    /// under suite load.</summary>
     private static Task<PinholeNode> RelayOnlyNodeAsync(VirtualLab lab, VirtualNat nat,
         Func<PinholeOptions, PinholeOptions>? tweak = null)
     {
         nat.BlockAllOutboundDirect = true;
-        return lab.BindNodeAsync(nat, tweak: tweak);
+        return lab.BindNodeAsync(nat, tweak: o => (tweak?.Invoke(o) ?? o) with
+        {
+            ConnectTimeout = RelayHandshake,
+        });
     }
 
     /// <summary>Settle-tolerant exchange: polls the probe until the marker lands or the
