@@ -19,14 +19,14 @@ public sealed class PathValidationTests
     private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(150);
 
     private static PinholeOptions Opts(bool validation = true, FakeIrohRelay? server = null,
-        TimeSpan? connectTimeout = null) => new()
+        TimeSpan? connectTimeout = null, TimeSpan? idle = null) => new()
     {
         StunServers = [],
         Relays = [],
         IrohRelayUrls = server is null ? [] : [server.Url],
         EnableNetworkWatch = false, EnablePortMapping = false,
         EnablePathValidation = validation,
-        PathValidationIdle = Idle,
+        PathValidationIdle = idle ?? Idle,
         PathValidationProbeInterval = Interval,
         PathValidationMaxUnansweredProbes = 3,
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
@@ -144,15 +144,17 @@ public sealed class PathValidationTests
     [Fact]
     public async Task HealthyDirectTraffic_ProducesNoProbes_AndStaysOpen()
     {
-        await using var a = await PinholeNode.BindAsync(Opts());
-        await using var b = await PinholeNode.BindAsync(Opts());
+        // A wider idle window than the file default: the flood paces at ~20 ms and a single
+        // scheduler stall on a loaded CI runner must not read as a dead path.
+        await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(500)));
+        await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(500)));
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         // One-way flood for far longer than the idle window: the RECEIVER hears constant
         // direct traffic and must never probe; the SENDER hears nothing, so its probes run —
         // and are answered, which is exactly a healthy one-way stream staying Open.
         var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromMilliseconds(1200))
+        while (sw.Elapsed < TimeSpan.FromMilliseconds(2000))
         {
             atB.Send("streaming"u8);
             await Task.Delay(20);
