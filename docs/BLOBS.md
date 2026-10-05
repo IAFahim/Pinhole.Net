@@ -96,6 +96,81 @@ connection layer's 1200-byte datagram budget with the AEAD overhead included.
   as its own stream over the same connection, sequentially, sharing one frame-counter
   space (see encryption).
 
+### Congestion control (1.9.0)
+
+The rules above describe the ARQ's shape; this section is the control law that sizes it.
+Congestion control lives **entirely in the downloader** — a deliberate consequence of the
+receiver-driven design: requests are the provider's only permission to send, so the
+downloader's request window *is* the data path's send window, and no provider change is
+needed (a 1.9.0 downloader against a 1.8.0 provider gets full CC; the wire carries
+nothing new).
+
+**Why not the fixed window.** 256 KiB of in-flight chunks with a fixed 900 ms re-request
+timer is fine on an empty lab link and wrong everywhere else: it fills a bottleneck's
+queue in one burst (loss that is the sender's own fault), re-requests on a cadence blind
+to the actual round trip, and two downloads sharing a link fight by queue-overflow luck.
+
+**The control law — paced AIMD over request credits:**
+
+- **RTT estimation** (RFC 6298 shape): every chunk that arrives on its *first* request
+  samples `now − requestedAt`; re-requested chunks are excluded (Karn's rule — their
+  samples include the retransmission and would inflate the estimate). `srtt ← 7/8 srtt +
+  1/8 sample`, `rttvar ← 3/4 rttvar + 1/4 |sample − srtt|`, seeded 100 ms / 50 ms.
+- **Retransmission timer**: a missing chunk is re-requested after `rto = clamp(srtt +
+  4·rttvar, 200 ms, 2 s)` — replacing the fixed 900 ms. Fast paths recover fast; stalled
+  paths stop feeding a fixed-cadence flood.
+- **Congestion window (`cwnd`)**, in chunks: outstanding requested-but-unreceived chunks
+  never exceed it. Initial 32 (a modest slow start), minimum 8 (the timer floor — one
+  probe run keeps healing alive), maximum 512. It replaces the fixed 4×64 window.
+- **Pacing**: every request — new or re-request — consumes a token from a bucket refilled
+  at `cwnd chunks / srtt` (≈ `cwnd·1 KiB / srtt` bytes/s), burst allowance 4 requests.
+  The control loop tick drops from 250 ms to 50 ms so pacing is meaningful. Pacing is
+  what keeps a temporarily-too-high window from overflowing the queue in a burst.
+- **Loss response — multiplicative decrease, once per RTT epoch**: firing a re-request
+  is the loss signal. If no decrease happened within the last `srtt`, the window drops
+  to `⌈cwnd · 3/4⌉` (floor 8) and that point becomes the **slow-start threshold**
+  (`ssthresh`). The 3/4 factor (not TCP's 1/2) is deliberate: re-requests also fire
+  under random loss that has nothing to do with congestion, and halving on every 5 %-loss
+  round would pin the window near the floor. AIMD still converges to a fair share with
+  any decrease factor; only convergence speed changes.
+- **Growth**: a loss-free epoch doubles `cwnd` while it is below `ssthresh` — fast
+  recovery back to the pre-loss operating point — and adds one chunk per epoch above it
+  (additive probing, cap 512). Without the threshold, one slow-start overshoot would
+  cost minutes of +1-per-epoch crawling; with it, a random-loss dip heals in two or
+  three RTTs.
+
+**How retries avoid amplifying congestion.** Six rules, each closing a specific flood
+path: (1) re-requests are *selective* — exactly the missing chunk, never the run; (2)
+re-requested chunks occupy the same `cwnd` budget, so a loss shrinks the window *before*
+the next requests leave; (3) re-requests draw from the same pacer bucket as new requests
+— there is no separate retransmit lane to burst on; (4) the RTO is RTT-derived, so a slow
+path stretches its retries instead of re-flooding every 900 ms; (5) a chunk that has
+already been re-requested backs off exponentially (2×, 4× the RTO) — a chunk that is
+merely slow deep in a paced pipeline must not re-fire every timer tick, and only a
+chunk's *first* re-request counts as a loss signal; (6) the stall clock and the
+pathlessness ride-out bound the whole loop — a dead path ends the download honestly
+rather than spinning the request pump.
+
+**Fairness argument.** Two paced AIMD flows with equal RTT sharing one bottleneck is the
+classical fixed point: each flow's losses scale with its share of the queue overflow,
+each backs off multiplicatively once per epoch, each grows additively — shares converge
+to equal. Pacing removes the window-quantization bursts that make unpaced AIMD unfair in
+practice. The lab's two-flow bottleneck test (below) measures this as a Jain index.
+
+**Validation discipline** (`tests/Pinhole.Tests/CongestionTests.cs`, lab in
+`docs/TESTING.md`): longer transfers (2 MiB per flow), multiple recorded seeds per rung,
+comparing CC against the fixed-window baseline (kept reachable through an internal test
+seam) on four axes: goodput, mean/max bottleneck queue wait, redundant retransmissions,
+and Jain fairness across two competing flows. The bar is *not* "faster at every loss
+level" — on a clean uncongested link the fixed window can win outright. The bar is: at
+equal goodput under congestion, materially lower queue delay and fewer wasted
+retransmissions; and a near-even split between competing flows that the fixed window
+does not achieve.
+
+The whole-download stall rule (30 s without verified progress) is unchanged, and the
+reorder-window bound (512 chunks past the applied cursor) still applies — `cwnd` never
+exceeds it.
+
 ### Directories
 
 A directory is a manifest blob plus one blob per file. The manifest is binary, not JSON —

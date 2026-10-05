@@ -10,7 +10,13 @@ public readonly record struct BlobProgress(long VerifiedBytes, long TotalBytes, 
 
 /// <summary>Outcome of a finished download: where the verified content landed, how many
 /// bytes verified, and whether an interrupted earlier attempt's checkpoint was reused.</summary>
-public sealed record BlobDownloadResult(string Path, long Bytes, bool Resumed);
+public sealed record BlobDownloadResult(string Path, long Bytes, bool Resumed)
+{
+    /// <summary>Re-requests fired by the ARQ (lab/CC instrumentation): every chunk the
+    /// downloader had to ask for again. Zero extra re-requests means the wire delivered
+    /// every first transmission.</summary>
+    internal long ReRequests { get; init; }
+}
 
 /// <summary>Options for a download. <see cref="NodeOptions"/> overrides the downloading
 /// node's configuration entirely; listen is forced off — a downloader dials, it does not
@@ -20,6 +26,11 @@ public sealed record BlobDownloadOptions
     /// <summary>Full <see cref="Pinhole.PinholeOptions"/> override for the dedicated
     /// downloading node (offline tests pass infrastructure-empty options).</summary>
     public PinholeOptions? NodeOptions { get; init; }
+
+    /// <summary>Test seam: reproduce the pre-1.9.0 fixed 4×64-chunk window with its 900 ms
+    /// re-request timer, for A/B validation of congestion control against the recorded
+    /// baseline. Default false = the paced-AIMD control law (see docs/BLOBS.md).</summary>
+    internal bool FixedWindowArq { get; init; }
 }
 
 /// <summary>The receiving half of the ticket: dial the provider from the embedded
@@ -65,7 +76,8 @@ public static class BlobClient
             var fileSend = new SendCounter();
             StreamDownloader? downloader = null;
             downloader = new StreamDownloader(conn, sink,
-                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root);
+                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root,
+                fixedWindow: options?.FixedWindowArq ?? false);
             long bytes;
             try
             {
@@ -77,12 +89,13 @@ public static class BlobClient
                 throw;
             }
 
-            return new BlobDownloadResult(target, bytes, sink.Resumed);
+            return new BlobDownloadResult(target, bytes, sink.Resumed) { ReRequests = downloader.ReRequests };
         }
 
         var send = new SendCounter();
         var manifestSink = new MemorySink();
-        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root);
+        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root,
+            fixedWindow: options?.FixedWindowArq ?? false);
         try
         {
             await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
@@ -97,10 +110,12 @@ public static class BlobClient
         long total = entries.Sum(e => e.Size);
         long verified = 0;
         bool anyResumed = false;
+        long reRequests = manifestDownloader.ReRequests;
         for (int i = 0; i < entries.Count; i++)
         {
             var sink = new FileSink(SafeJoin(rootDir, entries[i].Path), entries[i].Root);
-            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root);
+            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root,
+                fixedWindow: options?.FixedWindowArq ?? false);
             long bytes;
             try
             {
@@ -113,10 +128,11 @@ public static class BlobClient
             }
             verified += bytes;
             anyResumed |= sink.Resumed;
+            reRequests += entryDownloader.ReRequests;
             progress?.Report(new BlobProgress(verified, total, i + 1, entries.Count));
         }
 
-        return new BlobDownloadResult(rootDir, verified, anyResumed);
+        return new BlobDownloadResult(rootDir, verified, anyResumed) { ReRequests = reRequests };
     }
 
     /// <summary>One monotonic frame counter for the whole connection: every stream shares
@@ -133,15 +149,26 @@ public static class BlobClient
     /// <summary>Receiver-driven ARQ over one blob stream: bounded in-flight range requests
     /// anchored at the lowest unapplied chunk (a hostile sender cannot make us buffer the
     /// far end of the file), per-chunk CV verification on arrival, stale re-requests, and
-    /// a stall clock that only verified progress resets.</summary>
+    /// a stall clock that only verified progress resets. Since 1.9.0 the request stream is
+    /// congestion-controlled — paced AIMD over request credits, the control law documented
+    /// in docs/BLOBS.md; <see cref="_fixedWindow"/> reproduces the pre-1.9.0 behavior for
+    /// baseline A/B runs.</summary>
     private sealed class StreamDownloader
     {
         private const int RunLength = BlobWire.MaxRequestCount;
-        private const int MaxOutstanding = 4 * BlobWire.MaxRequestCount;
-        private static readonly TimeSpan Pace = TimeSpan.FromMilliseconds(250);
-        private static readonly TimeSpan ChunkTimeout = TimeSpan.FromMilliseconds(900);
+        private const int MaxOutstanding = 4 * BlobWire.MaxRequestCount; // the fixed-window baseline cap
+        private static readonly TimeSpan Pace = TimeSpan.FromMilliseconds(250);   // fixed-window loop tick
+        private static readonly TimeSpan CcPace = TimeSpan.FromMilliseconds(50);  // paced loop tick
+        private static readonly TimeSpan ChunkTimeout = TimeSpan.FromMilliseconds(900); // fixed-window RTO
         private static readonly TimeSpan FirstHeadTimeout = TimeSpan.FromSeconds(20);
         private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(30);
+
+        // Paced-AIMD constants (docs/BLOBS.md, "Congestion control").
+        private const int CwndInitial = 32;
+        private const int CwndMinimum = 8;
+        private const int CwndMaximum = 512;
+        private const double DecreaseFactor = 0.75;
+        private const int PacerBurstChunks = 4 * RunLength;
 
         private readonly PinholeConnection _conn;
         private readonly Sink _sink;
@@ -150,7 +177,10 @@ public static class BlobClient
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly Dictionary<long, long> _requestedAt = new();
+        private readonly Dictionary<long, int> _retransCount = new(); // per-chunk RTO backoff
+        private readonly HashSet<long> _retransmitted = []; // Karn's rule: no RTT samples from these
         private readonly SendCounter _send;
+        private readonly bool _fixedWindow;
         private long _maxRequested = -1;
         private long _helloSince = -1;
 
@@ -159,10 +189,23 @@ public static class BlobClient
         private long _verified;
         private long _lastVerifiedTicks;
 
+        // CC state (per stream: a directory re-learns each file — cheap and isolated).
+        private int _cwnd = CwndInitial;
+        private int _ssthresh = CwndMaximum;
+        private double _srttMs = 100, _rttvarMs = 50;
+        private bool _gotRttSample;
+        private long _lastDecreaseTicks = long.MinValue;
+        private long _epochStartTicks = Environment.TickCount64;
+        private int _epochReRequests;
+        private int _pacerTokens = PacerBurstChunks;
+        private long _pacerRefillTicks = Environment.TickCount64;
+        internal long ReRequests;
+
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
         public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
-            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null)
+            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null,
+            bool fixedWindow = false)
         {
             _conn = conn;
             _sink = sink;
@@ -171,6 +214,7 @@ public static class BlobClient
             _session = session;
             _expectedRoot = expectedRoot;
             _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
+            _fixedWindow = fixedWindow;
         }
 
         public async Task<long> RunAsync(CancellationToken ct)
@@ -234,15 +278,16 @@ public static class BlobClient
             }
         }
 
-        private async Task<long> RunLoopAsync(ChannelReader<BlobWire.Frame> frames, CancellationToken ct)
+    private async Task<long> RunLoopAsync(ChannelReader<BlobWire.Frame> frames, CancellationToken ct)
+    {
+        _lastVerifiedTicks = Environment.TickCount64;
+        while (true)
         {
-            _lastVerifiedTicks = Environment.TickCount64;
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                long now = Environment.TickCount64;
+            ct.ThrowIfCancellationRequested();
+            long now = Environment.TickCount64;
+            LoopTick?.Invoke();
 
-                if (_totalChunks < 0)
+            if (_totalChunks < 0)
                 {
                     if (_helloSince < 0)
                     {
@@ -265,8 +310,13 @@ public static class BlobClient
                         break;
                     }
 
+                    if (!_fixedWindow)
+                    {
+                        MaybeGrowEpoch(now);
+                    }
+
+                    SweepStale(now); // healing first: re-requests claim pacer tokens before new runs
                     TopUpRequests(now);
-                    SweepStale(now);
                     _sink.Checkpoint();
                 }
 
@@ -277,7 +327,8 @@ public static class BlobClient
                     bool more;
                     try
                     {
-                        more = await frames.WaitToReadAsync(ct).AsTask().WaitAsync(Pace, ct).ConfigureAwait(false);
+                        more = await frames.WaitToReadAsync(ct).AsTask()
+                            .WaitAsync(_fixedWindow ? Pace : CcPace, ct).ConfigureAwait(false);
                     }
                     catch (TimeoutException)
                     {
@@ -328,6 +379,13 @@ public static class BlobClient
                 return;
             }
 
+            if (_requestedAt.TryGetValue(f.Index, out long requestedAt) && !_retransmitted.Contains(f.Index))
+            {
+                SampleRtt(now - requestedAt); // first-try arrivals only: retransmitted samples lie
+            }
+
+            _retransmitted.Remove(f.Index);
+            _retransCount.Remove(f.Index);
             int len = (int)Math.Min(Blake3.ChunkSize, _totalBytes - f.Index * Blake3.ChunkSize);
             if (f.ChunkData!.Length != len)
             {
@@ -353,10 +411,26 @@ public static class BlobClient
 
         private void TopUpRequests(long now)
         {
-            while (_requestedAt.Count < MaxOutstanding && _maxRequested + 1 < _totalChunks)
+            int budget = _fixedWindow ? MaxOutstanding : _cwnd;
+            if (!_fixedWindow)
+            {
+                RefillPacer(now);
+            }
+
+            while (_requestedAt.Count < budget && _maxRequested + 1 < _totalChunks)
             {
                 long start = _maxRequested + 1;
-                int count = (int)Math.Min(Math.Min(RunLength, _totalChunks - start), MaxOutstanding - _requestedAt.Count);
+                int count = (int)Math.Min(Math.Min(RunLength, _totalChunks - start), budget - _requestedAt.Count);
+                if (!_fixedWindow)
+                {
+                    if (_pacerTokens < count)
+                    {
+                        return; // paced: the remainder goes out as the bucket refills
+                    }
+
+                    _pacerTokens -= count;
+                }
+
                 for (long idx = start; idx < start + count; idx++)
                 {
                     _requestedAt[idx] = now;
@@ -371,12 +445,118 @@ public static class BlobClient
         {
             foreach ((long idx, long at) in _requestedAt)
             {
-                if (now - at >= (long)ChunkTimeout.TotalMilliseconds)
+                // Per-chunk exponential backoff: a re-requested chunk that still has not
+                // arrived waits 2×, 4× (capped) the RTO before asking again — a chunk that
+                // is merely slow (deep in a paced pipeline) must not re-fire every RTO,
+                // each re-fire amplifying load and depressing the window.
+                int backoff = _fixedWindow ? 0 : Math.Min(_retransCount.GetValueOrDefault(idx), 2);
+                long timeout = (long)(_fixedWindow
+                    ? ChunkTimeout.TotalMilliseconds
+                    : RtoMilliseconds() * (1 << backoff));
+                if (now - at < timeout)
                 {
-                    _requestedAt[idx] = now;
-                    Send(BlobWire.Request(_stream, idx, 1));
+                    continue;
                 }
+
+                if (!_fixedWindow)
+                {
+                    if (_pacerTokens < 1)
+                    {
+                        continue; // paced: try again next tick; the chunk's timer stays armed
+                    }
+
+                    _pacerTokens--;
+                    ReRequests++;
+                    bool firstAsk = _retransCount.GetValueOrDefault(idx) == 0;
+                    if (firstAsk)
+                    {
+                        _epochReRequests++;
+                        OnLoss(now); // one loss signal per chunk: backoff re-asks are the same event
+                    }
+
+                    _retransCount[idx] = _retransCount.GetValueOrDefault(idx) + 1;
+                    _retransmitted.Add(idx);
+                }
+
+                _requestedAt[idx] = now;
+                Send(BlobWire.Request(_stream, idx, 1));
             }
+        }
+
+        // ------------------------------------------------------------------ congestion control
+
+        private double RtoMilliseconds() => Math.Clamp(_srttMs + 4 * _rttvarMs, 200, 2_000);
+
+        private void SampleRtt(long sampleMs)
+        {
+            if (sampleMs is < 0 or > 5_000)
+            {
+                return; // clock weirdness or a straggler from before a roam: not a path sample
+            }
+
+            if (!_gotRttSample)
+            {
+                _gotRttSample = true;
+                _srttMs = sampleMs;
+                _rttvarMs = Math.Max(sampleMs / 2, 1);
+                return;
+            }
+
+            _rttvarMs = 0.75 * _rttvarMs + 0.25 * Math.Abs(sampleMs - _srttMs);
+            _srttMs = 0.875 * _srttMs + 0.125 * sampleMs;
+        }
+
+        /// <summary>A re-request fired: loss signal. One multiplicative decrease per RTT
+        /// epoch — random loss and congestion loss are indistinguishable here, so the
+        /// factor is 3/4, not TCP's 1/2 (docs/BLOBS.md explains the choice). The decrease
+        /// point becomes the slow-start threshold: clean epochs then double back toward it
+        /// (fast recovery) instead of crawling additively from the floor.</summary>
+        private void OnLoss(long now)
+        {
+            if (now - _lastDecreaseTicks < (long)_srttMs)
+            {
+                return;
+            }
+
+            _lastDecreaseTicks = now;
+            _ssthresh = Math.Max(2 * CwndMinimum, (int)Math.Ceiling(_cwnd * DecreaseFactor));
+            _cwnd = _ssthresh;
+        }
+
+        /// <summary>End-of-epoch growth: a loss-free epoch doubles the window while it is
+        /// below the slow-start threshold (recovery), adds one chunk above it (probing) —
+        /// the classic AIMD fixed point, with the threshold reset on every loss.</summary>
+        private void MaybeGrowEpoch(long now)
+        {
+            if (now - _epochStartTicks < (long)Math.Max(_srttMs, 50))
+            {
+                return;
+            }
+
+            _epochStartTicks = now;
+            if (_epochReRequests == 0)
+            {
+                _cwnd = _cwnd < _ssthresh
+                    ? Math.Min(_ssthresh, _cwnd * 2)
+                    : Math.Min(CwndMaximum, _cwnd + 1);
+            }
+
+            _epochReRequests = 0;
+            CcTrace?.Invoke($"epoch: cwnd={_cwnd} ssthresh={_ssthresh} srtt={_srttMs:F0}ms rttvar={_rttvarMs:F0}ms " +
+                            $"rto={RtoMilliseconds():F0}ms outstanding={_requestedAt.Count} re-req={ReRequests} tokens={_pacerTokens}");
+        }
+
+        private void RefillPacer(long now)
+        {
+            long elapsed = now - _pacerRefillTicks;
+            if (elapsed <= 0)
+            {
+                return;
+            }
+
+            _pacerRefillTicks = now;
+            double chunksPerMs = _cwnd / Math.Max(_srttMs, 1);
+            _pacerTokens = (int)Math.Min(PacerBurstChunks, _pacerTokens + elapsed * chunksPerMs);
         }
 
         private void CheckStall(long now)
@@ -608,6 +788,12 @@ public static class BlobClient
     }
 
     // ---------------------------------------------------------------- path safety
+
+    /// <summary>Temporary lab instrumentation: live CC state per epoch (null in production).</summary>
+    internal static Action<string>? CcTrace;
+
+    /// <summary>Temporary lab instrumentation: one tick per control-loop iteration.</summary>
+    internal static event Action? LoopTick;
 
     private static string SafeJoin(string root, string relative)
     {

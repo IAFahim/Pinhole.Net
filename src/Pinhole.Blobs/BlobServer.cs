@@ -57,6 +57,9 @@ public sealed class BlobServer : IAsyncDisposable
     /// <summary>Total verified chunks sent across all connections — a live activity counter.</summary>
     public long ChunksServed { get; private set; }
 
+    /// <summary>Temporary lab instrumentation: provider-side frame accounting.</summary>
+    internal static Action<string>? ServeTrace;
+
     /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
     internal PinholeNode Node => _node;
 
@@ -168,6 +171,7 @@ public sealed class BlobServer : IAsyncDisposable
             while (!ct.IsCancellationRequested
                 && await conn.ReceiveAsync(ct).ConfigureAwait(false) is { } payload)
             {
+                ServeTrace?.Invoke($"recv {payload.Span[0]}");
                 BlobWire.Frame f;
                 if (_psk is null)
                 {

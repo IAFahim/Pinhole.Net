@@ -93,7 +93,11 @@ internal readonly record struct Subnet(IPAddress Base, int PrefixLength)
 
 /// <summary>One shaping rule over a region of the virtual internet. First matching rule
 /// wins; unmatched traffic crosses clean. <see cref="Match"/> sees post-NAT (internet)
-/// addresses, so a rule on a subnet shapes exactly the packets that traverse it.</summary>
+/// addresses, so a rule on a subnet shapes exactly the packets that traverse it.
+/// With <see cref="BandwidthBytesPerSecond"/> the rule becomes a bottleneck link: packets
+/// serialize one at a time (size/bandwidth each), wait in a bounded FIFO that drops on
+/// overflow — real congestion loss a sender can cause and observe — and the wait is
+/// recorded so tests can compare queueing delay between senders.</summary>
 internal sealed class LinkRule
 {
     public required Func<IPEndPoint, IPEndPoint, bool> Match { get; init; }
@@ -103,8 +107,26 @@ internal sealed class LinkRule
     public TimeSpan Jitter { get; init; }
     public bool DropAll { get; init; }
 
+    /// <summary>Link capacity in bytes/s; zero (default) keeps the immediate/scheduler
+    /// delay model with no serialization. Each direction gets its own transmitter and
+    /// queue, like a full-duplex link.</summary>
+    public double BandwidthBytesPerSecond { get; init; }
+
+    /// <summary>Bounded FIFO capacity in bytes for the bandwidth model; overflow drops
+    /// (counted as <see cref="QueueDrops"/>) exactly like a router buffer out of room.</summary>
+    public long QueueCapacityBytes { get; init; }
+
     public long Passed;
     public long Lost;
+    public long QueueDrops;
+    public long TotalQueueWaitMs;
+    public long MaxQueueWaitMs;
+
+    public bool IsBottleneck => BandwidthBytesPerSecond > 0;
+
+    /// <summary>Mean time packets spent waiting in the bounded queue (serialization
+    /// excluded) — the congestion metric CC is judged on.</summary>
+    public double MeanQueueWaitMs(long transmitted) => transmitted == 0 ? 0 : (double)TotalQueueWaitMs / transmitted;
 
     /// <summary>The loss chain for one direction. With two chains the split is by stable
     /// endpoint ordering, so each direction of a link keeps its own independent sequence.</summary>
@@ -117,6 +139,10 @@ internal sealed class LinkRule
 
         return Compare(source, dest) < 0 ? ForwardLoss : ReverseLoss;
     }
+
+    /// <summary>Which directional transmitter/queue a packet uses (0/1), split by the same
+    /// stable endpoint ordering as <see cref="LossFor"/>.</summary>
+    public int DirectionOf(IPEndPoint source, IPEndPoint dest) => Compare(source, dest) < 0 ? 0 : 1;
 
     private static int Compare(IPEndPoint a, IPEndPoint b)
     {
@@ -151,6 +177,23 @@ internal sealed class LinkRule
         ReverseLoss = reverse,
         Delay = delay,
         Jitter = jitter,
+    };
+
+    /// <summary>A full-duplex bottleneck between two subnets: each direction serializes
+    /// at <paramref name="bandwidthBytesPerSecond"/> with a bounded FIFO of
+    /// <paramref name="queueBytes"/>. Competing flows across the same pair of subnets
+    /// share one transmitter per direction — the fairness topology.</summary>
+    public static LinkRule Bottleneck(Subnet a, Subnet b, double bandwidthBytesPerSecond, long queueBytes,
+        TimeSpan propagation = default, LossModel? forwardLoss = null, LossModel? reverseLoss = null,
+        TimeSpan jitter = default) => new()
+    {
+        Match = (src, dst) => (a.Contains(src) && b.Contains(dst)) || (b.Contains(src) && a.Contains(dst)),
+        ForwardLoss = forwardLoss,
+        ReverseLoss = reverseLoss,
+        Delay = propagation,
+        Jitter = jitter,
+        BandwidthBytesPerSecond = bandwidthBytesPerSecond,
+        QueueCapacityBytes = queueBytes,
     };
 
     /// <summary>A directional rule: only src→dst is shaped.</summary>
