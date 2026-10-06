@@ -48,8 +48,14 @@ The soak harness (`MixedWorkloadSoak`) is env-gated:
 runs a seeded mixed workload (shaped links, blackouts, cancel/resume) and appends a
 per-minute CSV (heap, threads, handles, sockets, budget, outcomes) to
 `$TMPDIR/pinhole-soak/` — evidence format ready for the scheduled 24 h/72 h runs that
-remain the release gate. Still open under #34: a `MaxConnections` flood seam,
-byte-level frame/manifest fuzzing, and real-relay allocation accounting.
+remain the release gate. Since landed under #34: the `MaxConnections` flood bound is
+proven with real handshakes via an internal `MaxConnectionsOverride` seam, and
+`ParserPropertyTests.cs` puts the wire parsers (frames, manifests, tickets,
+connection strings) under FsCheck properties — never-throw contracts, round-trips,
+and domain invariants with automatic counterexample shrinking. The fuzz work already
+surfaced one hostile-input defect: `Manifest.Decode` accepted negative entry sizes;
+they are now rejected as malformed. Still open under #34: the scheduled soaks and
+real-relay allocation accounting.
 
 The new ledgers immediately paid for themselves: scaling a warmup to 4 MiB on the
 standard shaped link surfaced a starvation pathology in the #20 controller —

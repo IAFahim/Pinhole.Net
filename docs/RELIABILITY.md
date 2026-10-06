@@ -196,8 +196,10 @@ Collected in one place so nothing relies on tribal knowledge:
 - **`NodeEngine.MaxConnections` flood** — covered: an internal
   `MaxConnectionsOverride` test seam shrinks the cap, and the flood test proves
   admission refusal and slot recovery with real handshakes.
-- **Byte-level wire fuzzing** — frame/ticket/manifest parsers are covered by
-  hand-written hostile cases, not systematic fuzzing yet. Open under #34.
+- **Byte-level wire fuzzing** — covered: FsCheck property tests fuzz the frame,
+  manifest, ticket, and connection-string parsers (never-throw contracts,
+  encode/decode round-trips, decoded-value invariants). One defect found and
+  fixed already: negative manifest entry sizes are now rejected.
 - **Mobile and AOT/trimming** — untested; no claims are made for them.
 - **24 h / 72 h soak evidence** — harness ready (`PINHOLE_SOAK_MINUTES`); the
   long runs are pending before release.

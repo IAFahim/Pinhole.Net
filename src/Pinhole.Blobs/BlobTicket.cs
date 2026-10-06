@@ -202,6 +202,11 @@ internal static class Manifest
             {
                 string path = Encoding.UTF8.GetString(reader.ReadBytes(reader.ReadU16()));
                 long size = reader.ReadI64();
+                if (size < 0)
+                {
+                    throw new FormatException();
+                }
+
                 entries.Add(new Entry(path, size, reader.ReadBytes(32).ToArray()));
             }
 
