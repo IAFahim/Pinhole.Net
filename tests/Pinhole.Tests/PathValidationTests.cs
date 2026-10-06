@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Text;
 using Xunit;
 
@@ -171,29 +172,35 @@ public sealed class PathValidationTests
     [Fact]
     public async Task TransientLoss_BelowTheUnansweredBudget_DoesNotDegrade()
     {
-        await using var a = await PinholeNode.BindAsync(Opts());
-        await using var b = await PinholeNode.BindAsync(Opts());
-        (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
+        using var net = new VirtualNetwork();
+        var socketA = new DropProbeSocket(net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 31010)));
+        var socketB = new DropProbeSocket(net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.20"), 31020)));
+        // No caller pings, PMTU probes, or keepalive traffic: every Ping below is an
+        // actual liveness probe. Drop one per sender, independent of runner scheduling.
+        var options = Opts() with { EnablePmtud = false, KeepaliveInterval = TimeSpan.Zero };
+        await using var a = await PinholeNode.BindAsync(options with { UdpSocketFactory = _ => socketA });
+        await using var b = await PinholeNode.BindAsync(options with { UdpSocketFactory = _ => socketB });
+        Task<PinholeConnection> accept = a.AcceptAsync();
+        string ticket = new ConnectionString(a.PeerId,
+            [new PinholeCandidate(CandidateKind.Direct, socketA.LocalEndPoint)], staticKey: a.StaticPublicKey).ToString();
+        using PinholeConnection atB = await b.ConnectAsync(ticket).WaitAsync(Timeout);
+        using PinholeConnection atA = await accept.WaitAsync(Timeout);
 
         int disturbed = 0;
         atA.StateChanged += s => { if (s is not PinholeConnectionState.Open) Interlocked.Increment(ref disturbed); };
         atB.StateChanged += s => { if (s is not PinholeConnectionState.Open) Interlocked.Increment(ref disturbed); };
 
-        // A hole shorter than three missed probes: the sequence recovers mid-validation.
-        a.Engine.SimulateSilentDirectPathLoss(b.PeerId);
-        b.Engine.SimulateSilentDirectPathLoss(a.PeerId);
-        await Task.Delay(Idle + Interval + Interval / 2); // ≈ two probes lost
-        a.Engine.SimulateDirectPathRestore(b.PeerId);
-        b.Engine.SimulateDirectPathRestore(a.PeerId);
-
-        await Task.Delay(TimeSpan.FromMilliseconds(800));
+        long repliesBefore = atA.PathProbeReplies + atB.PathProbeReplies;
+        socketA.Arm();
+        socketB.Arm();
+        await TestPoll.UntilAsync(Timeout, () => socketA.Dropped + socketB.Dropped > 0
+            && atA.PathProbeReplies + atB.PathProbeReplies > repliesBefore);
+        Assert.InRange(socketA.Dropped + socketB.Dropped, 1, 2);
         Assert.Equal(0, disturbed);
         Assert.Equal(PinholeConnectionState.Open, atA.State);
         Assert.Equal(PinholeConnectionState.Open, atB.State);
-        // Whichever side probes (the other is kept fed by its peer's probes), the restored
-        // path answered: no degradation means every outstanding sequence was certified.
-        Assert.True(atA.PathProbeReplies + atB.PathProbeReplies > 0,
-            "the restored path answered the in-flight probe sequence");
+        Assert.True(atA.PathProbeReplies + atB.PathProbeReplies > repliesBefore,
+            "a real lost probe was followed by an authenticated probe reply");
     }
 
     [Fact]
@@ -226,5 +233,26 @@ public sealed class PathValidationTests
         long sent = atA.PathProbesSent;
         await Task.Delay(TimeSpan.FromMilliseconds(500));
         Assert.Equal(sent, atA.PathProbesSent); // the scheduler died with the node
+    }
+
+    private sealed class DropProbeSocket(IUdpSocket inner) : IUdpSocket
+    {
+        private int _armed;
+        private int _dropped;
+        public int Dropped => Volatile.Read(ref _dropped);
+        public IPEndPoint LocalEndPoint => inner.LocalEndPoint;
+        public void Arm() => Volatile.Write(ref _armed, 1);
+        public int ReceiveFrom(Span<byte> buffer, SocketAddress from) => inner.ReceiveFrom(buffer, from);
+        public void SendTo(ReadOnlySpan<byte> frame, SocketAddress to)
+        {
+            if (!frame.IsEmpty && frame[0] == (byte)FrameType.Ping
+                && Interlocked.CompareExchange(ref _armed, 0, 1) == 1)
+            {
+                Interlocked.Increment(ref _dropped);
+                return;
+            }
+            inner.SendTo(frame, to);
+        }
+        public void Dispose() => inner.Dispose();
     }
 }
