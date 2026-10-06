@@ -170,6 +170,7 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
             Relays = [], ResolvedRelays = [], LookupProviders = [], RendezvousEndpoints = [],
             EnableLanDiscovery = false, EnablePathValidation = false, EnablePmtud = false,
             KeepaliveInterval = TimeSpan.Zero, ReceiveBufferCapacity = 0,
+            PublishIrohAddress = false,
         }, ct).ConfigureAwait(false);
         var transport = new IrohTransport(options, network);
         try

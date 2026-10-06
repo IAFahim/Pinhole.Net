@@ -53,6 +53,43 @@ use the Pinhole session protocol, documented in [PROTOCOL.md](PROTOCOL.md).
 
 ## What is compatible
 
+For the OpusVoice Android app's encrypted Pinhole session, a C# receiver can also
+publish a native iroh endpoint ID and ticket:
+
+```csharp
+await using var node = await PinholeNode.BindAsync(new PinholeOptions
+{
+    PublishIrohAddress = true,
+    ReceiveBufferCapacity = 256,
+    // Persist IdentityKeySeed to keep the ID and session key across restarts.
+});
+Console.WriteLine(node.IrohAddress.EndpointId);
+Console.WriteLine(node.IrohAddress);
+```
+
+`PinholeNode.ConnectIrohAsync(idOrTicket)` and OpusVoice's Kotlin `PinholeDialer`
+resolve the signed record before starting the Pinhole handshake. The native TXT
+application field is `user-data=pinhole-v1:<64 lowercase hex characters>` containing
+the public X25519 session key. The record's Ed25519 signature binds that key to
+the endpoint ID from the shared ticket/QR. The Pinhole u64 peer locator is the first
+eight SHA-256 bytes of that Ed25519 key, read little-endian; it cannot be random
+when routing through an identity-authenticated iroh relay.
+
+Native tickets contain addresses and the Ed25519 ID only, so this Pinhole session
+adapter needs discovery to retrieve the session-key binding even when the ticket
+already has paths. A full `pinhole1:` ticket retains its existing offline key pin.
+An endpoint without the signed Pinhole protocol binding is rejected. This adapter
+uses the Pinhole session wire above iroh discovery/relay connectivity; it does not
+turn the session into a native iroh `Endpoint` application connection.
+
+Publication remains opt-in. `PublishDirectIrohAddresses` additionally publishes
+IP paths; the default publishes relay URLs and the public key binding. Signed
+Pinhole `Announce` frames also supply current direct candidates after connection,
+allowing the Kotlin client to validate and upgrade a relayed session to UDP.
+
+The receiver program supports `dotnet run --project src/OpusVoice.Receiver -- iroh`
+to publish this binding and print a native QR ticket.
+
 | Layer | Behavior |
 |---|---|
 | Endpoint identity | The full 32-byte Ed25519 public key, not Pinhole's u64 locator. `SecretKeySeed` is the exact seed consumed by native iroh `SecretKey::from_bytes`. |

@@ -31,6 +31,10 @@ public sealed class IrohAddress
     /// <summary>Known home relay URLs.</summary>
     public IReadOnlyList<Uri> RelayUrls => Array.AsReadOnly(_relays);
 
+    /// <summary>Optional application metadata from signed iroh discovery (at most 245 UTF-8
+    /// bytes). Native endpoint tickets contain addresses only and do not encode this field.</summary>
+    public string? UserData { get; init; }
+
     /// <summary>Encodes an iroh 1.x EndpointTicket (postcard followed by unpadded base32).</summary>
     public override string ToString()
     {

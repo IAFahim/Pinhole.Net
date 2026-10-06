@@ -30,6 +30,27 @@ public sealed class PmtudTests
         [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))],
         staticKey: listener.StaticPublicKey).ToString();
 
+    [Theory]
+    [InlineData(false, PinholeEncryption.Required)]
+    [InlineData(true, PinholeEncryption.Required)]
+    [InlineData(false, PinholeEncryption.Disabled)]
+    [InlineData(true, PinholeEncryption.Disabled)]
+    public async Task SmallInboundPing_NeverShrinksTheGuaranteedPayloadFloor(bool pmtud, PinholeEncryption encryption)
+    {
+        var options = Opts() with { EnablePmtud = pmtud, Encryption = encryption, ReceiveBufferCapacity = 8 };
+        await using var a = await PinholeNode.BindAsync(options);
+        await using var b = await PinholeNode.BindAsync(options);
+        Task<PinholeConnection> accept = a.AcceptAsync();
+        using var atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
+        using var atA = await accept.WaitAsync(Timeout);
+        atB.Ping();
+        await TestPoll.UntilAsync(Timeout, () => atB.Stats.PongsReceived > 0);
+        Assert.True(atA.PathMtu >= NodeEngine.PmtuBaseWire);
+        byte[] payload = new byte[PinholeConnection.MaxPayload];
+        atA.Send(payload);
+        Assert.Equal(payload, (await atB.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
+    }
+
     [Fact]
     public async Task Probes_ClimbToTheCeiling_AndRaiseThePayloadLimit()
     {

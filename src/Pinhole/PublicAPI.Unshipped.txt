@@ -348,3 +348,14 @@ static readonly Pinhole.PinholePath.None -> Pinhole.PinholePath!
 virtual Pinhole.PinholeDatagramHandler.Invoke(System.ReadOnlySpan<byte> payload) -> void
 ~override Pinhole.PinholeStats.Equals(object obj) -> bool
 ~override Pinhole.PinholeStats.ToString() -> string
+Pinhole.IrohAddress.UserData.get -> string?
+Pinhole.IrohAddress.UserData.init -> void
+Pinhole.PinholeNode.ConnectIrohAsync(string! ticketOrEndpointId, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnection!>!
+Pinhole.PinholeNode.IrohAddress.get -> Pinhole.IrohAddress!
+Pinhole.PinholeNode.PublishIrohAddressAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.PinholeOptions.IrohDiscoveryUrl.get -> System.Uri!
+Pinhole.PinholeOptions.IrohDiscoveryUrl.init -> void
+Pinhole.PinholeOptions.PublishDirectIrohAddresses.get -> bool
+Pinhole.PinholeOptions.PublishDirectIrohAddresses.init -> void
+Pinhole.PinholeOptions.PublishIrohAddress.get -> bool
+Pinhole.PinholeOptions.PublishIrohAddress.init -> void

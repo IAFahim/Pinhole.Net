@@ -215,7 +215,7 @@ internal sealed class NodeEngine : IDisposable
         _rawReceive = rawReceive;
         if (rawIdentity is not null)
             _endpointIdentity = rawIdentity;
-        else if (endpointSeed is not null || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
+        else if (endpointSeed is not null || options.PublishIrohAddress || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
             _endpointIdentity = new RelayIdentity(endpointSeed);
         _peerId = _endpointIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
@@ -241,6 +241,7 @@ internal sealed class NodeEngine : IDisposable
     /// strings and used to sign its address records; null when neither a persisted identity
     /// seed nor iroh relays gave the node an endpoint identity.</summary>
     public byte[]? EndpointPublicKey => _endpointIdentity?.PublicKey;
+    internal RelayIdentity? EndpointRelayIdentity => _endpointIdentity;
 
     public bool HasRelay
     {
@@ -2508,6 +2509,7 @@ internal sealed class NodeEngine : IDisposable
         // Everything except the handshake frames is sealed once a session exists. The frame
         // decrypts into thread-local scratch prefixed with the untouched header and token, so
         // every handler below parses one layout regardless of the session's existence.
+        int wireLength = frame.Length;
         if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck) && c.Crypto is { } cryptoState)
         {
             if (!cryptoState.Established)
@@ -2543,7 +2545,7 @@ internal sealed class NodeEngine : IDisposable
                 OnData(c, frame, arrival);
                 break;
             case FrameType.Ping:
-                OnPing(c, frame, arrival);
+                OnPing(c, frame, arrival, wireLength);
                 break;
             case FrameType.Pong:
                 OnPong(c, frame, arrival);
@@ -2833,7 +2835,7 @@ internal sealed class NodeEngine : IDisposable
         c.Received?.Invoke(frame[(HeaderSize + 4)..]);
     }
 
-    private void OnPing(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
+    private void OnPing(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival, int wireLength)
     {
         if (frame.Length < HeaderSize + 4 + 8)
         {
@@ -2846,12 +2848,15 @@ internal sealed class NodeEngine : IDisposable
             // Inbound evidence cuts both ways: a datagram this size arrived, so the path
             // carries it. Cap at the probe ceiling — this only ever replaces a probe, and
             // keeps buffer sizing honest on loopback's 64k MTU.
-            lock (c.Gate)
+            // The decrypted handler view excludes the AES-GCM counter/tag. MTU evidence
+            // must use the received wire size and never lower the guaranteed payload floor.
+            if (_options.EnablePmtud && wireLength >= PmtuBaseWire)
             {
-                int ceiling = PmtuCeilingLocked(c);
-                if (frame.Length > c.PmtuWire && frame.Length <= ceiling)
+                lock (c.Gate)
                 {
-                    c.PmtuWire = frame.Length;
+                    int ceiling = PmtuCeilingLocked(c);
+                    if (wireLength > c.PmtuWire && wireLength <= ceiling)
+                        c.PmtuWire = wireLength;
                 }
             }
         }

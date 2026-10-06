@@ -73,6 +73,11 @@ internal sealed class IrohDiscovery
         // Native EndpointInfo parses one TransportAddr per TXT value. A grouped
         // space-separated value verifies cryptographically but loses every address.
         values.AddRange(address.DirectAddresses.Select(x => "addr=" + x));
+        if (address.UserData is { } userData)
+        {
+            if (Utf8.GetByteCount(userData) > 245) throw new ArgumentException("iroh user data exceeds 245 UTF-8 bytes");
+            values.Add("user-data=" + userData);
+        }
         using var dns = new MemoryStream();
         byte[] header = new byte[12];
         header[2] = 0x80; // DNS reply
@@ -144,6 +149,7 @@ internal sealed class IrohDiscovery
         string owner = "_iroh." + IrohEncoding.Encode32(key, zbase: true);
         List<IPEndPoint> direct = [];
         List<Uri> relays = [];
+        string? userData = null;
         foreach (string value in ReadTxt(dns, owner))
         {
             if (value.StartsWith("relay=", StringComparison.Ordinal))
@@ -161,9 +167,15 @@ internal sealed class IrohDiscovery
                     // IP/relay consumers may still use the other records in the packet.
                 }
             }
+            else if (value.StartsWith("user-data=", StringComparison.Ordinal))
+            {
+                if (userData is not null || Utf8.GetByteCount(value[10..]) > 245)
+                    throw new InvalidDataException("invalid or duplicate iroh user data");
+                userData = value[10..];
+            }
             if (direct.Count + relays.Count > IrohAddress.MaxAddresses) throw new InvalidDataException("too many discovered iroh paths");
         }
-        return new IrohAddress(Convert.ToHexString(key), direct, relays);
+        return new IrohAddress(Convert.ToHexString(key), direct, relays) { UserData = userData };
     }
 
     private static List<string> ReadTxt(ReadOnlySpan<byte> dns, string expectedOwner)

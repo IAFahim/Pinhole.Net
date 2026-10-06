@@ -27,6 +27,21 @@ public sealed record PinholeOptions
     /// Null (default) uses the public n0 relays; an empty list disables them.</summary>
     public IReadOnlyList<Uri>? IrohRelayUrls { get; init; }
 
+    /// <summary>Publish this node through native iroh signed pkarr discovery (default false).
+    /// The record binds the endpoint ID to this node's Pinhole static key, so compatible
+    /// Android clients can dial by ID or native ticket without dropping peer authentication.</summary>
+    public bool PublishIrohAddress { get; init; }
+
+    /// <summary>Include IP addresses in native iroh discovery. Default false publishes
+    /// relay URLs only. A shared native ticket may still carry direct addresses.</summary>
+    public bool PublishDirectIrohAddresses { get; init; }
+
+    /// <summary>Native HTTP pkarr discovery service. Default https://dns.iroh.link/pkarr.
+    /// HTTP is accepted only on loopback for local integration tests.</summary>
+    public Uri IrohDiscoveryUrl { get; init; } = new("https://dns.iroh.link/pkarr");
+
+    internal HttpMessageHandler? IrohDiscoveryHandler { get; init; }
+
     /// <summary>Accept connections dialed by unknown peers (default true). When false, only
     /// peers this node dials itself can establish a connection. Strangers are bounded: a
     /// flood of handshakes from unknown peer IDs stops materializing new state after 1024
@@ -232,6 +247,9 @@ public sealed record PinholeOptions
 
     private static void Validate(PinholeOptions options)
     {
+        IrohAddress.ValidateRelay(options.IrohDiscoveryUrl);
+        if (options.PublishIrohAddress && options.Encryption == PinholeEncryption.Disabled)
+            throw new ArgumentException("Pinhole iroh discovery requires an encrypted session with a static key", nameof(options));
         if (options.IdentityKeySeed is { Length: not NodeIdentity.KeyLength })
             throw new ArgumentOutOfRangeException(nameof(options), $"IdentityKeySeed must be {NodeIdentity.KeyLength} bytes");
         if (options.LookupProviders is { } providers && providers.Any(p => p is null))

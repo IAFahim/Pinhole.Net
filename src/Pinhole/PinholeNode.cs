@@ -1,4 +1,6 @@
 using System.Net;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Net.Sockets;
 using System.Threading.Channels;
 
@@ -18,11 +20,21 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     private readonly PinholeOptions _options;
     private volatile NatHint _natHint = NatHint.Unknown;
     private LanDiscovery? _lan;
+    private readonly HttpClient _irohHttp;
+    private readonly IrohDiscovery _irohDiscovery;
+    private readonly CancellationTokenSource _irohStop = new();
+    private Task? _irohPublisher;
+    private int _disposed;
+    internal const string IrohProtocolPrefix = "pinhole-v1:";
 
     private PinholeNode(NodeEngine engine, PinholeOptions options)
     {
         _engine = engine;
         _options = options;
+        _irohHttp = options.IrohDiscoveryHandler is { } handler
+            ? new HttpClient(handler, disposeHandler: false) : new HttpClient();
+        _irohHttp.Timeout = TimeSpan.FromSeconds(5);
+        _irohDiscovery = new IrohDiscovery(_irohHttp, options.IrohDiscoveryUrl);
     }
 
     /// <summary>Binds the UDP socket, probes the configured free STUN servers for the
@@ -47,6 +59,14 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
         var node = new PinholeNode(engine, resolved);
         node.StartLanAnnouncement();
+        if (resolved.PublishIrohAddress)
+        {
+            try { await node.PublishIrohAddressAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            catch (Exception ex) when (ex is HttpRequestException or IOException) { }
+            catch { node.Dispose(); throw; }
+            node._irohPublisher = node.PublishIrohLoopAsync();
+        }
         return node;
     }
 
@@ -133,6 +153,83 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         NatHint,
         _engine.StaticPublicKey,
         _engine.EndpointPublicKey).ToString();
+
+    /// <summary>A native iroh endpoint ticket for this Pinhole node. To dial it securely,
+    /// publish its signed Pinhole key binding with PublishIrohAddress=true. This does not
+    /// change the Pinhole session wire protocol into a native iroh application session.</summary>
+    public IrohAddress IrohAddress
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            byte[] key = EndpointPublicKey ?? throw new InvalidOperationException("enable iroh relays, publication, or a persisted identity first");
+            var candidates = _engine.LocalCandidatesSnapshot();
+            return new IrohAddress(Convert.ToHexString(key),
+                candidates.Where(c => c.Kind is CandidateKind.Direct or CandidateKind.Reflexive).Select(c => c.Address).ToArray(),
+                candidates.Where(c => c.Kind == CandidateKind.IrohRelay).Select(c => c.RelayUrl!).ToArray());
+        }
+    }
+
+    /// <summary>Publishes native iroh reachability with the authenticated Pinhole static-key
+    /// binding in user-data. The discovery service cannot substitute the handshake key.</summary>
+    public Task PublishIrohAddressAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ct.ThrowIfCancellationRequested();
+        byte[] pin = StaticPublicKey ?? throw new InvalidOperationException("Pinhole discovery requires encryption");
+        IrohAddress address = IrohAddress;
+        var record = new IrohAddress(address.EndpointId,
+            _options.PublishDirectIrohAddresses ? address.DirectAddresses : [], address.RelayUrls)
+        { UserData = IrohProtocolPrefix + Convert.ToHexString(pin).ToLowerInvariant() };
+        return _irohDiscovery.PublishAsync(record, _engine.EndpointRelayIdentity!, ct);
+    }
+
+    private async Task PublishIrohLoopAsync()
+    {
+        int failures = 0;
+        while (!_irohStop.IsCancellationRequested)
+        {
+            try
+            {
+                double jitter = RandomNumberGenerator.GetInt32(900, 1101) / 1000.0;
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(30L << Math.Min(failures, 4), 300) * jitter), _irohStop.Token).ConfigureAwait(false);
+                await PublishIrohAddressAsync(_irohStop.Token).ConfigureAwait(false);
+                failures = 0;
+            }
+            catch (OperationCanceledException) when (_irohStop.IsCancellationRequested) { return; }
+            catch (ObjectDisposedException) when (_irohStop.IsCancellationRequested) { return; }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException) { failures++; }
+        }
+    }
+
+    /// <summary>Dials a Pinhole session by native iroh ID or endpoint ticket. Requires a
+    /// signed discovery record with the peer's Pinhole static-key binding; native iroh
+    /// application endpoints without that binding are rejected.</summary>
+    public async Task<PinholeConnection> ConnectIrohAsync(string ticketOrEndpointId, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ct.ThrowIfCancellationRequested();
+        if (StaticPublicKey is null) throw new InvalidOperationException("Pinhole iroh sessions require encryption");
+        IrohAddress ticket = Pinhole.IrohAddress.Parse(ticketOrEndpointId);
+        if (EndpointPublicKey is { } local && ticket.Key.AsSpan().SequenceEqual(local))
+            throw new ArgumentException(SelfConnectionMessage, nameof(ticketOrEndpointId));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, _irohStop.Token);
+        deadline.CancelAfter(_options.ConnectTimeout);
+        IrohAddress record = await _irohDiscovery.ResolveAsync(ticket.EndpointId, deadline.Token).ConfigureAwait(false);
+        if (record.UserData is not { } data || !data.StartsWith(IrohProtocolPrefix, StringComparison.Ordinal)
+            || data.Length != IrohProtocolPrefix.Length + 64)
+            throw new InvalidOperationException("the endpoint does not advertise a signed Pinhole session key");
+        byte[] pin;
+        try { pin = Convert.FromHexString(data[IrohProtocolPrefix.Length..]); }
+        catch (FormatException ex) { throw new InvalidDataException("invalid signed Pinhole session key", ex); }
+        var candidates = ticket.RelayUrls.Concat(record.RelayUrls).Distinct()
+            .Select(url => new PinholeCandidate(CandidateKind.IrohRelay, new IPEndPoint(IPAddress.None, 0), RelayUrl: url, RelayKey: record.Key))
+            .Concat(ticket.DirectAddresses.Concat(record.DirectAddresses).Distinct()
+                .Select(ip => new PinholeCandidate(CandidateKind.Direct, ip)))
+            .Take(Pinhole.ConnectionString.MaxCandidates).ToArray();
+        ulong id = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(record.Key));
+        return await ConnectPeerAsync(new ConnectionString(id, candidates, NatHint.Unknown, pin, record.Key), deadline.Token).ConfigureAwait(false);
+    }
 
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
@@ -297,17 +394,19 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
     /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _lan?.Dispose();
-        _engine.Dispose();
-        return ValueTask.CompletedTask;
+        Dispose();
+        if (_irohPublisher is { } publisher) await publisher.ConfigureAwait(false);
     }
 
     /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
     /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _irohStop.Cancel();
+        _irohHttp.Dispose();
         _lan?.Dispose();
         _engine.Dispose();
     }
