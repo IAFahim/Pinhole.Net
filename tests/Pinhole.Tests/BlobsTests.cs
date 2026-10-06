@@ -229,7 +229,11 @@ public sealed class BlobsTests
                 try
                 {
                     await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
-                        options: new BlobDownloadOptions { NodeOptions = Offline() });
+                        options: new BlobDownloadOptions
+                        {
+                            NodeOptions = Offline(),
+                            RecoveryTimeout = TimeSpan.FromSeconds(12), // route loss is ridden out — but not forever
+                        });
                     failed.TrySetResult(null!);
                 }
                 catch (Exception ex)
@@ -244,8 +248,12 @@ public sealed class BlobsTests
             Exception? ex = await failed.Task.WaitAsync(TestBudget.Scenario);
             watch.Stop();
 
+            // An unreachable provider is ROUTE LOSS, not rejection: the recovery loop
+            // re-dials until its (here short) budget dies, then surfaces a failure that
+            // says exactly that — never the bare 30s stall, never a hang.
             Assert.NotNull(ex);
-            Assert.False(ex is TimeoutException, $"the downloader only noticed the dead provider via the 30s stall: {ex.Message}");
+            Assert.True(ex is TimeoutException && ex.Message.Contains("re-established", StringComparison.Ordinal),
+                $"wrong failure surfaced: {ex.GetType().Name}: {ex.Message}");
             Assert.True(watch.Elapsed < TestBudget.Scenario, $"failure took {watch.Elapsed.TotalSeconds:0.0}s to surface");
         }
         finally

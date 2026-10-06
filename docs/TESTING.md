@@ -231,6 +231,40 @@ variants (RoamingTests' rebind, the outage ladder above) all heal; the corner is
 rather than claimed.
 
 
+## #32 — transfer recovery and resume
+
+`BlobResumeTests.cs`, virtual lab, one `DownloadAsync` call per scenario — the question
+is never "does a retry work" but "does the SAME call finish byte-exact". FlowBytes =
+512 KiB through an 8 Mbit/s shaped link unless noted.
+
+| Scenario | Test | Proof |
+|---|---|---|
+| 30 s total blackout | `ThirtySecondBlackhole_SameCall_RidesOutAndCompletes` | one call sits through an outage past the 30 s stall clock (paused while pathless) and completes; 41 retransmits, 0 conservative resumes |
+| Direct path cut mid-transfer | `DirectPathCut_MidTransfer_CompletesThroughTheRelay` | same connection degrades to the relay leg; transfer continues without losing verified progress |
+| Provider rebind + 3 s blackout | `ProviderRebindAndBlackout_MidTransfer_SameCallCompletes` | session heals onto the provider's new endpoint mid-transfer |
+| Provider process restart | `ProviderRestart_SameTicket_ResumesFromCheckpointInOneCall` | the original call re-dials the same ticket; the successor serves only the tail (374 chunks vs 512 total — checkpointed prefix never re-crosses the wire) |
+| Wrong-identity responder | (see below) | a stranger who never answers is indistinguishable from a dead provider — riding out is correct; refusal must actually ARRIVE to be terminal |
+| Refused dial (incompatible peer) | `IncompatiblePeer_RefusalIsTerminal_NotRiddenOut` | kepless-peer refusal surfaces in ~30 ms, never riding the 10 min budget |
+| Tampered chunks | `TamperedFrame_IsTerminal_NeverRiddenOut` | first bad chunk fails CV verification terminally; no recovery budget spent |
+| Cancellation mid-blackout | `Cancellation_DuringBlackout_TerminatesPromptly` | honored in ~3 ms while the route is dark |
+| Session key freshness | `SessionRecreations_NeverReuseAKeyOrNoncePair` | provider drops every chunk past 80 on a live path; the stall re-dials; every Welcome's provider nonce is stable within a session and distinct across sessions |
+
+What "terminal" means here: the recovery classifier only rides route facts (closed,
+quiet, stalled, dial timed out, send outliving the pathlessness budget). A Bye, a bad
+chunk, a root mismatch, or a refused handshake are verdicts and surface at once.
+
+`BlobsTests.ProviderDisposed_...` keeps the other half: a provider that never comes
+back exhausts `RecoveryTimeout` and the surfaced `TimeoutException` says exactly that
+("could not be re-established within 12 s"), promptly and never a hang.
+
+Deliberate coverage notes: the five-minute regime from the issue is represented by the
+30 s blackout exceeding every per-attempt clock — the recovery budget, not the outage
+length, is the mechanism under test. Mid-Hello/Welcome interruption is exercised by the
+stall-and-redial cell (the second session re-runs Hello/Welcome from scratch);
+simultaneous-roam and relay-failover *connection* survival are #31/#30's tables — this
+file proves the transfer layer on top of them.
+
+
 ## #20 — blob congestion control: selection, controller, acceptance
 
 The reuse-first survey is in `docs/BLOBS.md` § "Component selection": kcp2k (its own

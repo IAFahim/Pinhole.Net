@@ -89,11 +89,44 @@ connection layer's 1200-byte datagram budget with the AEAD overhead included.
   the far end of the file: anything past a bounded reorder window (512 chunks) ahead of
   the applied cursor is dropped and re-requested in order.
 - Missing chunks are re-requested individually after an RTT-derived retransmission timer.
-- The whole download fails if **no chunk verifies** for 30 s (stall) — loss is healed,
-  silence is fatal, honestly.
+- A stall — no chunk verified for 30 s — or a connection that closes or goes quiet ends
+  the **attempt**, not the download: the recovery loop (below) re-dials the pinned
+  provider and resumes from checkpoints. Permanent verdicts — a tampered frame, a root
+  mismatch, a refused handshake — still end the call immediately.
 - Directory downloads: stream 1 is the manifest (below), then each entry root downloads
   as its own stream over the same connection, sequentially, sharing one frame-counter
   space (see encryption).
+
+### Recovery and resume (#32)
+
+One `DownloadAsync` call rides out recoverable disruptions by itself: while no usable
+path exists the stall and first-contact clocks pause (there is no path to verify
+progress on — the engine's recovery, not our clock, is what ends the wait), request
+growth and retransmission pause, and a connection that dies entirely is re-dialed
+through the same ticket — authenticated rediscovery included — after a doubling backoff
+(500 ms → 5 s cap). Everything draws down one budget:
+`BlobDownloadOptions.RecoveryTimeout` (default 10 min — a five-minute outage must be
+survivable). Exhausting it throws `TimeoutException` ("could not be re-established");
+zero disables recovery and surfaces the first transport failure as `TimeoutException`
+naming the dead attempt. The caller's cancellation token is honored promptly even
+mid-blackout.
+
+A re-dial gets a fresh `DownloadSession`: a fresh downloader nonce, and the provider's
+Welcome mints its own fresh nonce — every connection derives a fresh two-sided key and
+restarts counters with it; a recovery never continues old counters under recreated
+keys. Resume is then real on the wire, not just on disk: the attempt's requests anchor
+at the checkpointed prefix's first gap, so verified bytes never cross the network
+twice, and reported progress never visibly regresses. Directory downloads carry the
+decoded manifest and the set of completed roots across re-dials — finished files are
+skipped, not re-verified.
+
+The failure taxonomy is the contract: `TimeoutException` means the route did not come
+back inside the budget; `InvalidDataException` means a fact about the content or the
+provider (bad chunk, root mismatch, stream cancelled); `OperationCanceledException`
+means the caller ended it. A dial the engine *refuses* (incompatible peer, pinning
+mismatch) is terminal like the content verdicts — but a stranger who simply never
+answers is indistinguishable from a dead provider, and riding that out is what makes
+provider restart work.
 
 ### The congestion controller (#20)
 
@@ -237,6 +270,14 @@ verification story is unchanged, only confidentiality is given up.
 - Plaintext serving (`Encrypt = false`) accepts all documented Hello shapes and
   answers with an ordinary Head. It requires no key negotiation.
 
+**Changed defaults (#32).** Pre-recovery, a connection that closed or went quiet
+mid-transfer failed the call with `InvalidDataException` at once, and a 30 s stall was
+outright fatal. Both are now *attempt* failures the recovery loop rides out; the call
+fails only when `RecoveryTimeout` (default 10 min) is spent, as `TimeoutException`.
+Wire compatibility is untouched — no new frames, no version bump, and a resumed
+download simply requests a shorter tail, which any v3 provider already serves.
+Migration for the old behavior: `RecoveryTimeout = TimeSpan.Zero`.
+
 ## Resume
 
 Interrupted downloads leave `<target>.pinhole-part/` behind:
@@ -250,6 +291,11 @@ root or size does not match, or whose `data` is shorter than the prefix claims, 
 from zero. On success the part file is truncated to the exact size, promoted over the
 target, and the part directory is deleted. Checkpoints are written on the transfer's
 50 ms control cadence — resuming never redoes more than a fraction of a second.
+
+The same machinery drives *within-call* recovery (#32): when a connection dies
+mid-transfer the recovery loop re-dials and the fresh attempt's sink reloads the
+checkpoint — so a provider restart resumes the surviving prefix automatically, not
+just a caller-initiated retry.
 
 ## Sample
 

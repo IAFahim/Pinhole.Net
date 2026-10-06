@@ -1,6 +1,34 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — automatic transfer recovery (#32)
+
+One `DownloadAsync` call now rides out recoverable disruption on its own. While the
+engine reports no usable path, the blob layer's stall and first-contact clocks pause
+and request growth/retransmission stops — no bursts into a dead route, no stall firing
+on a wait that is not ours to end. A connection that actually dies is re-dialed through
+the same ticket (authenticated rediscovery included) behind a doubling 500 ms → 5 s
+backoff, and the fresh attempt resumes ON THE WIRE: requests anchor at the checkpointed
+prefix's first gap, verified bytes never cross the network twice, and progress never
+visibly regresses. Directory downloads carry the decoded manifest and completed roots
+across re-dials — finished files are skipped, not re-verified. Every recreation mints a
+fresh two-sided session key (fresh downloader nonce + fresh provider nonce; counters
+restart with them — never continued under recreated keys), proven by the
+`WelcomeNonceSeen` seam.
+
+Everything rides down one budget, `BlobDownloadOptions.RecoveryTimeout` (default
+10 min — a five-minute outage must be survivable), whose exhaustion throws
+`TimeoutException` saying exactly that. `RecoveryTimeout = TimeSpan.Zero` restores the
+old first-failure-fatal shape (surfaced as `TimeoutException` naming the dead attempt —
+previously `InvalidDataException`). The failure taxonomy is the contract: route loss is
+ridden, verdicts are not — a Bye, a tampered chunk, a root mismatch, and a refused
+handshake (the dial-stage `InvalidOperationException`) all terminate immediately, and
+caller cancellation stays prompt even mid-blackout. Wire unchanged: no new frames, no
+version bump, a resumed download just requests a shorter tail from any v3 provider.
+Eight scenario tests in `BlobResumeTests.cs` (30 s blackout, direct→relay cut,
+rebind+blackout, provider restart, refusal, tamper, cancellation, nonce freshness).
+
+
 ## 1.10.0 (unreleased) — blob congestion control (#20)
 
 Blob downloads are now congestion-controlled, receiver-side, with the wire unchanged

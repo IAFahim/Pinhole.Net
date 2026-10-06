@@ -36,7 +36,22 @@ public sealed record BlobDownloadOptions
     /// duplicate bytes, retransmits, loss events, RTT. Diagnostics and tests; null for
     /// everyday downloads.</summary>
     public BlobTransferStats? Stats { get; init; }
+
+    /// <summary>How long the whole download may spend recovering: riding out pathlessness,
+    /// stalling past the 30 s per-attempt clock, and re-dialing the pinned provider all
+    /// draw down this one budget (default 10 minutes — a five-minute outage must be
+    /// survivable, per the recovery contract). Permanent rejection (a Bye) and tampered
+    /// frames never ride; they surface immediately. Zero disables recovery: the first
+    /// transport failure surfaces as a <see cref="TimeoutException"/> whose inner
+    /// exception names the attempt that died.</summary>
+    public TimeSpan RecoveryTimeout { get; init; } = TimeSpan.FromMinutes(10);
 }
+
+/// <summary>The transport under a transfer went away — the connection closed, went quiet,
+/// or the per-attempt stall clock ran out. Recoverable by re-dialing the pinned provider
+/// and resuming from verified checkpoints, unlike a peer's refusal or a tampered frame,
+/// which are terminal facts about the content or the provider's intent.</summary>
+internal sealed class BlobTransportLostException(string message) : Exception(message);
 
 /// <summary>The receiving half of the ticket: dial the provider from the embedded
 /// connection string, drive range requests, verify every chunk as it lands (a corrupt
@@ -45,10 +60,14 @@ public sealed record BlobDownloadOptions
 /// written past the temporary part file. One node per download, disposed with it.</summary>
 public static class BlobClient
 {
-    /// <exception cref="TimeoutException">connect or first contact timed out, or the
-    /// transfer stalled with no verified progress.</exception>
+    /// <exception cref="TimeoutException">the transfer could not be re-established within
+    /// <see cref="BlobDownloadOptions.RecoveryTimeout"/>, or first contact timed out with
+    /// recovery disabled.</exception>
     /// <exception cref="InvalidDataException">a chunk failed verification, the completed
-    /// root does not match the ticket, or the provider cancelled the stream.</exception>
+    /// root does not match the ticket, or the provider cancelled the stream — terminal
+    /// facts that no amount of re-dialing changes.</exception>
+    /// <exception cref="OperationCanceledException">the caller's token was honored
+    /// promptly, mid-transfer or mid-recovery.</exception>
     public static async Task<BlobDownloadResult> DownloadAsync(
         BlobTicket ticket,
         string destinationDirectory,
@@ -66,77 +85,147 @@ public static class BlobClient
             ReceiveBufferCapacity = 4096,
         };
 
-        await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
-        await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString, ct).ConfigureAwait(false);
+        TimeSpan recovery = options?.RecoveryTimeout ?? TimeSpan.FromMinutes(10);
+        ArgumentOutOfRangeException.ThrowIfLessThan(recovery, TimeSpan.Zero);
+        long deadline = Environment.TickCount64 + (long)recovery.TotalMilliseconds;
+        int backoffMs = 500;
 
-        // Provider freshness is authenticated in Welcome. One session and replay watermark
-        // cover every file on this connection; neither depends on the engine's routing tokens.
-        var session = new BlobWire.DownloadSession(ticket.PreSharedKey, ticket.Root);
-
-        if (ticket.Kind == BlobKind.File)
-        {
-            string fileName = string.IsNullOrWhiteSpace(ticket.Name) ? "pinhole-download" : ticket.Name;
-            string target = SafeJoin(destinationDirectory, fileName);
-            var sink = new FileSink(target, ticket.Root);
-            var fileSend = new SendCounter();
-            StreamDownloader? downloader = null;
-            downloader = new StreamDownloader(conn, sink,
-                v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), fileSend, session, ticket.Root,
-                options: options);
-            long bytes;
-            try
-            {
-                bytes = await downloader.RunAsync(ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                sink.Abandon();
-                throw;
-            }
-
-            return new BlobDownloadResult(target, bytes, sink.Resumed);
-        }
-
-        var send = new SendCounter();
-        var manifestSink = new MemorySink();
-        var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root,
-            options: options);
-        try
-        {
-            await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            manifestSink.Abandon();
-            throw;
-        }
-        (string name, List<Manifest.Entry> entries) = Manifest.Decode(manifestSink.Data);
-        string rootDir = SafeJoin(destinationDirectory, string.IsNullOrWhiteSpace(name) ? "pinhole-download" : name);
-        long total = entries.Sum(e => e.Size);
-        long verified = 0;
+        // State that legitimately survives a re-dial: the decoded manifest (never fetched
+        // twice in one call) and every root that already completed (skipped, not
+        // re-downloaded — its bytes were root-verified before the connection died).
+        (string Name, List<Manifest.Entry> Entries)? manifest = null;
+        var completedRoots = new HashSet<string>();
         bool anyResumed = false;
-        for (int i = 0; i < entries.Count; i++)
+
+        await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
+        while (true)
         {
-            var sink = new FileSink(SafeJoin(rootDir, entries[i].Path), entries[i].Root);
-            StreamDownloader entryDownloader = new(conn, sink, _ => { }, send, session, entries[i].Root, entries[i].Root,
-                options: options);
-            long bytes;
+            ct.ThrowIfCancellationRequested();
+            if (recovery > TimeSpan.Zero && Environment.TickCount64 > deadline)
+            {
+                throw new TimeoutException(
+                    $"the transfer could not be re-established within {recovery.TotalSeconds:0}s of disruptions");
+            }
+
+            bool dialing = true;
             try
             {
-                bytes = await entryDownloader.RunAsync(ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                sink.Abandon();
-                throw;
-            }
-            verified += bytes;
-            anyResumed |= sink.Resumed;
-            progress?.Report(new BlobProgress(verified, total, i + 1, entries.Count));
-        }
+                await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString, ct).ConfigureAwait(false);
+                dialing = false;
 
-        return new BlobDownloadResult(rootDir, verified, anyResumed);
+                // A fresh session per connection: a fresh downloader nonce, and the
+                // provider's Welcome mints its own fresh nonce — keys are always
+                // two-sided-new and counters restart with them. A recovery never
+                // continues old counters under recreated keys.
+                var session = new BlobWire.DownloadSession(ticket.PreSharedKey, ticket.Root);
+
+                if (ticket.Kind == BlobKind.File)
+                {
+                    string fileName = string.IsNullOrWhiteSpace(ticket.Name) ? "pinhole-download" : ticket.Name;
+                    string target = SafeJoin(destinationDirectory, fileName);
+                    var sink = new FileSink(target, ticket.Root);
+                    StreamDownloader? downloader = null;
+                    downloader = new StreamDownloader(conn, sink,
+                        v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), new SendCounter(), session,
+                        ticket.Root, options: options);
+                    long bytes;
+                    try
+                    {
+                        bytes = await downloader.RunAsync(ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        sink.Abandon();
+                        throw;
+                    }
+
+                    return new BlobDownloadResult(target, bytes, sink.Resumed);
+                }
+
+                var send = new SendCounter();
+                if (manifest is null)
+                {
+                    var manifestSink = new MemorySink();
+                    var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root,
+                        options: options);
+                    try
+                    {
+                        await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        manifestSink.Abandon();
+                        throw;
+                    }
+
+                    manifest = Manifest.Decode(manifestSink.Data);
+                }
+
+                (string name, List<Manifest.Entry> entries) = manifest!.Value;
+                string rootDir = SafeJoin(destinationDirectory, string.IsNullOrWhiteSpace(name) ? "pinhole-download" : name);
+                long total = entries.Sum(e => e.Size);
+                long verified = 0;
+                int filesDone = 0;
+                foreach (Manifest.Entry entry in entries)
+                {
+                    if (completedRoots.Contains(Convert.ToHexString(entry.Root)))
+                    {
+                        verified += entry.Size;
+                        filesDone++;
+                        continue;
+                    }
+
+                    var sink = new FileSink(SafeJoin(rootDir, entry.Path), entry.Root);
+                    StreamDownloader entryDownloader = new(conn, sink,
+                        v => progress?.Report(new BlobProgress(verified + v, total, filesDone + 1, entries.Count)), send, session,
+                        entry.Root, entry.Root, options: options);
+                    long bytes;
+                    try
+                    {
+                        bytes = await entryDownloader.RunAsync(ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        sink.Abandon();
+                        throw;
+                    }
+
+                    completedRoots.Add(Convert.ToHexString(entry.Root));
+                    verified += bytes;
+                    filesDone++;
+                    anyResumed |= sink.Resumed;
+                    progress?.Report(new BlobProgress(verified, total, filesDone, entries.Count));
+                }
+
+                return new BlobDownloadResult(rootDir, verified, anyResumed);
+            }
+            catch (Exception ex) when (IsTransportLoss(ex, dialing))
+            {
+                if (recovery <= TimeSpan.Zero || Environment.TickCount64 > deadline)
+                {
+                    throw new TimeoutException(
+                        $"the transfer could not be re-established within {recovery.TotalSeconds:0}s of disruptions", ex);
+                }
+
+                // The transport went away mid-transfer (or an attempt stalled past its
+                // own clock): verified checkpoints stay on disk, the pinned provider is
+                // re-dialed through the same ticket — authenticated rediscovery included
+                // — and the next attempt resumes exactly from those checkpoints.
+                await Task.Delay(backoffMs, ct).ConfigureAwait(false);
+                backoffMs = (int)Math.Min(backoffMs * 2, 5000);
+            }
+        }
     }
+
+    /// <summary>Disruptions worth riding out: the connection closed or went quiet, an
+    /// attempt stalled (missing chunks with a live route is re-dialable), a send outlived
+    /// its ride-out budget on a dead connection, or a dial could not complete — all facts
+    /// about the ROUTE. A Bye, a tampered frame, a root mismatch, or a refused handshake —
+    /// the InvalidOperationException the dial faults with on a pinning or encryption
+    /// refusal — is a fact about the provider or the content, and stays terminal.</summary>
+    private static bool IsTransportLoss(Exception ex, bool dialing) =>
+        ex is BlobTransportLostException or TimeoutException or ObjectDisposedException
+        || (ex is InvalidOperationException && !dialing);
 
     /// <summary>One monotonic frame counter for the whole connection: every stream shares
     /// it so the provider's per-connection replay check never sees a regression when a
@@ -273,13 +362,22 @@ public static class BlobClient
                     ct.ThrowIfCancellationRequested();
                     if (_conn.State == PinholeConnectionState.Closed)
                     {
-                        // Pathlessness is a wait; Closed is a verdict. The provider hung
-                        // up or the engine retired the connection — nothing rides out.
-                        throw new InvalidDataException("the connection went quiet before the transfer finished");
+                        // Pathlessness is a wait; Closed is a route verdict — the caller's
+                        // recovery loop re-dials and resumes from the checkpoints.
+                        throw new BlobTransportLostException("the connection closed before the transfer finished");
                     }
 
                     long now = Environment.TickCount64;
                     bool pathPresent = WatchPath(now);
+                    if (!pathPresent)
+                    {
+                        // The peer has not failed — the route is gone, and the engine is
+                        // recovering it. Neither the stall clock nor the first-contact
+                        // clock may run down while there is no path to verify progress
+                        // on; the caller's overall recovery deadline bounds the ride.
+                        _lastVerifiedTicks = now;
+                        _helloSince = now;
+                    }
 
                     if (_totalChunks < 0)
                     {
@@ -342,7 +440,7 @@ public static class BlobClient
 
                         if (!more || !frames.TryRead(out f))
                         {
-                            throw new InvalidDataException("the connection went quiet before the transfer finished");
+                            throw new BlobTransportLostException("the connection went quiet before the transfer finished");
                         }
                     }
 
@@ -354,6 +452,18 @@ public static class BlobClient
                                 _totalBytes = f.TotalBytes;
                                 _totalChunks = f.TotalChunks;
                                 _sink.Init(_totalBytes, _totalChunks);
+                                // Resume means resume ON THE WIRE: requests start at the
+                                // checkpointed prefix's first gap, not at chunk zero —
+                                // verified bytes never cross the network again.
+                                _maxRequested = _sink.Applied - 1;
+                                if (_sink.Applied > 0)
+                                {
+                                    // A resumed attempt reports from the checkpointed
+                                    // prefix: progress must never visibly go backwards
+                                    // across a recovery.
+                                    _verified = Math.Min(_sink.Applied * Blake3.ChunkSize, _totalBytes);
+                                    _onVerified(_verified);
+                                }
                             }
 
                             break;

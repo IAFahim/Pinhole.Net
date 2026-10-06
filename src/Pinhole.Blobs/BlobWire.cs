@@ -301,9 +301,17 @@ internal static class BlobWire
             _cipher = candidate;
             _providerNonce ??= welcome.ProviderNonce;
             _watermark = candidateWatermark;
+            WelcomeNonceSeen?.Invoke(SessionId, welcome.ProviderNonce!);
             return true;
         }
     }
+
+    /// <summary>Test/diagnostic seam: invoked with (downloader session id, provider nonce)
+    /// for every Welcome a session adopts — including repeats, since the provider re-offers
+    /// the same nonce to each retried Hello on one connection. Recovery tests assert the
+    /// nonce is stable within a session and distinct across sessions — a fresh two-sided
+    /// key every re-dial, never a continued counter.</summary>
+    internal static Action<byte[], byte[]>? WelcomeNonceSeen;
 
     /// <summary>ChaCha20-Poly1305 frames with a key derived from the ticket PSK, content
     /// root, and independent 256-bit nonces from the downloader and provider. Routing
