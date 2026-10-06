@@ -1,0 +1,17 @@
+#nullable enable
+Pinhole.Turn.TurnClient
+Pinhole.Turn.TurnClient.CreatePermissionAsync(System.Net.IPAddress! peerIp, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.Turn.TurnClient.Credential.get -> string!
+Pinhole.Turn.TurnClient.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.Turn.TurnClient.IsAlive.get -> bool
+Pinhole.Turn.TurnClient.LocalEndPoint.get -> System.Net.IPEndPoint!
+Pinhole.Turn.TurnClient.Received -> System.Action<System.Net.IPEndPoint!, byte[]!>?
+Pinhole.Turn.TurnClient.RelayedAddress.get -> System.Net.IPEndPoint?
+Pinhole.Turn.TurnClient.Send(System.ReadOnlySpan<byte> payload, System.Net.IPEndPoint! peer) -> void
+Pinhole.Turn.TurnClient.SendAsync(System.ReadOnlyMemory<byte> payload, System.Net.IPEndPoint! peer, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.Turn.TurnClient.Server.get -> System.Net.IPEndPoint!
+Pinhole.Turn.TurnClient.Username.get -> string!
+Pinhole.Turn.TurnRejectException
+Pinhole.Turn.TurnRejectException.Code.get -> int
+Pinhole.Turn.TurnRejectException.TurnRejectException(int code, string! reason) -> void
+static Pinhole.Turn.TurnClient.AllocateAsync(System.Net.IPEndPoint! server, string! username, string! credential, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.Turn.TurnClient!>!

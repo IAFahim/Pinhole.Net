@@ -1,0 +1,300 @@
+#nullable enable
+const Pinhole.AddressRecord.EndpointKeyLength = 32 -> int
+const Pinhole.AddressRecord.MaxEndpoints = 16 -> int
+const Pinhole.AddressRecord.MaxRelayedEndpoints = 4 -> int
+const Pinhole.AddressRecord.SignatureLength = 64 -> int
+const Pinhole.ConnectionString.MaxCandidates = 32 -> int
+const Pinhole.ConnectionString.MaxEncodedLength = 8192 -> int
+const Pinhole.ConnectionString.Scheme = "pinhole1" -> string!
+const Pinhole.PinholeConnection.MaxPayload = 1200 -> int
+override Pinhole.ConnectionString.ToString() -> string!
+override Pinhole.LanPeer.Equals(object? obj) -> bool
+override Pinhole.LanPeer.GetHashCode() -> int
+override Pinhole.LanPeer.ToString() -> string!
+override Pinhole.PinholeCandidate.Equals(object? obj) -> bool
+override Pinhole.PinholeCandidate.GetHashCode() -> int
+override Pinhole.PinholeCandidate.ToString() -> string!
+override Pinhole.PinholeOptions.Equals(object? obj) -> bool
+override Pinhole.PinholeOptions.GetHashCode() -> int
+override Pinhole.PinholeOptions.ToString() -> string!
+override Pinhole.PinholePath.Equals(object? obj) -> bool
+override Pinhole.PinholePath.GetHashCode() -> int
+override Pinhole.PinholePath.ToString() -> string!
+override Pinhole.PinholeStats.GetHashCode() -> int
+override Pinhole.TurnServerConfig.Equals(object? obj) -> bool
+override Pinhole.TurnServerConfig.GetHashCode() -> int
+override Pinhole.TurnServerConfig.ToString() -> string!
+Pinhole.AddressRecord
+Pinhole.AddressRecord.AddressRecord() -> void
+Pinhole.AddressRecord.Encode() -> byte[]!
+Pinhole.AddressRecord.EndpointKey.get -> byte[]!
+Pinhole.AddressRecord.EndpointKey.init -> void
+Pinhole.AddressRecord.Endpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.AddressRecord.Endpoints.init -> void
+Pinhole.AddressRecord.ExpiresAtUtc.get -> System.DateTimeOffset
+Pinhole.AddressRecord.ExpiresAtUtc.init -> void
+Pinhole.AddressRecord.PeerId.get -> ulong
+Pinhole.AddressRecord.PeerId.init -> void
+Pinhole.AddressRecord.RelayedEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.AddressRecord.RelayedEndpoints.init -> void
+Pinhole.AddressRecord.Sequence.get -> ulong
+Pinhole.AddressRecord.Sequence.init -> void
+Pinhole.CandidateKind
+Pinhole.CandidateKind.Direct = 1 -> Pinhole.CandidateKind
+Pinhole.CandidateKind.IrohRelay = 4 -> Pinhole.CandidateKind
+Pinhole.CandidateKind.Reflexive = 2 -> Pinhole.CandidateKind
+Pinhole.CandidateKind.Relay = 3 -> Pinhole.CandidateKind
+Pinhole.ConnectionString
+Pinhole.ConnectionString.Candidates.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>!
+Pinhole.ConnectionString.ConnectionString(ulong peerId, System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>! candidates, Pinhole.NatHint natHint = Pinhole.NatHint.Unknown, byte[]? staticKey = null, byte[]? endpointKey = null) -> void
+Pinhole.ConnectionString.EndpointKey.get -> byte[]?
+Pinhole.ConnectionString.NatHint.get -> Pinhole.NatHint
+Pinhole.ConnectionString.PeerId.get -> ulong
+Pinhole.ConnectionString.StaticKey.get -> byte[]?
+Pinhole.IPinholeLookupProvider
+Pinhole.IPinholeLookupProvider.PublishAsync(System.ReadOnlyMemory<byte> signedRecord, System.Threading.CancellationToken ct) -> System.Threading.Tasks.Task!
+Pinhole.IPinholeLookupProvider.ResolveAsync(ulong peerId, System.Threading.CancellationToken ct) -> System.Threading.Tasks.Task<byte[]?>!
+Pinhole.LanPeer
+Pinhole.LanPeer.<Clone>$() -> Pinhole.LanPeer!
+Pinhole.LanPeer.Deconstruct(out ulong PeerId, out System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>! Endpoints, out Pinhole.NatHint NatHint, out byte[]? StaticKey) -> void
+Pinhole.LanPeer.Endpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.LanPeer.Endpoints.init -> void
+Pinhole.LanPeer.Equals(Pinhole.LanPeer? other) -> bool
+Pinhole.LanPeer.LanPeer(ulong PeerId, System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>! Endpoints, Pinhole.NatHint NatHint, byte[]? StaticKey) -> void
+Pinhole.LanPeer.NatHint.get -> Pinhole.NatHint
+Pinhole.LanPeer.NatHint.init -> void
+Pinhole.LanPeer.PeerId.get -> ulong
+Pinhole.LanPeer.PeerId.init -> void
+Pinhole.LanPeer.StaticKey.get -> byte[]?
+Pinhole.LanPeer.StaticKey.init -> void
+Pinhole.LanPeer.ToConnectionString() -> Pinhole.ConnectionString!
+Pinhole.NatDetector
+Pinhole.NatHint
+Pinhole.NatHint.Cone = 1 -> Pinhole.NatHint
+Pinhole.NatHint.Symmetric = 2 -> Pinhole.NatHint
+Pinhole.NatHint.Unknown = 0 -> Pinhole.NatHint
+Pinhole.NatType
+Pinhole.NatType.Cone = 1 -> Pinhole.NatType
+Pinhole.NatType.Symmetric = 2 -> Pinhole.NatType
+Pinhole.NatType.Unknown = 0 -> Pinhole.NatType
+Pinhole.PathKind
+Pinhole.PathKind.Direct = 1 -> Pinhole.PathKind
+Pinhole.PathKind.None = 0 -> Pinhole.PathKind
+Pinhole.PathKind.Relay = 2 -> Pinhole.PathKind
+Pinhole.PeerSocket
+Pinhole.PeerSocket.AddCandidate(System.Net.IPEndPoint! endpoint) -> void
+Pinhole.PeerSocket.AddRendezvous(System.Net.IPEndPoint! endpoint) -> void
+Pinhole.PeerSocket.ConnectAsync(ulong targetNodeId, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.PeerSocket.ConnectDirectAsync(System.Net.IPEndPoint! endpoint) -> System.Threading.Tasks.Task!
+Pinhole.PeerSocket.Connected.get -> System.Threading.Tasks.Task!
+Pinhole.PeerSocket.Dispose() -> void
+Pinhole.PeerSocket.LastRtt.get -> System.TimeSpan?
+Pinhole.PeerSocket.LocalPort.get -> int
+Pinhole.PeerSocket.Peer.get -> System.Net.IPEndPoint?
+Pinhole.PeerSocket.PeerSocket(ulong nodeId, System.Net.IPEndPoint? bind = null) -> void
+Pinhole.PeerSocket.Ping() -> void
+Pinhole.PeerSocket.ProbeStunAsync(System.Net.IPEndPoint! stunServer, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint!>!
+Pinhole.PeerSocket.PublicAddress.get -> System.Net.IPEndPoint?
+Pinhole.PeerSocket.Received -> Pinhole.PinholeDatagramHandler?
+Pinhole.PeerSocket.RegisterAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint!>!
+Pinhole.PeerSocket.Send(System.ReadOnlySpan<byte> payload) -> void
+Pinhole.PinholeCandidate
+Pinhole.PinholeCandidate.<Clone>$() -> Pinhole.PinholeCandidate!
+Pinhole.PinholeCandidate.Address.get -> System.Net.IPEndPoint!
+Pinhole.PinholeCandidate.Address.init -> void
+Pinhole.PinholeCandidate.Credential.get -> string?
+Pinhole.PinholeCandidate.Credential.init -> void
+Pinhole.PinholeCandidate.Deconstruct(out Pinhole.CandidateKind Kind, out System.Net.IPEndPoint! Address, out System.Net.IPEndPoint? RelayServer, out string? Username, out string? Credential, out System.Uri? RelayUrl, out byte[]? RelayKey) -> void
+Pinhole.PinholeCandidate.Equals(Pinhole.PinholeCandidate? other) -> bool
+Pinhole.PinholeCandidate.Kind.get -> Pinhole.CandidateKind
+Pinhole.PinholeCandidate.Kind.init -> void
+Pinhole.PinholeCandidate.PinholeCandidate(Pinhole.CandidateKind Kind, System.Net.IPEndPoint! Address, System.Net.IPEndPoint? RelayServer = null, string? Username = null, string? Credential = null, System.Uri? RelayUrl = null, byte[]? RelayKey = null) -> void
+Pinhole.PinholeCandidate.RelayKey.get -> byte[]?
+Pinhole.PinholeCandidate.RelayKey.init -> void
+Pinhole.PinholeCandidate.RelayServer.get -> System.Net.IPEndPoint?
+Pinhole.PinholeCandidate.RelayServer.init -> void
+Pinhole.PinholeCandidate.RelayUrl.get -> System.Uri?
+Pinhole.PinholeCandidate.RelayUrl.init -> void
+Pinhole.PinholeCandidate.Username.get -> string?
+Pinhole.PinholeCandidate.Username.init -> void
+Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.InvalidConnectionString = 1 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.None = 0 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.NoRelayFallback = 3 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.PeerIncompatible = 5 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.SelfConnection = 2 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectFailure.TimedOut = 4 -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnection
+Pinhole.PinholeConnection.AverageRtt.get -> System.TimeSpan?
+Pinhole.PinholeConnection.CloseAsync() -> System.Threading.Tasks.Task!
+Pinhole.PinholeConnection.Closed.get -> System.Threading.Tasks.Task!
+Pinhole.PinholeConnection.Dispose() -> void
+Pinhole.PinholeConnection.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.PinholeConnection.DroppedDatagrams.get -> long
+Pinhole.PinholeConnection.FramesRejected.get -> long
+Pinhole.PinholeConnection.IsEncrypted.get -> bool
+Pinhole.PinholeConnection.LastRtt.get -> System.TimeSpan?
+Pinhole.PinholeConnection.Path.get -> Pinhole.PinholePath!
+Pinhole.PinholeConnection.PathMtu.get -> int
+Pinhole.PinholeConnection.PeerId.get -> ulong
+Pinhole.PinholeConnection.Ping() -> void
+Pinhole.PinholeConnection.ReadAllAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Collections.Generic.IAsyncEnumerable<System.ReadOnlyMemory<byte>>!
+Pinhole.PinholeConnection.ReceiveAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.ReadOnlyMemory<byte>?>
+Pinhole.PinholeConnection.Received -> Pinhole.PinholeDatagramHandler?
+Pinhole.PinholeConnection.RemoteStaticKey.get -> byte[]?
+Pinhole.PinholeConnection.Send(System.ReadOnlySpan<byte> payload) -> void
+Pinhole.PinholeConnection.State.get -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnection.StateChanged -> System.Action<Pinhole.PinholeConnectionState>?
+Pinhole.PinholeConnection.Stats.get -> Pinhole.PinholeStats
+Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectionState.Closed = 4 -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectionState.Dead = 3 -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectionState.Degraded = 2 -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectionState.Open = 1 -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectionState.Punching = 0 -> Pinhole.PinholeConnectionState
+Pinhole.PinholeConnectResult
+Pinhole.PinholeConnectResult.Connection.get -> Pinhole.PinholeConnection?
+Pinhole.PinholeConnectResult.ErrorMessage.get -> string?
+Pinhole.PinholeConnectResult.Failure.get -> Pinhole.PinholeConnectFailure
+Pinhole.PinholeConnectResult.IsSuccess.get -> bool
+Pinhole.PinholeDatagramHandler
+Pinhole.PinholeEncryption
+Pinhole.PinholeEncryption.Disabled = 2 -> Pinhole.PinholeEncryption
+Pinhole.PinholeEncryption.Optional = 1 -> Pinhole.PinholeEncryption
+Pinhole.PinholeEncryption.Required = 0 -> Pinhole.PinholeEncryption
+Pinhole.PinholeNode
+Pinhole.PinholeNode.AcceptAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnection!>!
+Pinhole.PinholeNode.ConnectAsync(string! connectionString, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnection!>!
+Pinhole.PinholeNode.Connections.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeConnection!>!
+Pinhole.PinholeNode.ConnectionString.get -> string!
+Pinhole.PinholeNode.Dispose() -> void
+Pinhole.PinholeNode.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.PinholeNode.EndpointPublicKey.get -> byte[]?
+Pinhole.PinholeNode.HasRelay.get -> bool
+Pinhole.PinholeNode.LocalPort.get -> int
+Pinhole.PinholeNode.NatHint.get -> Pinhole.NatHint
+Pinhole.PinholeNode.PeerId.get -> ulong
+Pinhole.PinholeNode.PortMappedEndpoint.get -> System.Net.IPEndPoint?
+Pinhole.PinholeNode.PublicEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.PinholeNode.RoamNowAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.PinholeNode.SetNatHint(Pinhole.NatHint hint) -> void
+Pinhole.PinholeNode.StaticPublicKey.get -> byte[]?
+Pinhole.PinholeNode.TryConnectAsync(string? connectionString, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnectResult!>!
+Pinhole.PinholeOptions
+Pinhole.PinholeOptions.<Clone>$() -> Pinhole.PinholeOptions!
+Pinhole.PinholeOptions.Bind.get -> System.Net.IPEndPoint?
+Pinhole.PinholeOptions.Bind.init -> void
+Pinhole.PinholeOptions.BindProbeBudget.get -> System.TimeSpan
+Pinhole.PinholeOptions.BindProbeBudget.init -> void
+Pinhole.PinholeOptions.ConnectTimeout.get -> System.TimeSpan
+Pinhole.PinholeOptions.ConnectTimeout.init -> void
+Pinhole.PinholeOptions.EnableLanDiscovery.get -> bool
+Pinhole.PinholeOptions.EnableLanDiscovery.init -> void
+Pinhole.PinholeOptions.EnableNetworkWatch.get -> bool
+Pinhole.PinholeOptions.EnableNetworkWatch.init -> void
+Pinhole.PinholeOptions.EnablePathValidation.get -> bool
+Pinhole.PinholeOptions.EnablePathValidation.init -> void
+Pinhole.PinholeOptions.EnablePmtud.get -> bool
+Pinhole.PinholeOptions.EnablePmtud.init -> void
+Pinhole.PinholeOptions.EnablePortMapping.get -> bool
+Pinhole.PinholeOptions.EnablePortMapping.init -> void
+Pinhole.PinholeOptions.Encryption.get -> Pinhole.PinholeEncryption
+Pinhole.PinholeOptions.Encryption.init -> void
+Pinhole.PinholeOptions.Equals(Pinhole.PinholeOptions? other) -> bool
+Pinhole.PinholeOptions.IdentityKeySeed.get -> byte[]?
+Pinhole.PinholeOptions.IdentityKeySeed.init -> void
+Pinhole.PinholeOptions.IrohRelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>?
+Pinhole.PinholeOptions.IrohRelayUrls.init -> void
+Pinhole.PinholeOptions.KeepaliveInterval.get -> System.TimeSpan
+Pinhole.PinholeOptions.KeepaliveInterval.init -> void
+Pinhole.PinholeOptions.Listen.get -> bool
+Pinhole.PinholeOptions.Listen.init -> void
+Pinhole.PinholeOptions.LookupProviders.get -> System.Collections.Generic.IReadOnlyList<Pinhole.IPinholeLookupProvider!>?
+Pinhole.PinholeOptions.LookupProviders.init -> void
+Pinhole.PinholeOptions.PathValidationIdle.get -> System.TimeSpan
+Pinhole.PinholeOptions.PathValidationIdle.init -> void
+Pinhole.PinholeOptions.PathValidationMaxUnansweredProbes.get -> int
+Pinhole.PinholeOptions.PathValidationMaxUnansweredProbes.init -> void
+Pinhole.PinholeOptions.PathValidationProbeInterval.get -> System.TimeSpan
+Pinhole.PinholeOptions.PathValidationProbeInterval.init -> void
+Pinhole.PinholeOptions.PinholeOptions() -> void
+Pinhole.PinholeOptions.PmtuReprobeInterval.get -> System.TimeSpan
+Pinhole.PinholeOptions.PmtuReprobeInterval.init -> void
+Pinhole.PinholeOptions.ReceiveBufferCapacity.get -> int
+Pinhole.PinholeOptions.ReceiveBufferCapacity.init -> void
+Pinhole.PinholeOptions.Relays.get -> System.Collections.Generic.IReadOnlyList<Pinhole.TurnServerConfig!>?
+Pinhole.PinholeOptions.Relays.init -> void
+Pinhole.PinholeOptions.RendezvousEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>?
+Pinhole.PinholeOptions.RendezvousEndpoints.init -> void
+Pinhole.PinholeOptions.StunRefreshInterval.get -> System.TimeSpan
+Pinhole.PinholeOptions.StunRefreshInterval.init -> void
+Pinhole.PinholeOptions.StunServers.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>?
+Pinhole.PinholeOptions.StunServers.init -> void
+Pinhole.PinholePath
+Pinhole.PinholePath.<Clone>$() -> Pinhole.PinholePath!
+Pinhole.PinholePath.Deconstruct(out Pinhole.PathKind Kind, out System.Net.IPEndPoint? Remote, out System.DateTimeOffset Since) -> void
+Pinhole.PinholePath.Equals(Pinhole.PinholePath? other) -> bool
+Pinhole.PinholePath.Kind.get -> Pinhole.PathKind
+Pinhole.PinholePath.Kind.init -> void
+Pinhole.PinholePath.PinholePath(Pinhole.PathKind Kind, System.Net.IPEndPoint? Remote, System.DateTimeOffset Since) -> void
+Pinhole.PinholePath.RelayUrl.get -> System.Uri?
+Pinhole.PinholePath.RelayUrl.init -> void
+Pinhole.PinholePath.Remote.get -> System.Net.IPEndPoint?
+Pinhole.PinholePath.Remote.init -> void
+Pinhole.PinholePath.Since.get -> System.DateTimeOffset
+Pinhole.PinholePath.Since.init -> void
+Pinhole.PinholeStats
+Pinhole.PinholeStats.BytesReceived.get -> long
+Pinhole.PinholeStats.BytesReceived.init -> void
+Pinhole.PinholeStats.BytesSent.get -> long
+Pinhole.PinholeStats.BytesSent.init -> void
+Pinhole.PinholeStats.DatagramsReceived.get -> long
+Pinhole.PinholeStats.DatagramsReceived.init -> void
+Pinhole.PinholeStats.DatagramsSendFailed.get -> long
+Pinhole.PinholeStats.DatagramsSendFailed.init -> void
+Pinhole.PinholeStats.DatagramsSent.get -> long
+Pinhole.PinholeStats.DatagramsSent.init -> void
+Pinhole.PinholeStats.Deconstruct(out long DatagramsSent, out long DatagramsReceived, out long DatagramsSendFailed, out long BytesSent, out long BytesReceived, out long PingsSent, out long PongsReceived) -> void
+Pinhole.PinholeStats.Equals(Pinhole.PinholeStats other) -> bool
+Pinhole.PinholeStats.PingsLost.get -> long
+Pinhole.PinholeStats.PingsSent.get -> long
+Pinhole.PinholeStats.PingsSent.init -> void
+Pinhole.PinholeStats.PinholeStats() -> void
+Pinhole.PinholeStats.PinholeStats(long DatagramsSent, long DatagramsReceived, long DatagramsSendFailed, long BytesSent, long BytesReceived, long PingsSent, long PongsReceived) -> void
+Pinhole.PinholeStats.PongsReceived.get -> long
+Pinhole.PinholeStats.PongsReceived.init -> void
+Pinhole.TurnServerConfig
+Pinhole.TurnServerConfig.<Clone>$() -> Pinhole.TurnServerConfig!
+Pinhole.TurnServerConfig.Credential.get -> string!
+Pinhole.TurnServerConfig.Credential.init -> void
+Pinhole.TurnServerConfig.Deconstruct(out System.Net.IPEndPoint! Server, out string! Username, out string! Credential) -> void
+Pinhole.TurnServerConfig.Equals(Pinhole.TurnServerConfig? other) -> bool
+Pinhole.TurnServerConfig.Server.get -> System.Net.IPEndPoint!
+Pinhole.TurnServerConfig.Server.init -> void
+Pinhole.TurnServerConfig.TurnServerConfig(System.Net.IPEndPoint! Server, string! Username, string! Credential) -> void
+Pinhole.TurnServerConfig.Username.get -> string!
+Pinhole.TurnServerConfig.Username.init -> void
+static Pinhole.AddressRecord.TryParseVerified(System.ReadOnlySpan<byte> wire, ulong expectedPeerId, System.ReadOnlySpan<byte> expectedEndpointKey, System.DateTimeOffset now, out Pinhole.AddressRecord? record) -> bool
+static Pinhole.ConnectionString.Parse(string! text) -> Pinhole.ConnectionString!
+static Pinhole.ConnectionString.TryParse(string! text, out Pinhole.ConnectionString? cs) -> bool
+static Pinhole.LanPeer.operator !=(Pinhole.LanPeer? left, Pinhole.LanPeer? right) -> bool
+static Pinhole.LanPeer.operator ==(Pinhole.LanPeer? left, Pinhole.LanPeer? right) -> bool
+static Pinhole.NatDetector.DetectAsync(System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>! servers, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.NatType>!
+static Pinhole.NatDetector.DetectAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.NatType>!
+static Pinhole.PinholeCandidate.operator !=(Pinhole.PinholeCandidate? left, Pinhole.PinholeCandidate? right) -> bool
+static Pinhole.PinholeCandidate.operator ==(Pinhole.PinholeCandidate? left, Pinhole.PinholeCandidate? right) -> bool
+static Pinhole.PinholeNode.BindAsync(Pinhole.PinholeOptions? options = null, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeNode!>!
+static Pinhole.PinholeNode.DiscoverLanPeersAsync(System.TimeSpan window, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<Pinhole.LanPeer!>!>!
+static Pinhole.PinholeOptions.DefaultAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeOptions!>!
+static Pinhole.PinholeOptions.operator !=(Pinhole.PinholeOptions? left, Pinhole.PinholeOptions? right) -> bool
+static Pinhole.PinholeOptions.operator ==(Pinhole.PinholeOptions? left, Pinhole.PinholeOptions? right) -> bool
+static Pinhole.PinholePath.operator !=(Pinhole.PinholePath? left, Pinhole.PinholePath? right) -> bool
+static Pinhole.PinholePath.operator ==(Pinhole.PinholePath? left, Pinhole.PinholePath? right) -> bool
+static Pinhole.PinholeStats.operator !=(Pinhole.PinholeStats left, Pinhole.PinholeStats right) -> bool
+static Pinhole.PinholeStats.operator ==(Pinhole.PinholeStats left, Pinhole.PinholeStats right) -> bool
+static Pinhole.TurnServerConfig.operator !=(Pinhole.TurnServerConfig? left, Pinhole.TurnServerConfig? right) -> bool
+static Pinhole.TurnServerConfig.operator ==(Pinhole.TurnServerConfig? left, Pinhole.TurnServerConfig? right) -> bool
+static readonly Pinhole.PinholePath.None -> Pinhole.PinholePath!
+virtual Pinhole.PinholeDatagramHandler.Invoke(System.ReadOnlySpan<byte> payload) -> void
+~override Pinhole.PinholeStats.Equals(object obj) -> bool
+~override Pinhole.PinholeStats.ToString() -> string

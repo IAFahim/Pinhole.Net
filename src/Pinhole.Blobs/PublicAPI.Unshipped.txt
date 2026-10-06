@@ -1,0 +1,123 @@
+#nullable enable
+const Pinhole.Blobs.Blake3.BlockSize = 64 -> int
+const Pinhole.Blobs.Blake3.ChunkSize = 1024 -> int
+const Pinhole.Blobs.BlobTicket.MaxEncodedLength = 16384 -> int
+const Pinhole.Blobs.BlobTicket.Scheme = "pinholeblob1" -> string!
+override Pinhole.Blobs.BlobDownloadOptions.Equals(object? obj) -> bool
+override Pinhole.Blobs.BlobDownloadOptions.GetHashCode() -> int
+override Pinhole.Blobs.BlobDownloadOptions.ToString() -> string!
+override Pinhole.Blobs.BlobDownloadResult.Equals(object? obj) -> bool
+override Pinhole.Blobs.BlobDownloadResult.GetHashCode() -> int
+override Pinhole.Blobs.BlobDownloadResult.ToString() -> string!
+~override Pinhole.Blobs.BlobProgress.Equals(object obj) -> bool
+override Pinhole.Blobs.BlobProgress.GetHashCode() -> int
+~override Pinhole.Blobs.BlobProgress.ToString() -> string
+override Pinhole.Blobs.BlobServeOptions.Equals(object? obj) -> bool
+override Pinhole.Blobs.BlobServeOptions.GetHashCode() -> int
+override Pinhole.Blobs.BlobServeOptions.ToString() -> string!
+override Pinhole.Blobs.BlobTicket.ToString() -> string!
+Pinhole.Blobs.Blake3
+Pinhole.Blobs.Blake3.Tree
+Pinhole.Blobs.Blake3.Tree.ChunkCount.get -> int
+Pinhole.Blobs.Blake3.Tree.ChunkCvs.get -> System.Collections.Generic.IReadOnlyList<byte[]!>!
+Pinhole.Blobs.Blake3.Tree.RootHash() -> byte[]!
+Pinhole.Blobs.Blake3.Tree.TotalBytes.get -> long
+Pinhole.Blobs.Blake3.Tree.Tree() -> void
+Pinhole.Blobs.Blake3.Tree.Update(System.ReadOnlySpan<byte> data) -> void
+Pinhole.Blobs.BlobClient
+Pinhole.Blobs.BlobDownloadOptions
+Pinhole.Blobs.BlobDownloadOptions.BlobDownloadOptions() -> void
+Pinhole.Blobs.BlobDownloadOptions.<Clone>$() -> Pinhole.Blobs.BlobDownloadOptions!
+Pinhole.Blobs.BlobDownloadOptions.Equals(Pinhole.Blobs.BlobDownloadOptions? other) -> bool
+Pinhole.Blobs.BlobDownloadOptions.FlowBudget.get -> Pinhole.Blobs.BlobFlowBudget?
+Pinhole.Blobs.BlobDownloadOptions.FlowBudget.init -> void
+Pinhole.Blobs.BlobDownloadOptions.MaxWindowBytes.get -> long
+Pinhole.Blobs.BlobDownloadOptions.MaxWindowBytes.init -> void
+Pinhole.Blobs.BlobDownloadOptions.NodeOptions.get -> Pinhole.PinholeOptions?
+Pinhole.Blobs.BlobDownloadOptions.NodeOptions.init -> void
+Pinhole.Blobs.BlobDownloadOptions.RecoveryTimeout.get -> System.TimeSpan
+Pinhole.Blobs.BlobDownloadOptions.RecoveryTimeout.init -> void
+Pinhole.Blobs.BlobDownloadOptions.Stats.get -> Pinhole.Blobs.BlobTransferStats?
+Pinhole.Blobs.BlobDownloadOptions.Stats.init -> void
+Pinhole.Blobs.BlobDownloadResult
+Pinhole.Blobs.BlobDownloadResult.BlobDownloadResult(string! Path, long Bytes, bool Resumed) -> void
+Pinhole.Blobs.BlobDownloadResult.Bytes.get -> long
+Pinhole.Blobs.BlobDownloadResult.Bytes.init -> void
+Pinhole.Blobs.BlobDownloadResult.<Clone>$() -> Pinhole.Blobs.BlobDownloadResult!
+Pinhole.Blobs.BlobDownloadResult.Deconstruct(out string! Path, out long Bytes, out bool Resumed) -> void
+Pinhole.Blobs.BlobDownloadResult.Equals(Pinhole.Blobs.BlobDownloadResult? other) -> bool
+Pinhole.Blobs.BlobDownloadResult.Path.get -> string!
+Pinhole.Blobs.BlobDownloadResult.Path.init -> void
+Pinhole.Blobs.BlobDownloadResult.Resumed.get -> bool
+Pinhole.Blobs.BlobDownloadResult.Resumed.init -> void
+Pinhole.Blobs.BlobFlowBudget
+Pinhole.Blobs.BlobFlowBudget.BlobFlowBudget(long capacityBytes) -> void
+Pinhole.Blobs.BlobFlowBudget.CapacityBytes.get -> long
+Pinhole.Blobs.BlobKind
+Pinhole.Blobs.BlobKind.Directory = 2 -> Pinhole.Blobs.BlobKind
+Pinhole.Blobs.BlobKind.File = 1 -> Pinhole.Blobs.BlobKind
+Pinhole.Blobs.BlobProgress
+Pinhole.Blobs.BlobProgress.BlobProgress(long VerifiedBytes, long TotalBytes, int FilesDone, int FilesTotal) -> void
+Pinhole.Blobs.BlobProgress.BlobProgress() -> void
+Pinhole.Blobs.BlobProgress.Deconstruct(out long VerifiedBytes, out long TotalBytes, out int FilesDone, out int FilesTotal) -> void
+Pinhole.Blobs.BlobProgress.Equals(Pinhole.Blobs.BlobProgress other) -> bool
+Pinhole.Blobs.BlobProgress.FilesDone.get -> int
+Pinhole.Blobs.BlobProgress.FilesDone.init -> void
+Pinhole.Blobs.BlobProgress.FilesTotal.get -> int
+Pinhole.Blobs.BlobProgress.FilesTotal.init -> void
+Pinhole.Blobs.BlobProgress.TotalBytes.get -> long
+Pinhole.Blobs.BlobProgress.TotalBytes.init -> void
+Pinhole.Blobs.BlobProgress.VerifiedBytes.get -> long
+Pinhole.Blobs.BlobProgress.VerifiedBytes.init -> void
+Pinhole.Blobs.BlobServeOptions
+Pinhole.Blobs.BlobServeOptions.BlobServeOptions() -> void
+Pinhole.Blobs.BlobServeOptions.<Clone>$() -> Pinhole.Blobs.BlobServeOptions!
+Pinhole.Blobs.BlobServeOptions.Encrypt.get -> bool
+Pinhole.Blobs.BlobServeOptions.Encrypt.init -> void
+Pinhole.Blobs.BlobServeOptions.Equals(Pinhole.Blobs.BlobServeOptions? other) -> bool
+Pinhole.Blobs.BlobServeOptions.NodeOptions.get -> Pinhole.PinholeOptions?
+Pinhole.Blobs.BlobServeOptions.NodeOptions.init -> void
+Pinhole.Blobs.BlobServer
+Pinhole.Blobs.BlobServer.ChunksServed.get -> long
+Pinhole.Blobs.BlobServer.ConnectionsAccepted.get -> long
+Pinhole.Blobs.BlobServer.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.Blobs.BlobServer.Ticket.get -> Pinhole.Blobs.BlobTicket!
+Pinhole.Blobs.BlobTicket
+Pinhole.Blobs.BlobTicket.BlobTicket() -> void
+Pinhole.Blobs.BlobTicket.ConnectionString.get -> string!
+Pinhole.Blobs.BlobTicket.ConnectionString.init -> void
+Pinhole.Blobs.BlobTicket.Encrypted.get -> bool
+Pinhole.Blobs.BlobTicket.Kind.get -> Pinhole.Blobs.BlobKind
+Pinhole.Blobs.BlobTicket.Kind.init -> void
+Pinhole.Blobs.BlobTicket.Name.get -> string!
+Pinhole.Blobs.BlobTicket.Name.init -> void
+Pinhole.Blobs.BlobTicket.PreSharedKey.get -> byte[]?
+Pinhole.Blobs.BlobTicket.PreSharedKey.init -> void
+Pinhole.Blobs.BlobTicket.Root.get -> byte[]!
+Pinhole.Blobs.BlobTicket.Root.init -> void
+Pinhole.Blobs.BlobTransferStats
+Pinhole.Blobs.BlobTransferStats.BlobTransferStats() -> void
+Pinhole.Blobs.BlobTransferStats.ConservativeResumes.get -> long
+Pinhole.Blobs.BlobTransferStats.DuplicateBytes.get -> long
+Pinhole.Blobs.BlobTransferStats.LossEvents.get -> long
+Pinhole.Blobs.BlobTransferStats.ReceivedBytes.get -> long
+Pinhole.Blobs.BlobTransferStats.RequestsSent.get -> long
+Pinhole.Blobs.BlobTransferStats.Retransmits.get -> long
+Pinhole.Blobs.BlobTransferStats.SmoothedRtt.get -> System.TimeSpan?
+Pinhole.Blobs.BlobTransferStats.VerifiedBytes.get -> long
+Pinhole.Blobs.BlobTransferStats.WindowBytes.get -> long
+static Pinhole.Blobs.Blake3.ChunkCv(System.ReadOnlySpan<byte> chunk, ulong index, bool root) -> byte[]!
+static Pinhole.Blobs.Blake3.Hash(System.ReadOnlySpan<byte> data) -> byte[]!
+static Pinhole.Blobs.BlobClient.DownloadAsync(Pinhole.Blobs.BlobTicket! ticket, string! destinationDirectory, System.IProgress<Pinhole.Blobs.BlobProgress>? progress = null, Pinhole.Blobs.BlobDownloadOptions? options = null, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.Blobs.BlobDownloadResult!>!
+static Pinhole.Blobs.BlobDownloadOptions.operator !=(Pinhole.Blobs.BlobDownloadOptions? left, Pinhole.Blobs.BlobDownloadOptions? right) -> bool
+static Pinhole.Blobs.BlobDownloadOptions.operator ==(Pinhole.Blobs.BlobDownloadOptions? left, Pinhole.Blobs.BlobDownloadOptions? right) -> bool
+static Pinhole.Blobs.BlobDownloadResult.operator !=(Pinhole.Blobs.BlobDownloadResult? left, Pinhole.Blobs.BlobDownloadResult? right) -> bool
+static Pinhole.Blobs.BlobDownloadResult.operator ==(Pinhole.Blobs.BlobDownloadResult? left, Pinhole.Blobs.BlobDownloadResult? right) -> bool
+static Pinhole.Blobs.BlobFlowBudget.Shared.get -> Pinhole.Blobs.BlobFlowBudget!
+static Pinhole.Blobs.BlobProgress.operator !=(Pinhole.Blobs.BlobProgress left, Pinhole.Blobs.BlobProgress right) -> bool
+static Pinhole.Blobs.BlobProgress.operator ==(Pinhole.Blobs.BlobProgress left, Pinhole.Blobs.BlobProgress right) -> bool
+static Pinhole.Blobs.BlobServeOptions.operator !=(Pinhole.Blobs.BlobServeOptions? left, Pinhole.Blobs.BlobServeOptions? right) -> bool
+static Pinhole.Blobs.BlobServeOptions.operator ==(Pinhole.Blobs.BlobServeOptions? left, Pinhole.Blobs.BlobServeOptions? right) -> bool
+static Pinhole.Blobs.BlobServer.ServeAsync(string! path, Pinhole.Blobs.BlobServeOptions? options = null, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.Blobs.BlobServer!>!
+static Pinhole.Blobs.BlobTicket.Parse(string? text) -> Pinhole.Blobs.BlobTicket!
+static Pinhole.Blobs.BlobTicket.TryParse(string? text, out Pinhole.Blobs.BlobTicket? ticket) -> bool

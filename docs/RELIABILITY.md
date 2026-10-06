@@ -155,6 +155,18 @@ dotnet list <project> package --include-transitive
 No project in the shipping closure P/Invokes, loads a native library, or
 depends on a package that does.
 
+## API compatibility
+
+Every shipped project's public surface is checked in as a Roslyn PublicAPI
+listing (`PublicAPI.Shipped.txt` / `PublicAPI.Unshipped.txt`, nullable
+annotations recorded, `Microsoft.CodeAnalysis.PublicApiAnalyzers` 5.6.0 as a
+build-time-only reference). Adding or mutating public API without updating the
+listing is a build **error** (RS0016), and removing or changing existing API —
+a binary-breaking change — is a build error outright (RS0017). To intentionally
+change surface: `dotnet format analyzers src/<project>/<project>.csproj
+--diagnostics RS0016` regenerates the listing; the diff is reviewable in the
+PR. The .NET/runtime/AOT test matrix is the CI table above.
+
 ## Known limitations
 
 Collected in one place so nothing relies on tribal knowledge:
@@ -176,8 +188,8 @@ Collected in one place so nothing relies on tribal knowledge:
   long runs are pending before release.
 - **Independent security/recovery review** (#24) — outstanding; findings gate
   the release.
-- **API compatibility tooling** — no PublicApiAnalyzer/ApiCompat baseline yet;
-  breaking-change checking is currently by review only. Open under #35.
+- **Previous-version interop runs** — wire-compatibility tests against the last
+  published package are specified above but not yet automated. Open under #35.
 
 ## Release mechanics: canary and rollback
 

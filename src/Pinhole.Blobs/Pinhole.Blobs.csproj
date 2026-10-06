@@ -13,10 +13,18 @@
 		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
 		<IncludeSymbols>true</IncludeSymbols>
 		<EmbedUntrackedSources>true</EmbedUntrackedSources>
-	</PropertyGroup>
+			<!-- Public API contract: new or changed public surface must update
+		     PublicAPI.*.txt (run: dotnet format analyzers), and breaking changes
+		     (RS0017 removals/mutations) fail the build outright. -->
+		<WarningsAsErrors>$(WarningsAsErrors);RS0016;RS0017</WarningsAsErrors>
+</PropertyGroup>
 
 	<ItemGroup>
 		<PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+		<PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" Version="5.6.0">
+		  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		  <PrivateAssets>all</PrivateAssets>
+		</PackageReference>
 		<ProjectReference Include="..\Pinhole\Pinhole.csproj" />
 	</ItemGroup>
 
@@ -24,4 +32,8 @@
 		<InternalsVisibleTo Include="Pinhole.Tests" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<AdditionalFiles Include="PublicAPI.Shipped.txt" />
+		<AdditionalFiles Include="PublicAPI.Unshipped.txt" />
+	</ItemGroup>
 </Project>

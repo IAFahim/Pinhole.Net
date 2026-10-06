@@ -73,9 +73,13 @@ vs. what surfaces immediately, and the `RecoveryTimeout` budget that bounds it),
 the measured-evidence table (every claim linked to a committed test), the
 verified fully-managed dependency closure (BouncyCastle only, no native assets),
 the known-limitations list, and the canary/rollback plan on the existing
-tag-push pipeline. Still open under #35: the scheduled 24 h/72 h soaks, real-OS
-support-matrix results (#33), the independent security review (#24), API-compat
-tooling, and current-vs-previous version interop runs.
+tag-push pipeline. API surface is now contractual: Roslyn PublicApiAnalyzers
+listings are checked in for all four shipped projects (nullable-annotated),
+with RS0016/RS0017 promoted to build errors — a public API change without a
+listing update, or any binary-breaking change, fails the build. Still open
+under #35: the scheduled 24 h/72 h soaks, real-OS support-matrix results (#33),
+the independent security review (#24), and current-vs-previous version interop
+runs.
 
 
 ## 1.10.0 (unreleased) — blob congestion control (#20)

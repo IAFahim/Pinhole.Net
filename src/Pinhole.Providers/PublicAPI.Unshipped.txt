@@ -1,0 +1,35 @@
+#nullable enable
+override Pinhole.Providers.TurnServer.Equals(object? obj) -> bool
+override Pinhole.Providers.TurnServer.GetHashCode() -> int
+override Pinhole.Providers.TurnServer.ToString() -> string!
+Pinhole.Providers.Resolver
+Pinhole.Providers.StunServers
+Pinhole.Providers.TurnServer
+Pinhole.Providers.TurnServer.<Clone>$() -> Pinhole.Providers.TurnServer!
+Pinhole.Providers.TurnServer.Credential.get -> string?
+Pinhole.Providers.TurnServer.Credential.init -> void
+Pinhole.Providers.TurnServer.Deconstruct(out string! Host, out int Port, out string? Username, out string? Credential) -> void
+Pinhole.Providers.TurnServer.Equals(Pinhole.Providers.TurnServer? other) -> bool
+Pinhole.Providers.TurnServer.Host.get -> string!
+Pinhole.Providers.TurnServer.Host.init -> void
+Pinhole.Providers.TurnServer.Port.get -> int
+Pinhole.Providers.TurnServer.Port.init -> void
+Pinhole.Providers.TurnServer.ResolveAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+Pinhole.Providers.TurnServer.TurnServer(string! Host, int Port, string? Username = null, string? Credential = null) -> void
+Pinhole.Providers.TurnServer.Username.get -> string?
+Pinhole.Providers.TurnServer.Username.init -> void
+Pinhole.Providers.TurnServers
+static Pinhole.Providers.Resolver.FreeRelayServersAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.Resolver.FreeStunAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.AllAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.CloudflareAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.GoogleAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.MeteredAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.OpenRelayAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.StunServers.TwilioAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<System.Net.IPEndPoint![]!>!
+static Pinhole.Providers.TurnServer.operator !=(Pinhole.Providers.TurnServer? left, Pinhole.Providers.TurnServer? right) -> bool
+static Pinhole.Providers.TurnServer.operator ==(Pinhole.Providers.TurnServer? left, Pinhole.Providers.TurnServer? right) -> bool
+static Pinhole.Providers.TurnServers.Cloudflare(string! username, string! credential) -> Pinhole.Providers.TurnServer!
+static Pinhole.Providers.TurnServers.Metered(string! username, string! credential) -> Pinhole.Providers.TurnServer!
+static Pinhole.Providers.TurnServers.OpenRelay.get -> Pinhole.Providers.TurnServer!
+static Pinhole.Providers.TurnServers.Twilio(string! username, string! credential) -> Pinhole.Providers.TurnServer!
