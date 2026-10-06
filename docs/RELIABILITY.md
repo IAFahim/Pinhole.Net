@@ -179,6 +179,18 @@ Collected in one place so nothing relies on tribal knowledge:
 - **Both-sides-dead rebind while STUN is dark** — beacons flow but PACK replies
   do not return; the single-side variants heal, this corner is recorded in
   `docs/TESTING.md` § #31 rather than claimed.
+- **Wrong-identity responder at the provider's address** — a node with a
+  different PeerId occupying the provider's address drops our datagrams
+  pre-handshake, which is indistinguishable from the provider being down: the
+  transfer rides the full `RecoveryTimeout` rather than failing fast. Inherent
+  to authenticated dials — a stranger cannot prove it is not the provider
+  without the keys.
+- **Duplicate flood under sustained tail-drop** — re-request PTOs still race
+  responses that are queueing but not yet lost; >100% duplicate bytes measured
+  on the 4 MiB rung. Tracked as #36.
+- **`BlobProgress.FilesDone`** — increments when a file *starts*, not when it
+  completes (progress-event semantics for "file 2 of 5" rendering). Decision
+  tracked as #37.
 - **`NodeEngine.MaxConnections` flood** — the 1024-connection cap has no test
   seam; filling it has not been exercised. Open under #34.
 - **Byte-level wire fuzzing** — frame/ticket/manifest parsers are covered by
