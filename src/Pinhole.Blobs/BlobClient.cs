@@ -259,7 +259,7 @@ public static class BlobClient
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly BlobController _controller;
-        private readonly Dictionary<long, (long SentAtMs, int Retransmits, int PendingRecoveries)> _outstanding = new();
+        private readonly Dictionary<long, (long SentAtMs, int Retransmits)> _outstanding = new();
         private readonly SendCounter _send;
         private long _maxRequested = -1;
         private long _helloSince = -1;
@@ -492,12 +492,7 @@ public static class BlobClient
                 // process-wide pie.
                 foreach (long idx in _outstanding.Keys)
                 {
-                    long len = ChunkLength(idx);
-                    _controller.ReleaseReservation(len);
-                    for (int i = 0; i < _outstanding[idx].PendingRecoveries; i++)
-                    {
-                        _controller.OnRecoverySettled(len);
-                    }
+                    _controller.ReleaseReservation(ChunkLength(idx));
                 }
 
                 _outstanding.Clear();
@@ -544,7 +539,7 @@ public static class BlobClient
                 long[] refresh = [.. _outstanding.Keys];
                 foreach (long idx in refresh)
                 {
-                    _outstanding[idx] = (now, _outstanding[idx].Retransmits, _outstanding[idx].PendingRecoveries);
+                    _outstanding[idx] = (now, _outstanding[idx].Retransmits);
                 }
             }
 
@@ -571,18 +566,13 @@ public static class BlobClient
                 throw new InvalidDataException($"chunk {f.Index} failed verification");
             }
 
-            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, int PendingRecoveries) entry);
+            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits) entry);
             bool fresh = _sink.Apply(f.Index, f.ChunkData);
             if (hadReservation && entry.Retransmits == 0)
             {
                 // Karn's rule: only a first-attempt arrival measures the path's RTT — a
                 // retransmitted request's arrival time no longer bounds the original send.
                 _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(now - entry.SentAtMs, 1)));
-            }
-
-            for (int i = 0; hadReservation && i < entry.PendingRecoveries; i++)
-            {
-                _controller.OnRecoverySettled(len);
             }
 
             _controller.OnChunkArrived(len, hadReservation, fresh, now);
@@ -626,7 +616,7 @@ public static class BlobClient
 
                 for (long idx = start; idx < start + count; idx++)
                 {
-                    _outstanding[idx] = (now, 0, 0);
+                    _outstanding[idx] = (now, 0);
                 }
 
                 Send(BlobWire.Request(_stream, start, count));
@@ -636,21 +626,20 @@ public static class BlobClient
 
         private void SweepStale(long now)
         {
-            foreach ((long idx, (long sentAt, int retransmits, int pending)) in _outstanding)
+            foreach ((long idx, (long sentAt, int retransmits)) in _outstanding)
             {
                 if (now - sentAt < (long)_controller.PtoFor(retransmits).TotalMilliseconds)
                 {
                     continue;
                 }
 
-                long bytes = ChunkLength(idx);
-                if (!_controller.TryStartRecovery(bytes))
-                {
-                    continue; // the aggregate budget is full; retry next tick
-                }
-
+                // Re-requesting a chunk needs no fresh budget reservation — the
+                // outstanding entry already holds one. Charging again per retry
+                // stacked N+1 reservations on a single chunk: sustained loss could
+                // fill the aggregate pie with retry debt and deny the very
+                // re-requests that would repay it.
                 _controller.OnRetransmit(now);
-                _outstanding[idx] = (now, retransmits + 1, pending + 1);
+                _outstanding[idx] = (now, retransmits + 1);
                 Send(BlobWire.Request(_stream, idx, 1));
             }
         }

@@ -347,10 +347,12 @@ anecdote. Assertions on completion: zero errors, nonzero workload, budget draine
   property-test infrastructure once it lands for tickets/manifests.
 - **Relay allocation debt** — virtual-lab TURN is emulated on loopback; allocation
   counting against a real coturn belongs to the env-gated #26 harness.
-- **Controller starvation at sustained size** — scaling the cancel test's warmup to
-  4 MiB on the standard shaped link (8 Mbit/s, 128-packet queue, 20 ms delay) exposed
-  a real controller pathology: sustained tail-drop keeps the window pinned near
-  minimum while the measured RTT inflates, so the pacer's window÷RTT issue rate
-  collapses — observed ~150 KiB/s on an 8 Mbit link with the shaping queue idle
-  (depth 0) at timeout. Short transfers finish before the feedback loop bites; this
-  needs a dedicated fix under #20's controller work, not a bigger test timeout.
+- **Controller starvation at sustained size** — FIXED: scaling the cancel test's
+  warmup to 4 MiB on the standard shaped link exposed two controller defects,
+  both fixed in this change. Re-requests were double-charging the flow budget
+  (N+1 reservations per retried chunk — sustained loss could deny recovery the
+  pie it was repaying), and the congestion-avoidance pacer divided by unbounded
+  SRTT so queue delay throttled the issue rate quadratically with the window.
+  Post-fix: 4 MiB completes on the same link (137 s where fixed-window needs
+  219 s), verified by `SustainedSize_ThroughTailDrop_DoesNotStarve` (env-gated
+  with the soak).

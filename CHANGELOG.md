@@ -50,6 +50,17 @@ per-minute CSV (heap, threads, handles, sockets, budget, outcomes) to
 remain the release gate. Still open under #34: a `MaxConnections` flood seam,
 byte-level frame/manifest fuzzing, and real-relay allocation accounting.
 
+The new ledgers immediately paid for themselves: scaling a warmup to 4 MiB on the
+standard shaped link surfaced a starvation pathology in the #20 controller —
+re-requests were double-charging the flow budget (a chunk retried N times held N+1
+reservations, so sustained loss could deny recovery the pie it was repaying), and
+the congestion-avoidance pacer divided by unbounded SRTT, letting self-inflicted
+queue delay throttle the issue rate quadratically with the window. A chunk now
+holds exactly one reservation regardless of retries, and the pacing RTT is capped
+at 4× the path's measured base delay (queue build-up remains halving evidence,
+it just stops being a pacing target). 4 MiB through the tail-drop link: 137 s
+post-fix vs. 219 s fixed-window; all recorded baselines held or improved.
+
 
 ## 1.10.0 (unreleased) — blob congestion control (#20)
 

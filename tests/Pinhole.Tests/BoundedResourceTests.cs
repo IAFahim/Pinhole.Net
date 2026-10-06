@@ -51,6 +51,9 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             {
                 var stats = new BlobTransferStats();
                 using var cts = new CancellationTokenSource();
+                Task<BlobDownloadResult>? run = null;
+                try
+                {
                 // Cancel is issued from INSIDE the downloader's pump: Report runs
                 // synchronously on the verify path, so cancellation lands mid-transfer
                 // with no scheduling race. The 64 KiB-remaining guard is 8× the window —
@@ -63,7 +66,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                         cts.Cancel();
                     }
                 });
-                Task<BlobDownloadResult> run = BlobClient.DownloadAsync(server.Ticket, outDir, progress,
+                run = BlobClient.DownloadAsync(server.Ticket, outDir, progress,
                     options: DownOptions(lab, 34020) with
                     {
                         FlowBudget = budget, Stats = stats, MaxWindowBytes = 8192,
@@ -80,6 +83,17 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 // A cancelled attempt must leave an honest resumable prefix behind.
                 Assert.True(Directory.Exists(Path.Combine(outDir, "rung.bin.pinhole-part")),
                     "cancelled attempt left no checkpoint to resume from");
+                }
+                catch (Exception ex)
+                {
+                    // Parallel-suite flake forensics: if this ever fails under load, the
+                    // failure message carries the whole cycle state with it.
+                    throw new Exception(
+                        $"cycle {i}: run={run?.Status.ToString() ?? "unstarted"} verified={stats.VerifiedBytes} " +
+                        $"window={stats.WindowBytes} retransmits={stats.Retransmits} " +
+                        $"budgetUsed={budget.UsedBytes} sockets={lab.Net.LiveSockets} (rest {socketsAtRest}) " +
+                        $"| {lab.Net.Counters()}", ex);
+                }
             }
 
             // Median per-cycle heap growth, robust to parallel tests' transient garbage:
@@ -331,6 +345,43 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             Assert.Equal(data, await File.ReadAllBytesAsync(result.Path));
             output.WriteLine($"flood of 200 junk + 100 Hellos drew {total} answers (≤1 per answerable Hello); " +
                              $"honest download completed byte-exact | {lab.Net.Counters()}");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>The starvation regression at sustained size: 4 MiB through the
+    /// standard shaped link used to ride stall-timeout/re-dial cycles forever —
+    /// recovery re-reservations filled the budget and the pacer's window÷SRTT rate
+    /// collapsed quadratically. Now asserted to complete well inside the budget.
+    /// Env-gated: ~2.5 min on the shaped link is soak-scale, not unit-scale.</summary>
+    [SoakFact]
+    public async Task SustainedSize_ThroughTailDrop_DoesNotStarve()
+    {
+        string dir = TempDir();
+        try
+        {
+            using VirtualLab lab = new();
+            byte[] data = new byte[4 * 1024 * 1024];
+            Random.Shared.NextBytes(data);
+            string src = Path.Combine(dir, "rung.bin");
+            await File.WriteAllBytesAsync(src, data);
+            await using BlobServer server = await ServeAtAsync(lab, src, "198.51.100.10", 34110);
+            Shape(lab, 8_000_000);
+
+            var stats = new BlobTransferStats();
+            var sw = Stopwatch.StartNew();
+            BlobDownloadResult r = await BlobClient.DownloadAsync(server.Ticket,
+                Path.Combine(dir, "out"),
+                options: DownOptions(lab, 34020) with { Stats = stats })
+                .WaitAsync(TimeSpan.FromSeconds(240));
+            sw.Stop();
+            Assert.Equal(data, await File.ReadAllBytesAsync(r.Path));
+            output.WriteLine($"4 MiB in {sw.Elapsed.TotalSeconds:F0}s " +
+                             $"({4 * 1024 / sw.Elapsed.TotalSeconds:F0} KiB/s): retransmits={stats.Retransmits} " +
+                             $"dup={stats.DuplicateBytes / 1024} KiB window={stats.WindowBytes} | {lab.Net.Counters()}");
         }
         finally
         {

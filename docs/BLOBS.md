@@ -153,12 +153,18 @@ no version moved). What it does, all receiver-side:
 - **Pacing.** A token bucket fills at window rate (window bytes per RTT) with burst
   credit capped at one run; runs size themselves to the credit actually available. Each
   Req run — a back-to-back provider burst — is bounded by the window (≤ 1/8 of it,
-  clamped to [2, 64] chunks).
-- **Recovery is not load.** A lost chunk's original reservation holds window room until
-  it arrives, so its re-request bypasses the window and pacer (bounded instead by the
-  PTO cadence and the aggregate budget). Gating recovery on the window it is trying to
-  refill deadlocks — the fixed-window predecessor never hit this because it never
-  shrank.
+  clamped to [2, 64] chunks). In congestion avoidance the pacing RTT is capped at 4×
+  the measured *base* RTT: queueing delay is self-inflicted evidence that already
+  halves the window — letting it also stretch the pace collapses the issue rate
+  quadratically (found by the #34 sustained-size test: a 4 MiB transfer starved to
+  ~150 KiB/s on an 8 Mbit/s link).
+- **Recovery is not load.** A lost chunk's reservation holds window room until it
+  arrives, and it holds exactly ONE reservation no matter how often it is retried —
+  the re-request is the same outstanding bytes, not new ones (an earlier design
+  charged a fresh budget reservation per retry, so sustained loss stacked enough
+  phantom debt to deny recovery itself). Re-requests bypass the window and pacer,
+  bounded by the PTO cadence; gating recovery on the window it is trying to refill
+  deadlocks — the fixed-window predecessor never hit this because it never shrank.
 - **Duplicates are wire load.** Bytes that arrive for an index already held count as
   `DuplicateBytes` in `BlobTransferStats` — request credits are never treated as proof
   of a bounded response side.

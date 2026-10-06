@@ -197,11 +197,16 @@ internal sealed class BlobController
     private void AccruePacerCredit(long nowMs)
     {
         // Slow start paces against the path's BASE delay (min RTT) so the window's
-        // climb is not throttled by the very queue it is building; congestion
-        // avoidance paces against the smoothed RTT, queueing included.
+        // climb is not throttled by the very queue it is building. Congestion
+        // avoidance paces at the smoothed RTT too — but queueing delay is
+        // self-inflicted: letting a built queue stretch the pacing RTT without
+        // bound collapses the issue rate quadratically (window halves AND the
+        // divisor inflates — the observed 4 MiB starvation). Delay beyond 4× the
+        // base is congestion EVIDENCE — it already halves the window — not a
+        // pacing target, so SRTT's say is capped there.
         long pacingRtt = !_haveRtt ? NoSamplePacingRttMs
             : _window < _ssthresh ? Math.Max(Math.Min(_srttMs, _minRttMs), MinRttMs)
-            : Math.Max(_srttMs, MinRttMs);
+            : Math.Max(Math.Min(_srttMs, _minRttMs * 4), MinRttMs);
         long rateBytesPerMs = Math.Max(_window / pacingRtt, 1);
         long elapsed = _lastPacerMs == long.MinValue ? 0 : Math.Max(nowMs - _lastPacerMs, 0);
         _lastPacerMs = nowMs;
@@ -424,19 +429,6 @@ internal sealed class BlobController
             _stats.WindowBytes = _window;
         }
     }
-
-    /// <summary>Admission for one retransmission. Recovery is timer-paced, not
-    /// window-paced: a lost chunk's original reservation legitimately holds window room
-    /// until it arrives, so gating its re-request on the same window would deadlock —
-    /// the lost bytes can never be re-asked for. The aggregate budget still bounds total
-    /// outstanding bytes, and the PTO's doubling backoff bounds each chunk's retry rate,
-    /// so recovery traffic is bounded without competing with fresh requests for
-    /// admission.</summary>
-    public bool TryStartRecovery(long bytes) => _budget.TryReserve(bytes);
-
-    /// <summary>A recovery reservation came home (or the stream is ending): release its
-    /// share of the process-wide budget.</summary>
-    public void OnRecoverySettled(long bytes) => _budget.Release(bytes);
 
     /// <summary>Gives back one reservation without an arrival — the stream is ending
     /// (done, stalled, or cancelled) and must release its share of the window and of the
