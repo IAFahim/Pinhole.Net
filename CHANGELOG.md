@@ -62,6 +62,21 @@ it just stops being a pacing target). 4 MiB through the tail-drop link: 137 s
 post-fix vs. 219 s fixed-window; all recorded baselines held or improved.
 
 
+## 1.10.0 (unreleased) — release evidence foundation (#35, partial)
+
+`docs/RELIABILITY.md` consolidates the release contract in one place: the
+supported platform matrix with links to the evidence behind each cell, the
+compatibility specification for core wire / connection strings / blob wire /
+checkpoint state, the recovery contract (what one `DownloadAsync` rides through
+vs. what surfaces immediately, and the `RecoveryTimeout` budget that bounds it),
+the measured-evidence table (every claim linked to a committed test), the
+verified fully-managed dependency closure (BouncyCastle only, no native assets),
+the known-limitations list, and the canary/rollback plan on the existing
+tag-push pipeline. Still open under #35: the scheduled 24 h/72 h soaks, real-OS
+support-matrix results (#33), the independent security review (#24), API-compat
+tooling, and current-vs-previous version interop runs.
+
+
 ## 1.10.0 (unreleased) — blob congestion control (#20)
 
 Blob downloads are now congestion-controlled, receiver-side, with the wire unchanged
