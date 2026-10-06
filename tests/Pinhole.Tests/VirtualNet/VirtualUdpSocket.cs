@@ -31,6 +31,10 @@ internal sealed class VirtualUdpSocket : IUdpSocket
 
     internal VirtualNat? Nat { get; }
 
+    // BSD can return native IPv4 sockaddrs from dual-mode sockets. Opt in to that
+    // representation so the receive-loop regression is reproducible on every OS.
+    internal bool NativeIPv4Addresses { get; init; }
+
     public IPEndPoint LocalEndPoint => Address;
 
     public void SendTo(ReadOnlySpan<byte> frame, SocketAddress to) =>
@@ -100,9 +104,9 @@ internal sealed class VirtualUdpSocket : IUdpSocket
         return ep.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(ep.Address.MapToIPv4(), ep.Port) : ep;
     }
 
-    private static void WriteAddress(SocketAddress target, IPEndPoint source)
+    private void WriteAddress(SocketAddress target, IPEndPoint source)
     {
-        IPEndPoint mapped = source.Address.AddressFamily == AddressFamily.InterNetwork
+        IPEndPoint mapped = !NativeIPv4Addresses && source.Address.AddressFamily == AddressFamily.InterNetwork
             ? new IPEndPoint(source.Address.MapToIPv6(), source.Port)
             : source;
         SocketAddress serialized = mapped.Serialize();
@@ -110,5 +114,6 @@ internal sealed class VirtualUdpSocket : IUdpSocket
         {
             target[i] = serialized[i];
         }
+        target.Size = serialized.Size;
     }
 }

@@ -2337,11 +2337,15 @@ internal sealed class NodeEngine : IDisposable
         // frame handlers only read it, and the engine clones it exactly when a connection
         // adopts the endpoint as its own (a per-datagram copy was 8% of the receive thread).
         var remote = new SocketAddress(AddressFamily.InterNetworkV6);
+        int addressCapacity = remote.Size;
         while (!_shutdown.IsCancellationRequested)
         {
             int n;
             try
             {
+                // BSD may return a native IPv4 sockaddr on a dual-mode socket. ReceiveFrom
+                // shrinks Size to that address; restore capacity before the next receive.
+                remote.Size = addressCapacity;
                 n = _udp.ReceiveFrom(buf, remote);
             }
             catch (ObjectDisposedException)
@@ -2356,6 +2360,8 @@ internal sealed class NodeEngine : IDisposable
             {
                 continue;
             }
+
+            if (_shutdown.IsCancellationRequested) return;
 
             if (n < 0 || (n == 0 && _rawReceive is null))
             {
@@ -2375,9 +2381,12 @@ internal sealed class NodeEngine : IDisposable
                 }
                 else
                 {
-                    var from = (IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(remote);
-                    if (from.Address.IsIPv4MappedToIPv6) from = new IPEndPoint(from.Address.MapToIPv4(), from.Port);
-                    _rawReceive(IrohPath.Direct(from), buf.AsMemory(0, n));
+                    try { _rawReceive(IrohPath.Direct(ToEndpoint(remote)), buf.AsMemory(0, n)); }
+                    catch (Exception)
+                    {
+                        // Match the session dispatcher: a bad address or throwing handler
+                        // must cost one datagram, never the shared receive thread.
+                    }
                 }
             }
             else if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
@@ -3274,20 +3283,17 @@ internal sealed class NodeEngine : IDisposable
             // ready. Arrivals still count as relay traffic (the dispatch stamp) whatever leg
             // they rode; the leg only changes when it actually fails and path validation
             // suspects it.
-            if (c.RelayReady)
+            if (c.RelayReady || Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) != 0)
             {
                 return;
             }
 
             c.RelayRemote = peerRelayed;
+            // Single-flight: a relayed frame burst must not spawn one permission round
+            // trip per frame or replace its target while the first is still in the air.
         }
 
-        if (Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
-        {
-            // Single-flight: a relayed frame burst must not spawn one permission round
-            // trip per frame while the first is still in the air.
-            _ = PermitRelayAsync(c, peerRelayed);
-        }
+        _ = PermitRelayAsync(c, peerRelayed);
     }
 
     private async Task PermitRelayAsync(ConnState c, IPEndPoint peer)
@@ -3774,7 +3780,8 @@ internal sealed class NodeEngine : IDisposable
 
     private static IPEndPoint ToEndpoint(SocketAddress sa)
     {
-        IPEndPoint ep = (IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(sa);
+        IPAddress any = sa.Family == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any;
+        IPEndPoint ep = (IPEndPoint)new IPEndPoint(any, 0).Create(sa);
         if (ep.Address.IsIPv4MappedToIPv6)
         {
             ep.Address = ep.Address.MapToIPv4();

@@ -31,6 +31,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Prepare distinct loopback addresses for the TURN lab
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash .github/scripts/prepare-macos-loopback.sh
       - name: Run test suite
         run: >
           dotnet test tests/Pinhole.Tests

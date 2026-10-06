@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Pinhole;
 
@@ -28,6 +29,7 @@ public enum NatType
 public static class NatDetector
 {
     /// <summary>Runs detection against the free public STUN catalog.</summary>
+    [SuppressMessage("ApiDesign", "RS0026", Justification = "These existing optional cancellation-token overloads must retain their published source and reflection contracts.")]
     public static async Task<NatType> DetectAsync(CancellationToken ct = default)
     {
         PinholeOptions defaults = await PinholeOptions.DefaultAsync(ct).ConfigureAwait(false);
@@ -37,6 +39,7 @@ public static class NatDetector
     /// <summary>Runs detection against explicit servers. Needs at least two responsive
     /// servers to conclude anything; each probe reuses one socket, because the mapping
     /// under test belongs to the socket, not the request.</summary>
+    [SuppressMessage("ApiDesign", "RS0026", Justification = "These existing optional cancellation-token overloads must retain their published source and reflection contracts.")]
     public static async Task<NatType> DetectAsync(IReadOnlyList<IPEndPoint> servers, CancellationToken ct = default)
     {
         if (servers.Count < 2)

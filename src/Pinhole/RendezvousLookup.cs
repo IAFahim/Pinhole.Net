@@ -78,7 +78,9 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             }
             catch (SocketException)
             {
-                return null; // e.g. an ICMP port-unreachable from a dead server surfaced as an error
+                // An ICMP error from one server is not a verdict on the others. The
+                // operation's deadline still bounds a directory where nobody replies.
+                continue;
             }
 
             string[] parts = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim().Split(' ');
@@ -120,7 +122,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             }
             catch (SocketException)
             {
-                throw new TimeoutException("no rendezvous server acknowledged the registration");
+                continue;
             }
         }
 
@@ -130,6 +132,13 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
     private static Socket NewSocket()
     {
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        if (OperatingSystem.IsWindows())
+        {
+            // A failed UDP destination otherwise makes the next receive (or send) fail,
+            // even when a different directory server has a valid reply waiting.
+            const int sioUdpConnreset = -1744830452;
+            udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
+        }
         udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         return udp;
     }

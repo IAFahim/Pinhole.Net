@@ -3,8 +3,17 @@
 iroh validates its connectivity claims against 70+ real network scenarios (Linux network
 namespaces, `tc netem`). Pinhole's equivalent — scoped for a managed-only repo that must
 run its tests identically on Linux, macOS, and Windows — is an **in-process virtual
-internet** injected under the engine's socket layer. No privileges, no namespaces, no
-skipped-on-Windows traits: every scenario is just another test.
+internet** injected under the engine's socket layer. Direct-path simulation needs no
+privileges or namespaces, and the same scenarios run on every OS. The real-loopback TURN
+lab gives each server a distinct IP because TURN permissions are IP-scoped. On macOS,
+prepare those BSD loopback aliases before running the suite:
+
+```sh
+bash .github/scripts/prepare-macos-loopback.sh
+```
+
+This setup uses `sudo ifconfig`; CI runs it automatically. Linux and Windows already
+support binding the 127/8 loopback range.
 
 ## Where it lives
 
@@ -281,11 +290,17 @@ adaptation of RFC 6298/8085/9002/6675 ideas. The wire is unchanged.
 | Claim | Test | Proof |
 |---|---|---|
 | thin-queue collapse healed | `ThinQueue_ControllerAvoidsTheFixedWindowCollapse` | ≥ 90 KiB/s where the fixed window collapses to ~31 KiB/s (measured 194–353) |
-| beats the fixed window, same process | `LossyLink_ControllerOutperformsTheFixedWindow_InProcess` | both modes run back-to-back through identical links; controller finishes strictly faster (measured ~5×) |
+| loss recovery, same process | `LossyLink_BothModesRecoverAndVerify_InProcess` | both modes encounter real packet drops, retransmit, and finish byte-exact; relative elapsed times are logged as measurements |
+| timer and window adaptation | `Controller_AdaptsToRttAndBacksOffRepeatedLoss` | controlled RTT samples shorten the timer; repeated loss backs it off; clustered loss reduces the window; migration resets estimates |
 | response bytes accounted | `RetransmittedResponses_AreCountedAsWireLoad` | a duplicating provider (1 chunk in 8 twice) lands exactly 64 KiB of duplicate bytes in `BlobTransferStats`, counted as wire load, transfer still completes |
 | aggregate budget | `SharedBudget_ConcurrentDownloadsDivideOnePie` | two concurrent downloads share one 96 KiB `BlobFlowBudget`; a 5 ms sampler never observes the ledger past the cap, the pie is exercised, and it drains to zero |
 | migration resets conservatively | `ProviderRoamMidTransfer_...` | provider rebinds mid-transfer (fresh port, seamless adoption); ≥ 1 conservative resume recorded, transfer completes verified |
 | fixed-window mode re-runnable | `PINHOLE_BLOB_FIXED_WINDOW=1` env | rebuilds the recorded baseline behavior for same-day A/B runs |
+
+Relative throughput depends on OS timer granularity and concurrent runner load. Recorded
+Release benchmarks remain evidence for a particular machine; a single shared-CI A/B
+measurement does not establish a universal speed ordering. Test overrides are scoped to
+the current async execution context so a baseline run cannot change unrelated transfers.
 
 Engine-adjacent bugs the controller work surfaced and fixed: re-requests were gated on
 the same window whose lost reservations held it shut (a recovery deadlock — the fixed

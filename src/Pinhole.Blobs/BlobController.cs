@@ -446,6 +446,14 @@ internal sealed class BlobController
 /// PINHOLE_BLOB_FIXED_WINDOW=1 environment variable before the process starts.</summary>
 internal static class BlobTestHooks
 {
-    public static bool ForceFixedWindow { get; set; } =
+    private static readonly bool DefaultFixedWindow =
         Environment.GetEnvironmentVariable("PINHOLE_BLOB_FIXED_WINDOW") is "1";
+    private static readonly AsyncLocal<bool?> Override = new();
+
+    // An A/B run must not change unrelated transfers executing in parallel tests.
+    public static bool ForceFixedWindow
+    {
+        get => Override.Value ?? DefaultFixedWindow;
+        set => Override.Value = value;
+    }
 }

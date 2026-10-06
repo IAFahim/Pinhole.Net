@@ -17,6 +17,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<!-- The previous-version interop host is a separate executable with its own
+		     entry point and generated sources; it is built through InteropHost.csproj. -->
+		<Compile Remove="Interop/**/*.cs" />
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Blobs/Pinhole.Blobs.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Turn/Pinhole.Turn.csproj" />

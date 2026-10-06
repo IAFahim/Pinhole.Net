@@ -387,11 +387,13 @@ internal static class PeerEngine
     {
         byte[] buf = new byte[2048];
         var remote = new SocketAddress(AddressFamily.InterNetworkV6);
+        int addressCapacity = remote.Size;
         while (!s.Shutdown.IsCancellationRequested)
         {
             int n;
             try
             {
+                remote.Size = addressCapacity;
                 n = s.Udp.ReceiveFrom(buf, SocketFlags.None, remote);
             }
             catch (ObjectDisposedException)

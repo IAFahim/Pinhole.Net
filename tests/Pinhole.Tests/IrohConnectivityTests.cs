@@ -87,6 +87,35 @@ public sealed class IrohConnectivityTests
     }
 
     [Fact]
+    public async Task RawUdp_NativeIPv4ThenIPv6_RestoresAddressCapacityAndKeepsReceiving()
+    {
+        using var net = new VirtualNetwork();
+        var receiverSocket = new VirtualUdpSocket(net, new IPEndPoint(IPAddress.Parse("198.51.100.20"), 30020), null)
+        {
+            NativeIPv4Addresses = true,
+        };
+        // These packets are injected at the socket boundary to reproduce BSD's native
+        // sockaddr sizes on every runner, including IPv6 after a shorter IPv4 address.
+        await using var receiver = await IrohTransport.BindAsync(new IrohTransportOptions
+        {
+            Network = Offline().Network with { UdpSocketFactory = _ => receiverSocket },
+        });
+        foreach (IPEndPoint from in new[]
+        {
+            new IPEndPoint(IPAddress.Loopback, 32001),
+            new IPEndPoint(IPAddress.IPv6Loopback, 32002),
+            new IPEndPoint(IPAddress.Loopback, 32003),
+        })
+        {
+            byte[] payload = from.Port == 32001 ? [] : RandomNumberGenerator.GetBytes(1200);
+            receiverSocket.Enqueue(from, payload);
+            IrohDatagram received = await receiver.ReceiveAsync().AsTask().WaitAsync(Budget);
+            Assert.Equal(from, received.Path.DirectAddress);
+            Assert.Equal(payload, received.Payload.ToArray());
+        }
+    }
+
+    [Fact]
     public async Task RawRelay_IsIdentityRouted_AndDoesNotRequirePinholeHeaders()
     {
         await using var server = new FakeIrohRelay();

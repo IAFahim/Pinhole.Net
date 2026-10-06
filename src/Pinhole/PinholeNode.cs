@@ -259,7 +259,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         _engine.ConnectionsSnapshot().Select(c => c.Public!).ToArray();
 
     /// <summary>Waits for a peer to dial this node's connection string and returns the
-    /// connection. Multiple waiters each get their own incoming connection.</summary>
+    /// connection. Multiple waiters each get their own incoming connection. Once a peer
+    /// arrives, its handshake uses the configured <see cref="PinholeOptions.ConnectTimeout"/>.</summary>
     public async Task<PinholeConnection> AcceptAsync(CancellationToken ct = default)
     {
         if (_engine.Incoming is not { } incoming)
@@ -277,7 +278,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             throw new ObjectDisposedException(nameof(PinholeNode), "the node was disposed while waiting");
         }
 
-        await c.Connected.Task.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        await c.Connected.Task.WaitAsync(_options.ConnectTimeout, ct).ConfigureAwait(false);
         Telemetry.AttemptOutcome(Telemetry.OutcomeAcceptEstablished, PathName(c));
         return c.Public!;
     }
