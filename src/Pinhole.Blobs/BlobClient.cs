@@ -6,7 +6,9 @@ using System.Threading.Channels;
 namespace Pinhole.Blobs;
 
 /// <summary>Live transfer progress: bytes whose chunks verified, the total pinned by the
-/// ticket, and file counts for directory tickets.</summary>
+/// ticket, and file counts for directory tickets. <see cref="FilesDone"/> counts files
+/// whose roots verified completely — the file currently in flight is NOT included (its
+/// ordinal is <c>min(FilesDone + 1, FilesTotal)</c> for progress displays).</summary>
 public readonly record struct BlobProgress(long VerifiedBytes, long TotalBytes, int FilesDone, int FilesTotal);
 
 /// <summary>Outcome of a finished download: where the verified content landed, how many
@@ -177,7 +179,7 @@ public static class BlobClient
 
                     var sink = new FileSink(SafeJoin(rootDir, entry.Path), entry.Root);
                     StreamDownloader entryDownloader = new(conn, sink,
-                        v => progress?.Report(new BlobProgress(verified + v, total, filesDone + 1, entries.Count)), send, session,
+                        v => progress?.Report(new BlobProgress(verified + v, total, filesDone, entries.Count)), send, session,
                         entry.Root, entry.Root, options: options);
                     long bytes;
                     try

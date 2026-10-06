@@ -378,13 +378,13 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             };
 
             await using BlobServer server = await BlobServer.ServeAsync(tree, Opts());
-            // BlobProgress.FilesDone reports filesDone+1 while a file is in flight, so
-            // "2" here means file one is COMPLETE (its root carried into completedRoots)
-            // and file two is mid-transfer (its checkpoint will be resumed).
+            // Two files fully verified on the wire (their roots carried into
+            // completedRoots) and file three in flight with a checkpoint past its first
+            // bytes — the strongest carry-over state to kill the provider inside.
             var filesDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var progress = new Progress<BlobProgress>(p =>
             {
-                if (p.FilesDone >= 2)
+                if (p.FilesDone >= 2 && p.VerifiedBytes > 320 * 1024)
                 {
                     filesDone.TrySetResult();
                 }
@@ -392,8 +392,8 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             Task<BlobDownloadResult> run = Task.Run(() => BlobClient.DownloadAsync(server.Ticket,
                 Path.Combine(dir, "out"), progress, options: DownOptions(lab, 34020)).WaitAsync(Budget));
 
-            // One file fully verified on the wire (its root joins completedRoots), file
-            // two in flight — then the provider dies. The re-dial must inherit all of it.
+            // Two files fully verified on the wire (their roots join completedRoots),
+            // file three in flight — then the provider dies. The re-dial must inherit it.
             await filesDone.Task.WaitAsync(TestBudget.Scenario);
             await server.DisposeAsync();
             await using BlobServer successor = await BlobServer.ServeAsync(tree, Opts());
@@ -404,7 +404,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
                 Assert.Equal(content, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "tree", rel)));
             }
             Assert.True(result.Resumed, "the surviving call resumed from the pre-restart checkpoints");
-            // The finished file is skipped entirely and the in-flight file resumed at
+            // The finished files are skipped entirely and the in-flight file resumed at
             // its checkpoint, so the successor serves strictly less than the whole tree.
             Assert.True(successor.ChunksServed < totalChunks,
                 $"successor re-served the whole tree ({successor.ChunksServed} chunks vs total {totalChunks}) — no carry-over");

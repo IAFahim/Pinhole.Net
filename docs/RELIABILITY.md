@@ -190,9 +190,9 @@ Collected in one place so nothing relies on tribal knowledge:
   reservations), not racing re-requests. The request horizon is now capped at
   `applied + reorderSpan`; measured duplicate bytes are zero at unit and
   sustained scale (#36, `docs/BASELINES.md`).
-- **`BlobProgress.FilesDone`** — increments when a file *starts*, not when it
-  completes (progress-event semantics for "file 2 of 5" rendering). Decision
-  tracked as #37.
+- **`BlobProgress.FilesDone`** — counts only fully root-verified files; the
+  in-flight file's ordinal is `min(FilesDone + 1, FilesTotal)` for progress
+  displays. Fixed while still unshipped (#37).
 - **`NodeEngine.MaxConnections` flood** — the 1024-connection cap has no test
   seam; filling it has not been exercised. Open under #34.
 - **Byte-level wire fuzzing** — frame/ticket/manifest parsers are covered by

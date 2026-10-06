@@ -59,7 +59,7 @@ static async Task<int> Recv(string ticketText, string dir)
         lock (gate)
         {
             double pct = p.TotalBytes == 0 ? 100 : 100.0 * p.VerifiedBytes / p.TotalBytes;
-            string files = p.FilesTotal > 1 ? $", file {p.FilesDone}/{p.FilesTotal}" : "";
+            string files = p.FilesTotal > 1 ? $", file {Math.Min(p.FilesDone + 1, p.FilesTotal)}/{p.FilesTotal}" : "";
             Console.Write($"\r{pct,5:0.0}% of {Format(p.TotalBytes)}{files}   ");
         }
     });
