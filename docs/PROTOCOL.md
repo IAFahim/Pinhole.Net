@@ -2,9 +2,11 @@
 
 This document specifies what Pinhole.Net puts on the network, precisely enough to
 re-implement either side — the same courtesy iroh extends with its protocol documents.
-Everything here is pure C# in this repository; no part of it interoperates with iroh
-application endpoints (we adopt iroh's *practices*, and its relay wire format, not its
-QUIC transport).
+Everything here is pure C# in this repository. The session protocol specified here
+does not interoperate with iroh application endpoints. The separate
+[IrohTransport API](IROH_CONNECTIVITY.md) supplies native endpoint tickets, signed
+discovery, and unchanged network packets to a protocol engine above it; those packets
+do not use the session frames below.
 
 Design rule throughout: **holding a connection string lets a stranger dial you, but
 never forge, hijack, or kill an established session** — every frame is authenticated

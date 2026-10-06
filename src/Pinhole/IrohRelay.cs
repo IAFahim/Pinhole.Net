@@ -55,6 +55,7 @@ internal sealed class RelayIdentity
 
 internal sealed class IrohRelay : IDisposable
 {
+    internal const int MaxDatagramSize = 65536 - 34; // native client encoded-frame limit
     private const int MaxMessage = 1024 * 1024;
     private readonly RelayIdentity _identity;
     private readonly CancellationTokenSource _stop = new();
@@ -108,7 +109,7 @@ internal sealed class IrohRelay : IDisposable
 
     public bool Send(ReadOnlySpan<byte> destination, ReadOnlySpan<byte> payload)
     {
-        if (!IsAlive || destination.Length != 32 || payload.Length > 65536) return false;
+        if (!IsAlive || destination.Length != 32 || payload.Length is 0 or > MaxDatagramSize) return false;
         byte[] frame = new byte[34 + payload.Length];
         frame[0] = 4; // ClientToRelayDatagram.
         destination.CopyTo(frame.AsSpan(1, 32));
@@ -207,6 +208,11 @@ internal sealed class IrohRelay : IDisposable
                 if (frame.Length < header) throw new InvalidDataException("truncated relay datagram");
                 byte[] source = frame.AsSpan(1, 32).ToArray();
                 int size = frame[0] == 6 ? frame.Length - header : BinaryPrimitives.ReadUInt16BigEndian(frame.AsSpan(34));
+                if (size == 0 && frame[0] == 6)
+                {
+                    Received?.Invoke(this, source, []);
+                    continue;
+                }
                 if (size == 0 || size > 65536) throw new InvalidDataException("invalid relay datagram size");
                 for (int offset = header; offset < frame.Length; offset += size)
                     Received?.Invoke(this, source, frame.AsSpan(offset, Math.Min(size, frame.Length - offset)).ToArray());

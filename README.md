@@ -47,6 +47,12 @@ P/Invoke, or cgo-style baggage:
 The wire protocol is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md), precisely enough
 to re-implement either side.
 
+For **iroh-compatible discovery and raw connectivity**, use `IrohTransport`: native
+endpoint IDs/tickets, signed iroh DNS/Pkarr publication and lookup, and unchanged
+UDP/relay packets for your protocol engine. See [the iroh connectivity guide](docs/IROH_CONNECTIVITY.md)
+for the API and the boundary between preparing a route and completing the peer's
+transport handshake.
+
 ## The two-PC program
 
 This is the whole API surface a connection needs:
@@ -337,8 +343,9 @@ HTTPS WebSockets. The managed C# relay client implements iroh's signed challenge
 datagram framing; BouncyCastle supplies Ed25519 and BLAKE3. Relays introduce peers and
 carry Pinhole datagrams while both sides punch UDP, then remain available for fallback
 and reconnect automatically after a disconnect. This is the iroh relay transport with
-Pinhole's own datagram protocol; it does not implement iroh QUIC or interoperate with Rust
-iroh application endpoints. Pinhole payloads are end-to-end encrypted between the two
+Pinhole's own datagram protocol; `PinholeNode` sessions do not interoperate with native
+iroh application endpoints. `IrohTransport` provides the separate native-address/raw-packet
+API described in [IROH_CONNECTIVITY.md](docs/IROH_CONNECTIVITY.md). Pinhole session payloads are end-to-end encrypted between the two
 peers; the relay (like any relay) sees only ciphertext frames.
 
 Everything is overridable — and every infrastructure setting is tri-state: `null`

@@ -1,4 +1,54 @@
 #nullable enable
+Pinhole.IrohAddress
+Pinhole.IrohAddress.DirectAddresses.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.IrohAddress.EndpointId.get -> string!
+Pinhole.IrohAddress.IrohAddress(string! endpointId, System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>? directAddresses = null, System.Collections.Generic.IReadOnlyList<System.Uri!>? relayUrls = null) -> void
+Pinhole.IrohAddress.RelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>!
+Pinhole.IrohDatagram
+Pinhole.IrohDatagram.Path.get -> Pinhole.IrohPath!
+Pinhole.IrohDatagram.Payload.get -> System.ReadOnlyMemory<byte>
+Pinhole.IrohPath
+Pinhole.IrohPath.DirectAddress.get -> System.Net.IPEndPoint?
+Pinhole.IrohPath.EndpointId.get -> string?
+Pinhole.IrohPath.RelayUrl.get -> System.Uri?
+Pinhole.IrohRoute
+Pinhole.IrohRoute.Address.get -> Pinhole.IrohAddress!
+Pinhole.IrohRoute.Paths.get -> System.Collections.Generic.IReadOnlyList<Pinhole.IrohPath!>!
+Pinhole.IrohRoute.SelectPath(Pinhole.IrohPath? path) -> void
+Pinhole.IrohRoute.SelectedPath.get -> Pinhole.IrohPath?
+Pinhole.IrohRoute.Send(System.ReadOnlySpan<byte> payload) -> void
+Pinhole.IrohTransport
+Pinhole.IrohTransport.Address.get -> Pinhole.IrohAddress!
+Pinhole.IrohTransport.ConnectAsync(string! ticketOrEndpointId, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.IrohRoute!>!
+Pinhole.IrohTransport.Dispose() -> void
+Pinhole.IrohTransport.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.IrohTransport.EndpointId.get -> string!
+Pinhole.IrohTransport.HasRelay.get -> bool
+Pinhole.IrohTransport.LocalPort.get -> int
+Pinhole.IrohTransport.PublishAddressAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.IrohTransport.ReceiveAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<Pinhole.IrohDatagram!>
+Pinhole.IrohTransport.ResolveAsync(string! ticketOrEndpointId, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.IrohAddress!>!
+Pinhole.IrohTransport.RoamNowAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+Pinhole.IrohTransport.SendTo(Pinhole.IrohPath! path, System.ReadOnlySpan<byte> payload) -> void
+Pinhole.IrohTransportOptions
+Pinhole.IrohTransportOptions.DiscoveryUrl.get -> System.Uri!
+Pinhole.IrohTransportOptions.DiscoveryUrl.init -> void
+Pinhole.IrohTransportOptions.IrohTransportOptions() -> void
+Pinhole.IrohTransportOptions.Network.get -> Pinhole.PinholeOptions!
+Pinhole.IrohTransportOptions.Network.init -> void
+Pinhole.IrohTransportOptions.PublishAddress.get -> bool
+Pinhole.IrohTransportOptions.PublishAddress.init -> void
+Pinhole.IrohTransportOptions.PublishDirectAddresses.get -> bool
+Pinhole.IrohTransportOptions.PublishDirectAddresses.init -> void
+Pinhole.IrohTransportOptions.ReceiveBufferCapacity.get -> int
+Pinhole.IrohTransportOptions.ReceiveBufferCapacity.init -> void
+Pinhole.IrohTransportOptions.SecretKeySeed.get -> byte[]?
+Pinhole.IrohTransportOptions.SecretKeySeed.init -> void
+override Pinhole.IrohAddress.ToString() -> string!
+static Pinhole.IrohAddress.Parse(string! text) -> Pinhole.IrohAddress!
+static Pinhole.IrohPath.Direct(System.Net.IPEndPoint! address) -> Pinhole.IrohPath!
+static Pinhole.IrohPath.Relay(System.Uri! url, string! endpointId) -> Pinhole.IrohPath!
+static Pinhole.IrohTransport.BindAsync(Pinhole.IrohTransportOptions? options = null, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.IrohTransport!>!
 const Pinhole.AddressRecord.EndpointKeyLength = 32 -> int
 const Pinhole.AddressRecord.MaxEndpoints = 16 -> int
 const Pinhole.AddressRecord.MaxRelayedEndpoints = 4 -> int

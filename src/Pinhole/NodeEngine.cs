@@ -164,6 +164,7 @@ internal sealed class NodeEngine : IDisposable
     private readonly List<RelaySlot> _relays = new();
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
     private readonly RelayIdentity? _endpointIdentity; // Ed25519 endpoint key; null = random per-bind peer id only
+    private readonly Action<IrohPath, ReadOnlyMemory<byte>>? _rawReceive;
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
     private HashSet<IPEndPoint> _lastRelayedAddresses = new();       // relay-change detector, guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
@@ -204,13 +205,17 @@ internal sealed class NodeEngine : IDisposable
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
 
-    public NodeEngine(PinholeOptions options)
+    public NodeEngine(PinholeOptions options, RelayIdentity? rawIdentity = null,
+        Action<IrohPath, ReadOnlyMemory<byte>>? rawReceive = null)
     {
         // The Ed25519 endpoint identity exists whenever the node has iroh relays (they
         // authenticate with it) or a persisted seed (which derives it stably). A persisted
         // seed therefore also stabilizes the peer ID — it is the hash of the endpoint key.
         byte[]? endpointSeed = EndpointIdentity.DeriveEndpointSeed(options.IdentityKeySeed);
-        if (endpointSeed is not null || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
+        _rawReceive = rawReceive;
+        if (rawIdentity is not null)
+            _endpointIdentity = rawIdentity;
+        else if (endpointSeed is not null || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
             _endpointIdentity = new RelayIdentity(endpointSeed);
         _peerId = _endpointIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
@@ -744,6 +749,33 @@ internal sealed class NodeEngine : IDisposable
             await Task.WhenAny(clients.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
     }
 
+    internal async Task PrepareRawRelayAsync(Uri url, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        IrohRelay relay = IrohRelayFor(url)
+            ?? throw new InvalidOperationException("the relay connection limit was reached");
+        await relay.StartAsync(ct).ConfigureAwait(false);
+        while (!relay.IsAlive)
+            await Task.Delay(TimeSpan.FromMilliseconds(100), ct).ConfigureAwait(false);
+    }
+
+    internal void SendRaw(IrohPath path, ReadOnlySpan<byte> payload)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (path.DirectAddress is { } direct)
+        {
+            IPEndPoint target = direct.AddressFamily == AddressFamily.InterNetwork
+                ? new IPEndPoint(direct.Address.MapToIPv6(), direct.Port) : direct;
+            _udp.SendTo(payload, target.Serialize());
+        }
+        else if (path.RelayUrl is { } url && path.Key is { } key)
+        {
+            if (IrohRelayFor(url)?.Send(key, payload) != true)
+                throw new IOException("the iroh relay is disconnected or its send queue is full");
+        }
+        else throw new ArgumentException("invalid iroh path", nameof(path));
+    }
+
     private void IrohChanged(IrohRelay relay)
     {
         if (_disposed) return;
@@ -774,6 +806,15 @@ internal sealed class NodeEngine : IDisposable
 
     private void HandleIrohData(IrohRelay relay, byte[] source, byte[] frame)
     {
+        if (_rawReceive is not null)
+        {
+            if (!_disposed)
+            {
+                try { _rawReceive(IrohPath.Relay(relay.Url, Convert.ToHexString(source).ToLowerInvariant()), frame); }
+                catch (FormatException) { } // invalid relay source keys cost only that datagram
+            }
+            return;
+        }
         if (_disposed || frame.Length < HeaderSize + 4
             || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Hsck) return;
         ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
@@ -2290,7 +2331,7 @@ internal sealed class NodeEngine : IDisposable
 
     private void RecvLoop()
     {
-        byte[] buf = new byte[RecvBufferSize];
+        byte[] buf = new byte[_rawReceive is null ? RecvBufferSize : 65535];
         // One scratch address, reused for every receive: the recvmsg writes into it, the
         // frame handlers only read it, and the engine clones it exactly when a connection
         // adopts the endpoint as its own (a per-datagram copy was 8% of the receive thread).
@@ -2315,12 +2356,30 @@ internal sealed class NodeEngine : IDisposable
                 continue;
             }
 
-            if (n <= 0)
+            if (n < 0 || (n == 0 && _rawReceive is null))
             {
                 continue;
             }
 
-            if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
+            if (_rawReceive is not null)
+            {
+                // Raw iroh packets can have any first byte, including Pinhole's frame tags.
+                // Consume only this engine's outstanding STUN responses; everything else
+                // belongs to the protocol above the raw transport.
+                bool stun = n >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) == StunCookie
+                    && _stunPending.ContainsKey(BinaryPrimitives.ReadUInt64BigEndian(buf.AsSpan(8)));
+                if (stun)
+                {
+                    try { OnStunResponse(buf, n); } catch (Exception) { }
+                }
+                else
+                {
+                    var from = (IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(remote);
+                    if (from.Address.IsIPv4MappedToIPv6) from = new IPEndPoint(from.Address.MapToIPv4(), from.Port);
+                    _rawReceive(IrohPath.Direct(from), buf.AsMemory(0, n));
+                }
+            }
+            else if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
             {
                 try
                 {

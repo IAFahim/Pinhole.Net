@@ -74,6 +74,33 @@ public sealed class RealNetworkTests
     }
 
     [RealNetFact(RelayEnv, "iroh-relay")]
+    public async Task RawIrohConnectivity_RealRelay_PreservesPacketsWithoutPinholeFraming()
+    {
+        (ExternalProcess relay, Uri url, string version, string logDir) = await StartRelayAsync();
+        await using var relayGuard = relay;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await using var a = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false) });
+        await using var b = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false) });
+        await TestPoll.UntilAsync(TestBudget.Bind, () => a.HasRelay && b.HasRelay);
+        IrohRoute route = await a.ConnectAsync(new IrohAddress(b.EndpointId, relayUrls: [url]).ToString());
+        Assert.All(route.Paths, p => Assert.Null(p.DirectAddress));
+        foreach (int size in new[] { 1, 1200, 60000, 65502 })
+        {
+            byte[] payload = RandomNumberGenerator.GetBytes(size);
+            payload[0] = 0xc0; // an arbitrary protocol packet, not a Pinhole frame
+            route.Send(payload);
+            IrohDatagram atB = await b.ReceiveAsync().AsTask().WaitAsync(TestBudget.Io);
+            Assert.Equal(a.EndpointId, atB.Path.EndpointId);
+            Assert.Equal(payload, atB.Payload.ToArray());
+            b.SendTo(atB.Path, payload);
+            Assert.Equal(payload, (await a.ReceiveAsync().AsTask().WaitAsync(TestBudget.Io)).Payload.ToArray());
+        }
+        WriteReport(logDir, "raw-iroh-connectivity", "iroh-relay", version,
+            nameof(SystemUdpSocket), "native identity-routed raw datagrams", passed: true, sw.Elapsed.TotalSeconds,
+            "1/1200/60000/65502-byte packets verified both directions; no direct candidate or Pinhole framing");
+    }
+
+    [RealNetFact(RelayEnv, "iroh-relay")]
     public async Task RelayOnly_RealIrohRelayServer_ConnectsAndFlowsOnRealSockets()
     {
         string logDir = LogDirFor("relay-only");
