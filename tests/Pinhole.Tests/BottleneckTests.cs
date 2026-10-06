@@ -27,6 +27,7 @@ public sealed class BottleneckTests(ITestOutputHelper output)
     private static readonly TimeSpan OneWay = TimeSpan.FromMilliseconds(20);
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task FiniteBandwidth_DeepQueue_TransferSaturatesLinkUnderDelay()
     {
         string dir = TempDir();

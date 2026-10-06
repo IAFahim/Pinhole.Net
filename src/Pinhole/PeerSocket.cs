@@ -414,6 +414,8 @@ internal static class PeerEngine
                 continue;
             }
 
+            SystemUdpSocket.NormalizeReceivedAddress(remote);
+
             if (buf[0] < 0x20)
             {
                 try

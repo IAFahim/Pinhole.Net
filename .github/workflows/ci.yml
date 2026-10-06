@@ -38,8 +38,15 @@ jobs:
       - name: Run test suite
         run: >
           dotnet test tests/Pinhole.Tests
+          -c Release --filter "Category!=Performance"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
+      - name: Run throughput floors without competing test workloads
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release --no-build
+          --filter "Category=Performance"
+          --logger trx --logger "console;verbosity=detailed"
+          -- xUnit.MaxParallelThreads=1
       - name: Upload test results (hang diagnostics)
         if: always()
         uses: actions/upload-artifact@v4

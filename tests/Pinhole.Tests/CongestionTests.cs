@@ -19,6 +19,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
     private const long LinkBits = 16_000_000;
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task ThinQueue_ControllerAvoidsTheFixedWindowCollapse()
     {
         string dir = TempDir();

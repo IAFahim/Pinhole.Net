@@ -15,6 +15,18 @@ bash .github/scripts/prepare-macos-loopback.sh
 This setup uses `sudo ifconfig`; CI runs it automatically. Linux and Windows already
 support binding the 127/8 loopback range.
 
+CI builds the suite in Release. Tests that gate throughput carry the `Performance`
+category and run sequentially after the other tests finish, so independent downloads
+and their timers cannot consume the benchmark's runner capacity:
+
+```sh
+dotnet test tests/Pinhole.Tests -c Release --filter "Category!=Performance"
+dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category=Performance" -- xUnit.MaxParallelThreads=1
+```
+
+The flake hunter keeps the same separation: its parallel runs cover the functional
+suite, and its sequential run includes the throughput floors.
+
 ## Where it lives
 
 - `src/Pinhole/UdpSocket.cs` — the seam: `internal interface IUdpSocket` (bind, local

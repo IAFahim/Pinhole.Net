@@ -41,13 +41,13 @@ jobs:
       # one flaky test cannot hide a different one that fails in another shape.
       - name: Run 1 — default parallelism
         continue-on-error: true
-        run: dotnet test tests/Pinhole.Tests -c Release --no-build > run1.log 2>&1 || true
+        run: dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category!=Performance" > run1.log 2>&1 || true
       - name: Run 2 — sequential (ordering flakes)
         continue-on-error: true
         run: dotnet test tests/Pinhole.Tests -c Release --no-build -- xUnit.MaxParallelThreads=1 > run2.log 2>&1 || true
       - name: Run 3 — fresh process repeat
         continue-on-error: true
-        run: dotnet test tests/Pinhole.Tests -c Release --no-build > run3.log 2>&1 || true
+        run: dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category!=Performance" > run3.log 2>&1 || true
 
       - name: Collect failures into the summary
         run: |

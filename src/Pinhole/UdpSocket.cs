@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Buffers.Binary;
 
 namespace Pinhole;
 
@@ -35,6 +36,7 @@ internal delegate IUdpSocket UdpSocketFactory(IPEndPoint? bind);
 /// bounded receive wakes for clean disposal.</summary>
 internal sealed class SystemUdpSocket : IUdpSocket
 {
+    private static readonly SocketAddress MappedIPv4Template = new IPEndPoint(IPAddress.Any.MapToIPv6(), 0).Serialize();
     private readonly Socket _udp;
 
     private SystemUdpSocket(Socket udp) => _udp = udp;
@@ -68,7 +70,28 @@ internal sealed class SystemUdpSocket : IUdpSocket
 
     public void SendTo(ReadOnlySpan<byte> frame, SocketAddress to) => _udp.SendTo(frame, SocketFlags.None, to);
 
-    public int ReceiveFrom(Span<byte> buffer, SocketAddress from) => _udp.ReceiveFrom(buffer, SocketFlags.None, from);
+    public int ReceiveFrom(Span<byte> buffer, SocketAddress from)
+    {
+        int n = _udp.ReceiveFrom(buffer, SocketFlags.None, from);
+        NormalizeReceivedAddress(from);
+        return n;
+    }
+
+    // BSD can report sockaddr_in for a socket bound to an IPv4-mapped IPv6 address.
+    // The dual-mode send path and probe comparisons both require the mapped form.
+    // Preserve the port/address bytes in place, without allocating per datagram. The
+    // template supplies the platform's family and sockaddr length representation.
+    internal static void NormalizeReceivedAddress(SocketAddress from)
+    {
+        if (from.Family != AddressFamily.InterNetwork || from.Size < 16) return;
+        Span<byte> bytes = from.Buffer.Span;
+        ushort port = BinaryPrimitives.ReadUInt16BigEndian(bytes[2..]);
+        uint address = BinaryPrimitives.ReadUInt32BigEndian(bytes[4..]);
+        MappedIPv4Template.Buffer.Span.CopyTo(bytes);
+        BinaryPrimitives.WriteUInt16BigEndian(bytes[2..], port);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes[20..], address);
+        from.Size = MappedIPv4Template.Size;
+    }
 
     public void Dispose() => _udp.Dispose();
 }
