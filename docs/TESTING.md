@@ -243,6 +243,7 @@ is never "does a retry work" but "does the SAME call finish byte-exact". FlowByt
 | Direct path cut mid-transfer | `DirectPathCut_MidTransfer_CompletesThroughTheRelay` | same connection degrades to the relay leg; transfer continues without losing verified progress |
 | Provider rebind + 3 s blackout | `ProviderRebindAndBlackout_MidTransfer_SameCallCompletes` | session heals onto the provider's new endpoint mid-transfer |
 | Provider process restart | `ProviderRestart_SameTicket_ResumesFromCheckpointInOneCall` | the original call re-dials the same ticket; the successor serves only the tail (374 chunks vs 512 total — checkpointed prefix never re-crosses the wire) |
+| Directory restart | `DirectoryTransfer_ProviderRestart_ManifestAndRootsCarryAcrossRedial` | a directory is N streams on one ticket: manifest fetched once, finished files skipped via carried-over roots, the in-flight file resumed at checkpoint — successor served 292/450 chunks |
 | Wrong-identity responder | (see below) | a stranger who never answers is indistinguishable from a dead provider — riding out is correct; refusal must actually ARRIVE to be terminal |
 | Refused dial (incompatible peer) | `IncompatiblePeer_RefusalIsTerminal_NotRiddenOut` | kepless-peer refusal surfaces in ~30 ms, never riding the 10 min budget |
 | Tampered chunks | `TamperedFrame_IsTerminal_NeverRiddenOut` | first bad chunk fails CV verification terminally; no recovery budget spent |

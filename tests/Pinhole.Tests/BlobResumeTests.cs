@@ -341,6 +341,82 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         }
     }
 
+    [Fact]
+    public async Task DirectoryTransfer_ProviderRestart_ManifestAndRootsCarryAcrossRedial()
+    {
+        string dir = TempDir();
+        try
+        {
+            // A directory download is N streams on one ticket: the manifest, then one
+            // stream per file. A restart mid-tree must not re-fetch the manifest, must
+            // not re-verify finished files, and must resume the in-flight file from its
+            // checkpoint — the successor only ever serves the remaining tail.
+            using VirtualLab lab = await LabAsync(dir);
+            string tree = Path.Combine(dir, "tree");
+            Directory.CreateDirectory(Path.Combine(tree, "sub"));
+            var files = new Dictionary<string, byte[]>();
+            for (int i = 0; i < 3; i++)
+            {
+                byte[] content = new byte[150 * 1024];
+                Random.Shared.NextBytes(content);
+                string rel = i == 0 ? "first.bin" : $"sub/file{i}.bin";
+                await File.WriteAllBytesAsync(Path.Combine(tree, rel), content);
+                files[rel] = content;
+            }
+            long totalChunks = files.Values.Sum(b => (b.Length + Blake3.ChunkSize - 1) / Blake3.ChunkSize);
+            Shape(lab, 8_000_000);
+            byte[] seed = RandomNumberGenerator.GetBytes(32);
+
+            BlobServeOptions Opts() => new()
+            {
+                Encrypt = false, // pinned-key restart is the identity case; ticket keys mint fresh per process
+                NodeOptions = lab.BaseOptions(o => o with
+                {
+                    IdentityKeySeed = seed,
+                    UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 34110)),
+                }),
+            };
+
+            await using BlobServer server = await BlobServer.ServeAsync(tree, Opts());
+            // BlobProgress.FilesDone reports filesDone+1 while a file is in flight, so
+            // "2" here means file one is COMPLETE (its root carried into completedRoots)
+            // and file two is mid-transfer (its checkpoint will be resumed).
+            var filesDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var progress = new Progress<BlobProgress>(p =>
+            {
+                if (p.FilesDone >= 2)
+                {
+                    filesDone.TrySetResult();
+                }
+            });
+            Task<BlobDownloadResult> run = Task.Run(() => BlobClient.DownloadAsync(server.Ticket,
+                Path.Combine(dir, "out"), progress, options: DownOptions(lab, 34020)).WaitAsync(Budget));
+
+            // One file fully verified on the wire (its root joins completedRoots), file
+            // two in flight — then the provider dies. The re-dial must inherit all of it.
+            await filesDone.Task.WaitAsync(TestBudget.Scenario);
+            await server.DisposeAsync();
+            await using BlobServer successor = await BlobServer.ServeAsync(tree, Opts());
+
+            BlobDownloadResult result = await run;
+            foreach ((string rel, byte[] content) in files)
+            {
+                Assert.Equal(content, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "tree", rel)));
+            }
+            Assert.True(result.Resumed, "the surviving call resumed from the pre-restart checkpoints");
+            // The finished file is skipped entirely and the in-flight file resumed at
+            // its checkpoint, so the successor serves strictly less than the whole tree.
+            Assert.True(successor.ChunksServed < totalChunks,
+                $"successor re-served the whole tree ({successor.ChunksServed} chunks vs total {totalChunks}) — no carry-over");
+            output.WriteLine($"directory restart: successor served {successor.ChunksServed}/{totalChunks} chunks " +
+                             $"(manifest fetched once, finished files skipped, in-flight file resumed)");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     private static string TempDir()

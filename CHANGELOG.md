@@ -25,8 +25,9 @@ ridden, verdicts are not — a Bye, a tampered chunk, a root mismatch, and a ref
 handshake (the dial-stage `InvalidOperationException`) all terminate immediately, and
 caller cancellation stays prompt even mid-blackout. Wire unchanged: no new frames, no
 version bump, a resumed download just requests a shorter tail from any v3 provider.
-Eight scenario tests in `BlobResumeTests.cs` (30 s blackout, direct→relay cut,
-rebind+blackout, provider restart, refusal, tamper, cancellation, nonce freshness).
+Nine scenario tests in `BlobResumeTests.cs` (30 s blackout, direct→relay cut,
+rebind+blackout, provider restart, directory restart, refusal, tamper, cancellation,
+nonce freshness).
 
 
 ## 1.10.0 (unreleased) — bounded resources: the first ledgers (#34, partial)
