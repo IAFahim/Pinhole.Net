@@ -161,12 +161,12 @@ internal sealed class BlobController
         return (int)Math.Min(desired, _pacerCreditBytes / ChunkBytes);
     }
 
-    /// <summary>Admission for one request (a new run or a single re-request) of exactly
-    /// <paramref name="bytes"/> of chunk data: needs window room, pacer credit, then
-    /// aggregate-budget room. On success the bytes are reserved per-stream and
-    /// process-wide. The pacer is a token bucket filled at window rate (window bytes per
-    /// RTT, so the whole window could leave once per RTT) with burst credit capped at
-    /// one run — requests may leave back-to-back while credit lasts, then wait.</summary>
+    /// <summary>Admission for one request run of exactly <paramref name="bytes"/> of
+    /// chunk data: needs window room, pacer credit, then aggregate-budget room. On
+    /// success the bytes are reserved per-stream and process-wide. The pacer is a
+    /// token bucket filled at window rate (window bytes per RTT, so the whole window
+    /// could leave once per RTT) with burst credit capped at one run — requests may
+    /// leave back-to-back while credit lasts, then wait.</summary>
     public bool TryStartRun(long bytes, long nowMs)
     {
         if (_inFlight + bytes > _window)

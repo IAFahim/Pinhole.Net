@@ -354,6 +354,10 @@ anecdote. Assertions on completion: zero errors, nonzero workload, budget draine
   (N+1 reservations per retried chunk — sustained loss could deny recovery the
   pie it was repaying), and the congestion-avoidance pacer divided by unbounded
   SRTT so queue delay throttled the issue rate quadratically with the window.
-  Post-fix: 4 MiB completes on the same link (137 s where fixed-window needs
-  219 s), verified by `SustainedSize_ThroughTailDrop_DoesNotStarve` (env-gated
-  with the soak).
+  A follow-on defect closed under #36: requests could outrun the sink's
+  512-chunk reorder window, floor-dropping arrivals while consuming their
+  reservations (never re-requested); the request horizon is now capped at
+  `applied + reorderSpan`, pinned at unit scale by
+  `LossLadderTests.BeyondReorderHorizon_NoDuplicateFlood`. Post-fix: 4 MiB
+  completes on the same link in 6–12 s with zero duplicate bytes, verified by
+  `SustainedSize_ThroughTailDrop_DoesNotStarve` (env-gated with the soak).

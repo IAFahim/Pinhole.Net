@@ -85,9 +85,12 @@ connection layer's 1200-byte datagram budget with the AEAD overhead included.
 
 - The downloader sends Hello until a Head arrives (inside Welcome for encrypted tickets;
   20 s give-up), then requests ranges from the **lowest unapplied chunk** upward, admitted
-  by the congestion controller (below). A hostile sender cannot make the downloader buffer
-  the far end of the file: anything past a bounded reorder window (512 chunks) ahead of
-  the applied cursor is dropped and re-requested in order.
+  by the congestion controller (below). Requests never outrun the sink's reorder horizon:
+  a chunk asked for more than the bounded reorder window (512 chunks) past the applied
+  cursor would be dropped on the floor on arrival — with its ARQ reservation consumed —
+  wasting wire bytes and leaving a hole nothing re-requests (#36). The horizon slides
+  forward with the applied prefix, so large windows still fill; they just cannot hold
+  out-of-order requests farther than the buffer could keep them.
 - Missing chunks are re-requested individually after an RTT-derived retransmission timer.
 - A stall — no chunk verified for 30 s — or a connection that closes or goes quiet ends
   the **attempt**, not the download: the recovery loop (below) re-dials the pinned
@@ -163,8 +166,9 @@ no version moved). What it does, all receiver-side:
   the re-request is the same outstanding bytes, not new ones (an earlier design
   charged a fresh budget reservation per retry, so sustained loss stacked enough
   phantom debt to deny recovery itself). Re-requests bypass the window and pacer,
-  bounded by the PTO cadence; gating recovery on the window it is trying to refill
-  deadlocks — the fixed-window predecessor never hit this because it never shrank.
+  bounded by the PTO cadence and the reorder horizon; gating recovery on the window
+  it is trying to refill livelocks at the floor rate (measured: pacing re-requests
+  through the shared credit bucket collapsed every lossy rung to ~30 KiB/s).
 - **Duplicates are wire load.** Bytes that arrive for an index already held count as
   `DuplicateBytes` in `BlobTransferStats` — request credits are never treated as proof
   of a bounded response side.

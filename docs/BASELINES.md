@@ -62,6 +62,31 @@ An IW ≥ 96 KiB matches the fixed window's deep-queue number (1092–1097) but 
 hurts every lossy rung (the opening burst overflows thin queues deterministically) — 32
 KiB was chosen because the thin-queue collapse is the scenario the controller exists for.
 
+## #36 reorder-horizon fix — same machine, same day (2026-10-06)
+
+`#34`'s sustained-size test (4 MiB through the 8 Mbit/s / 128-packet / 20 ms link) found a
+second defect class beyond the starvation fix: requests could outrun the sink's
+512-chunk reorder window, so arrivals past it were dropped on the floor WITH their ARQ
+reservation consumed — counted as duplicate wire bytes and never re-requested. The fix
+caps the request horizon at `applied + reorderSpan` (a sliding cap, not a throughput
+cap). Before/after on the same Debug harness:
+
+| Run | Time | Retransmits | DuplicateBytes |
+|---|---|---|---|
+| 4 MiB, pre-fix | 137 s (~30 KiB/s) | 1654 | 5.2 MiB (>100% of payload) |
+| 4 MiB, post-fix | 6–12 s (350–695 KiB/s) | 228–338 | **0 KiB** |
+| 1 MiB @ 10% iid, post-fix | 2.9 s | 193 | **0 KiB** |
+
+All ladder/bottleneck rungs reproduced inside (or above) the recorded controller ranges
+post-change: thin queue 358 KiB/s, GE burst 477 KiB/s, ladder 1% ≈ 2 MiB/s, 20% ≈
+134 KiB/s — `LossLadderTests.BeyondReorderHorizon_NoDuplicateFlood` pins the regression
+at unit scale. Two alternatives measured and rejected: pacing re-requests through the
+shared credit bucket livelocks every lossy rung at ~30 KiB/s (healing must not be
+throttled by the window it is refilling), and a first-send-to-arrival "late delivery"
+PTO floor overstates latency whenever the first request was truly lost (Karn's
+ambiguity — a re-requested arrival cannot distinguish "late" from "dead" without a
+wire-level request id).
+
 ## What the baselines already forced out
 
 - **A real lab bug**: the virtual scheduler delivered each 5 ms batch of delayed packets

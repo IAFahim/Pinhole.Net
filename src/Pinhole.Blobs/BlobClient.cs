@@ -408,8 +408,11 @@ public static class BlobClient
 
                         if (pathPresent)
                         {
-                            TopUpRequests(now);
+                            // Healing before fresh demand: re-requests get first claim
+                            // on the pacer's credit each tick, the way loss recovery
+                            // precedes new data in a transport sender.
                             SweepStale(now);
+                            TopUpRequests(now);
                         }
 
                         // The checkpoint is idempotent and tiny; a 50 ms gate keeps the
@@ -589,14 +592,17 @@ public static class BlobClient
 
         private void TopUpRequests(long now)
         {
-            // The token-bucket pacer admits as many runs as its credit allows inside one
-            // control tick — the pacer's rate, not the tick cadence, is the limit. Runs
-            // size themselves to the credit actually available, so issuance tracks the
-            // pacing rate smoothly instead of jumping in whole-run quanta.
-            while (_maxRequested + 1 < _totalChunks)
+            // Requests stay inside the sink's reorder horizon: a chunk asked for beyond
+            // Applied + ReorderSpan would be dropped on the floor on arrival, consuming
+            // its reservation while the hole it leaves is never re-requested — measured
+            // wire waste AND a guaranteed stall once a leading chunk is lost with a
+            // window wider than the buffer. The horizon slides with the applied prefix.
+            long span = Math.Min(_sink.ReorderSpan, _totalChunks);
+            long horizon = Math.Min(_totalChunks, _sink.Applied + span);
+            while (_maxRequested + 1 < horizon)
             {
                 long start = _maxRequested + 1;
-                int desired = (int)Math.Min(_controller.MaxRunChunks, _totalChunks - start);
+                int desired = (int)Math.Min(_controller.MaxRunChunks, horizon - start);
                 int count = Math.Min(desired, _controller.AffordableChunks(desired));
                 if (count < 1)
                 {
@@ -637,7 +643,11 @@ public static class BlobClient
                 // outstanding entry already holds one. Charging again per retry
                 // stacked N+1 reservations on a single chunk: sustained loss could
                 // fill the aggregate pie with retry debt and deny the very
-                // re-requests that would repay it.
+                // re-requests that would repay it. Pacer credit is NOT drawn here
+                // either — the bucket models admission of NEW work; healing traffic
+                // must not be throttled by a collapsed window or recovery livelocks
+                // at the floor rate. The honest bounds on re-request rate are the
+                // per-chunk PTO and the reorder horizon.
                 _controller.OnRetransmit(now);
                 _outstanding[idx] = (now, retransmits + 1);
                 Send(BlobWire.Request(_stream, idx, 1));
@@ -666,6 +676,12 @@ public static class BlobClient
     private abstract class Sink
     {
         public long Applied { get; protected set; }
+
+        /// <summary>How many chunk positions past <see cref="Applied"/> an arrival may be
+        /// and still be kept. Requests beyond Applied + ReorderSpan would be dropped on
+        /// the floor on arrival — the downloader stays inside this horizon.</summary>
+        public virtual long ReorderSpan => long.MaxValue;
+
         public abstract void Init(long totalBytes, long totalChunks);
         public abstract bool Apply(long index, byte[] data);
         public abstract byte[] Complete();
@@ -683,6 +699,8 @@ public static class BlobClient
         private const string Magic = "PBPART01";
         private static readonly byte[] MagicBytes = System.Text.Encoding.ASCII.GetBytes(Magic);
         private const long ReorderWindow = 512;
+
+        public override long ReorderSpan => ReorderWindow;
 
         private readonly string _partDir = target + ".pinhole-part";
         private readonly Dictionary<long, byte[]> _reorder = new();

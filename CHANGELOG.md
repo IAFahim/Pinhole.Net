@@ -59,8 +59,14 @@ the congestion-avoidance pacer divided by unbounded SRTT, letting self-inflicted
 queue delay throttle the issue rate quadratically with the window. A chunk now
 holds exactly one reservation regardless of retries, and the pacing RTT is capped
 at 4× the path's measured base delay (queue build-up remains halving evidence,
-it just stops being a pacing target). 4 MiB through the tail-drop link: 137 s
-post-fix vs. 219 s fixed-window; all recorded baselines held or improved.
+it just stops being a pacing target). A third defect closed under #36: requests
+could outrun the sink's 512-chunk reorder window, so past-horizon arrivals were
+dropped on the floor WITH their ARQ reservation consumed — the bulk of the
+measured >100% duplicate flood, plus a hole nothing re-requested. The request
+horizon now caps at `applied + reorderSpan` (a sliding cap, not a throughput
+cap). 4 MiB through the tail-drop link: 6–12 s with ZERO duplicate bytes (was
+137 s / 5.2 MiB duplicates); all recorded baselines held or improved, pinned at
+unit scale by `LossLadderTests.BeyondReorderHorizon_NoDuplicateFlood`.
 
 
 ## 1.10.0 (unreleased) — release evidence foundation (#35, partial)

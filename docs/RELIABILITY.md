@@ -185,9 +185,11 @@ Collected in one place so nothing relies on tribal knowledge:
   transfer rides the full `RecoveryTimeout` rather than failing fast. Inherent
   to authenticated dials — a stranger cannot prove it is not the provider
   without the keys.
-- **Duplicate flood under sustained tail-drop** — re-request PTOs still race
-  responses that are queueing but not yet lost; >100% duplicate bytes measured
-  on the 4 MiB rung. Tracked as #36.
+- **Duplicate flood under sustained tail-drop** — FIXED: the flood was requests
+  outrunning the sink's reorder horizon (floor-dropped arrivals consumed their
+  reservations), not racing re-requests. The request horizon is now capped at
+  `applied + reorderSpan`; measured duplicate bytes are zero at unit and
+  sustained scale (#36, `docs/BASELINES.md`).
 - **`BlobProgress.FilesDone`** — increments when a file *starts*, not when it
   completes (progress-event semantics for "file 2 of 5" rendering). Decision
   tracked as #37.

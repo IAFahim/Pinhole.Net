@@ -138,6 +138,61 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>#36 regression: a file larger than the sink's reorder horizon (512
+    /// chunks) under loss. Before the horizon cap, requests raced up to a whole 1 MiB
+    /// window ahead of the applied prefix; arrivals past the 512-chunk reorder buffer
+    /// were dropped on the floor WITH their reservation consumed — counted as
+    /// duplicates on the wire and never re-requested (a guaranteed stall once a
+    /// leading chunk died first). Now requests stay inside the sliding horizon, so
+    /// duplicate bytes must stay a small fraction of the payload.</summary>
+    [Fact]
+    public async Task BeyondReorderHorizon_NoDuplicateFlood()
+    {
+        const long fileBytes = 1024 * 1024; // 1024 chunks — forces the horizon to slide
+        string dir = TempDir();
+        try
+        {
+            using VirtualLab lab = new();
+            byte[] data = new byte[fileBytes];
+            Random.Shared.NextBytes(data);
+            string src = Path.Combine(dir, "big.bin");
+            await File.WriteAllBytesAsync(src, data);
+            await using BlobServer server = await BlobServer.ServeAsync(src, new BlobServeOptions
+            {
+                NodeOptions = lab.BaseOptions(o => o with
+                {
+                    UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 32010)),
+                }),
+            });
+            AddIndependentLoss(lab, 0.10, seed: 909);
+
+            var stats = new BlobTransferStats();
+            var sw = Stopwatch.StartNew();
+            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket,
+                Path.Combine(dir, "out"),
+                options: new BlobDownloadOptions
+                {
+                    Stats = stats,
+                    NodeOptions = lab.BaseOptions(o => o with
+                    {
+                        UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.20"), 32020)),
+                    }),
+                }).WaitAsync(RungBudget);
+            sw.Stop();
+
+            Assert.Equal(fileBytes, result.Bytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "big.bin")));
+            Assert.True(stats.DuplicateBytes <= fileBytes / 8,
+                $"duplicate waste {stats.DuplicateBytes / 1024} KiB exceeded an eighth of the {fileBytes / 1024} KiB payload");
+            output.WriteLine($"1 MiB beyond reorder horizon at 10% loss: {sw.Elapsed.TotalSeconds:F1}s, " +
+                             $"dup={stats.DuplicateBytes / 1024} KiB, retransmits={stats.Retransmits} | {lab.Net.Counters()}");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     // ------------------------------------------------------------------ rung plumbing
 
     private static string TempDir()
