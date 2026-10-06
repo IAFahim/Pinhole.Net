@@ -291,3 +291,66 @@ the same window whose lost reservations held it shut (a recovery deadlock — th
 window could never hit it because it never shrank), the checkpoint cadence change
 initially wrote no state for sub-250 ms attempts (resume tests caught it), and
 connection-closed detection relied on `Send` throwing rather than an explicit check.
+
+
+## #34 — bounded resources under churn, hostile input, and load
+
+`BoundedResourceTests.cs`, virtual lab. The discipline is *ledgers, not vibes*: each
+test asserts the specific counter that would grow if the layer leaked — the flow
+budget's `UsedBytes`, the lab's live-socket ledger (`VirtualNetwork.LiveSockets`,
+incremented at socket construction, decremented exactly once on dispose), and the
+node's connection table. Process heap appears only as a median-per-cycle slope check,
+because parallel tests share the process and their transient garbage is noise, not
+signal.
+
+| Scenario | Test | Proof |
+|---|---|---|
+| Repeated cancel + resume | `RepeatedCancelResume_ReturnsEveryReservation` | 8 cycles, each cancelled mid-transfer (a synchronous progress callback cancels inside the pump itself — no poll→cancel gap to race completion): budget drains to zero *immediately* after every cancel, socket ledger flat, median heap delta ≈ 0 KiB/cycle, and every attempt leaves an honest checkpoint — the final pass resumes byte-exact |
+| Concurrent transfers on one budget | `ConcurrentDownloads_OnOneBudget_AllComplete_AndItDrains` | 12 downloads share a 2 MiB pie (real contention — queued reservations); all finish byte-exact, budget drains to zero, no socket leaks |
+| Provider restart churn | `ProviderRestartChurn_OneCall_LeavesNoDebt` | 4 provider process restarts inside ONE download call: successor nodes bind and dispose repeatedly; budget used = 0 and sockets settled afterward |
+| Failed dials | `FailedDials_LeaveNoConnectionHusks` | 6 sequential + 24 concurrent dials to a dead peer leave `node.Connections` empty — timed-out attempts are reaped, not retained |
+| Repeated disposal | `RepeatedNodeDisposal_LeavesTheSocketLedgerFlat` | 12 bind/dispose cycles: live-socket count identical before and after — no pump or timer pins a dead host's socket |
+| Hostile ticket-holder barrage | `TicketHolderBarrage_NeverAmplifies_AndHonestPeerCompletes` | authenticated peer floods 200 undecryptable datagrams + 100 Hellos: junk gets zero replies, foreign-session Hellos get zero replies, bound-session Hellos get ≤1 Welcome each — no amplification — while an honest download completes undisturbed |
+
+Two shared-state lessons the tests encode: assertions about `BlobFlowBudget.Shared`
+are racy under parallel tests, so concurrent-sensitive checks use a private budget;
+and `WelcomeNonceSeen` fires per Welcome, not per session — provider nonces are stable
+within a connection by design and distinct across session recreations.
+
+### The soak harness
+
+`MixedWorkloadSoak` is skipped unless `PINHOLE_SOAK_MINUTES` names a duration:
+
+```sh
+PINHOLE_SOAK_MINUTES=60 \
+  dotnet test --filter "FullyQualifiedName~MixedWorkloadSoak"
+```
+
+It runs a mixed workload — shaped-link downloads, brief mid-transfer blackouts,
+cancel-and-resume cycles — under a fixed RNG seed (0x50A0; a failing soak is
+reproducible by re-running the same duration). Every 60 s it appends a line to
+`$TMPDIR/pinhole-soak/<timestamp>-<id>/soak-observations.csv`:
+`elapsedSec,heapMiB,threads,handles,liveSockets,budgetUsed,completed,cancelled,errors`.
+The file persists pass or fail — it is the evidence the issue asks to attach, not an
+anecdote. Assertions on completion: zero errors, nonzero workload, budget drained.
+
+### What this does NOT yet cover (open #34 remainder)
+
+- **24 h / 72 h scheduled soaks** — the harness exists; the long runs are release
+  evidence (#35), run on real hardware with the CSV attached.
+- **`NodeEngine.MaxConnections` flood** — the cap is a hardcoded 1024 with no test
+  seam; filling it needs 1024 distinct peer IDs (~minutes of handshake churn) or a
+  constructor-level cap override. Deferring to whether the security review (#24)
+  wants the seam.
+- **Frame/ticket/manifest fuzz reuse** — the blob layer's hostile-input cell above is
+  connection-level; byte-level fuzzing of `BlobWire` parsers should reuse the
+  property-test infrastructure once it lands for tickets/manifests.
+- **Relay allocation debt** — virtual-lab TURN is emulated on loopback; allocation
+  counting against a real coturn belongs to the env-gated #26 harness.
+- **Controller starvation at sustained size** — scaling the cancel test's warmup to
+  4 MiB on the standard shaped link (8 Mbit/s, 128-packet queue, 20 ms delay) exposed
+  a real controller pathology: sustained tail-drop keeps the window pinned near
+  minimum while the measured RTT inflates, so the pacer's window÷RTT issue rate
+  collapses — observed ~150 KiB/s on an 8 Mbit link with the shaping queue idle
+  (depth 0) at timeout. Short transfers finish before the feedback loop bites; this
+  needs a dedicated fix under #20's controller work, not a bigger test timeout.

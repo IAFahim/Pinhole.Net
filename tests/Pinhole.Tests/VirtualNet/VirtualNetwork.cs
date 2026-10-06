@@ -24,6 +24,14 @@ internal sealed class VirtualNetwork : IDisposable
     public long DroppedByPolicy;
     public long Unroutable;
 
+    /// <summary>Sockets attached but not yet disposed — the lab's leak ledger. A disposed
+    /// socket still swallows whatever arrives for it (a vanished host absorbs, like a real
+    /// network), but the count must return to baseline after every cleanup cycle.</summary>
+    public int LiveSockets => _liveSockets;
+    private int _liveSockets;
+    internal void SocketAttached() => Interlocked.Increment(ref _liveSockets);
+    internal void SocketDetached() => Interlocked.Decrement(ref _liveSockets);
+
     public VirtualNetwork()
     {
         _scheduler = new Thread(RunScheduler) { IsBackground = true, Name = "virtual-net" };

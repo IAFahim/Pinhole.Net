@@ -29,6 +29,28 @@ Eight scenario tests in `BlobResumeTests.cs` (30 s blackout, direct→relay cut,
 rebind+blackout, provider restart, refusal, tamper, cancellation, nonce freshness).
 
 
+## 1.10.0 (unreleased) — bounded resources: the first ledgers (#34, partial)
+
+Recovery is only release-grade if repeated recovery returns everything it borrowed.
+`BoundedResourceTests.cs` asserts ledgers, not vibes: the flow budget's `UsedBytes`
+(drains to zero immediately after every cancel and after churn), the lab's new
+live-socket ledger (flat across cancel cycles, 12 node bind/dispose cycles, and 4
+provider restarts inside one surviving download), and the connection table (30 timed-
+out dials leave zero husks). Twelve concurrent downloads on a 2 MiB `BlobFlowBudget`
+all complete byte-exact — contention queues reservations, never loses them. A hostile
+ticket-holder floods the provider with undecryptable datagrams and foreign-session
+Hellos and gets strictly ≤1 answer per answerable request — no amplification — while
+an honest peer completes undisturbed.
+
+The soak harness (`MixedWorkloadSoak`) is env-gated:
+`PINHOLE_SOAK_MINUTES=<n> dotnet test --filter FullyQualifiedName~MixedWorkloadSoak`
+runs a seeded mixed workload (shaped links, blackouts, cancel/resume) and appends a
+per-minute CSV (heap, threads, handles, sockets, budget, outcomes) to
+`$TMPDIR/pinhole-soak/` — evidence format ready for the scheduled 24 h/72 h runs that
+remain the release gate. Still open under #34: a `MaxConnections` flood seam,
+byte-level frame/manifest fuzzing, and real-relay allocation accounting.
+
+
 ## 1.10.0 (unreleased) — blob congestion control (#20)
 
 Blob downloads are now congestion-controlled, receiver-side, with the wire unchanged

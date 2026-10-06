@@ -22,6 +22,7 @@ internal sealed class VirtualUdpSocket : IUdpSocket
         _net = net;
         Address = address;
         Nat = nat;
+        _net.SocketAttached();
     }
 
     /// <summary>The address this socket lives at: public when internet-attached, private
@@ -81,9 +82,15 @@ internal sealed class VirtualUdpSocket : IUdpSocket
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             _disposed = true;
         }
 
+        _net.SocketDetached();
         _signal.Set();
     }
 
