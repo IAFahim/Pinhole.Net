@@ -352,6 +352,12 @@ anecdote. Assertions on completion: zero errors, nonzero workload, budget draine
   `Manifest.Decode` accepted negative entry sizes — now rejected, pinned by
   `ManifestDecode_NegativeSize_IsRejected`. FsCheck prints the minimized failing
   input on any failure, ready to seed a regression.
+- **Previous-version interop** — COVERED: `InteropTests` builds the checked-in
+  `Interop/` host against the last release commit (1.9.0, `3ef16ea`) in a git
+  worktree under `$TMPDIR/pinhole-interop/` and runs real-UDP blob transfers both
+  directions. Verified on v2 connection strings; the v3 (endpoint-key) ticket is
+  refused by the old parser as a clean `FormatException`. Auto-skips on shallow
+  clones — CI needs `fetch-depth: 0`.
 - **Relay allocation debt** — virtual-lab TURN is emulated on loopback; allocation
   counting against a real coturn belongs to the env-gated #26 harness.
 - **Controller starvation at sustained size** — FIXED: scaling the cancel test's

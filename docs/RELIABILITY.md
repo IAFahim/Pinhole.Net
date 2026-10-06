@@ -45,7 +45,11 @@ strings):
 | v2 | + static public key | all ≥1.6 | all ≥1.6 |
 | v3 | + endpoint key (identity pin) | all ≥1.10 | all ≥1.10 |
 
-Truncated v3 strings are refused; unknown versions fail explicitly.
+Truncated v3 strings are refused; unknown versions fail explicitly. A current node
+produces v3 only when it has an endpoint identity (a persisted `IdentityKeySeed` or
+iroh relays); an unseeded, unrelayed node still produces v2 — that is the
+backward-compatibility surface, and `InteropTests` verifies it both directions
+against the last release build.
 
 ### Blob wire
 
@@ -205,8 +209,14 @@ Collected in one place so nothing relies on tribal knowledge:
   long runs are pending before release.
 - **Independent security/recovery review** (#24) — outstanding; findings gate
   the release.
-- **Previous-version interop runs** — wire-compatibility tests against the last
-  published package are specified above but not yet automated. Open under #35.
+- **Previous-version interop runs** — covered: `InteropTests` checks the release
+  commit (1.9.0, `3ef16ea`) out to a git worktree, builds the checked-in interop
+  host against it, and meets the current build over real loopback UDP. Verified:
+  current↔1.9.0 completes verified blob transfers in both directions on v2
+  connection strings; a seeded current provider's v3 ticket is refused by the
+  1.9.0 parser as a clean `FormatException` (the documented intentional break —
+  old clients cannot authenticate an endpoint key). Runs automatically wherever
+  the release commit is reachable (`fetch-depth: 0` on CI).
 
 ## Release mechanics: canary and rollback
 

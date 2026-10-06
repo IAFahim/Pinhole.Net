@@ -88,10 +88,14 @@ the known-limitations list, and the canary/rollback plan on the existing
 tag-push pipeline. API surface is now contractual: Roslyn PublicApiAnalyzers
 listings are checked in for all four shipped projects (nullable-annotated),
 with RS0016/RS0017 promoted to build errors — a public API change without a
-listing update, or any binary-breaking change, fails the build. Still open
-under #35: the scheduled 24 h/72 h soaks, real-OS support-matrix results (#33),
-the independent security review (#24), and current-vs-previous version interop
-runs.
+listing update, or any binary-breaking change, fails the build. Wire interop
+against the previous release is now automated too: `InteropTests` builds a
+checked-in host against the 1.9.0 release commit in a git worktree and proves
+verified blob transfers current↔1.9.0 in both directions on v2 connection
+strings, plus the documented v3-ticket refusal (`FormatException`, not a crash)
+when a seeded current provider meets the old parser. Still open under #35: the
+scheduled 24 h/72 h soaks, real-OS support-matrix results (#33), and the
+independent security review (#24).
 
 
 ## 1.10.0 (unreleased) — blob congestion control (#20)
