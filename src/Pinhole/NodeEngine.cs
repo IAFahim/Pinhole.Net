@@ -118,6 +118,7 @@ internal sealed class NodeEngine : IDisposable
     /// <summary>Upper bound on connections a stranger flood can materialize. Applications
     /// dialing peers themselves are not bounded by this — only unknown-peer PUNCs are.</summary>
     internal const int MaxConnections = 1024;
+    private readonly int _maxConns; // production cap unless PinholeOptions.MaxConnectionsOverride says otherwise
 
     // Must exceed the largest legit announce: HeaderSize + token + count + 32 fat relay
     // candidates (~170 bytes each) lands near 5.5 KB; a smaller buffer would truncate and
@@ -213,6 +214,7 @@ internal sealed class NodeEngine : IDisposable
             _endpointIdentity = new RelayIdentity(endpointSeed);
         _peerId = _endpointIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         _options = options;
+        _maxConns = options.MaxConnectionsOverride ?? MaxConnections;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
         if (options.RendezvousEndpoints is { Count: > 0 } || options.LookupProviders is { Count: > 0 })
@@ -1399,7 +1401,7 @@ internal sealed class NodeEngine : IDisposable
         // observer can catch the overshoot window an insert-then-remove would leave. The
         // post-insert check below stays for the rare case of a concurrent dial landing
         // between this read and the insert.
-        if (_conns.Count >= MaxConnections)
+        if (_conns.Count >= _maxConns)
         {
             return null;
         }
@@ -1421,7 +1423,7 @@ internal sealed class NodeEngine : IDisposable
             return _conns.TryGetValue(peerId, out ConnState? first) ? first : null;
         }
 
-        if (_conns.Count > MaxConnections)
+        if (_conns.Count > _maxConns)
         {
             // A concurrent dial won the race to the last slot; the stranger gives way.
             _conns.TryRemove(new KeyValuePair<ulong, ConnState>(peerId, c));

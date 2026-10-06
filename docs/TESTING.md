@@ -339,10 +339,12 @@ anecdote. Assertions on completion: zero errors, nonzero workload, budget draine
 
 - **24 h / 72 h scheduled soaks** — the harness exists; the long runs are release
   evidence (#35), run on real hardware with the CSV attached.
-- **`NodeEngine.MaxConnections` flood** — the cap is a hardcoded 1024 with no test
-  seam; filling it needs 1024 distinct peer IDs (~minutes of handshake churn) or a
-  constructor-level cap override. Deferring to whether the security review (#24)
-  wants the seam.
+- **`NodeEngine.MaxConnections` flood** — COVERED: `PinholeOptions.MaxConnectionsOverride`
+  (internal, like the other test seams) shrinks the stranger-flood bound, and
+  `AttackTests.MaxConnectionsFlood_RealHandshakes_RefusesOverflowAndRecovers` proves
+  the cap with real handshakes — exactly cap strangers admitted, overflow refused
+  into dial timeouts, freed slots handed to the next dial. The raw-datagram bound
+  stays covered by `PuncFlood_FromStrangers_ConnectionTableStaysBounded`.
 - **Frame/ticket/manifest fuzz reuse** — the blob layer's hostile-input cell above is
   connection-level; byte-level fuzzing of `BlobWire` parsers should reuse the
   property-test infrastructure once it lands for tickets/manifests.

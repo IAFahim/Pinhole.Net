@@ -179,6 +179,12 @@ public sealed record PinholeOptions
     /// loss, and delay. Null (always, in production) binds real sockets.</summary>
     internal UdpSocketFactory? UdpSocketFactory { get; init; }
 
+    /// <summary>Test seam for the stranger-flood bound (#34): replaces the engine's
+    /// 1024-connection cap on unknown-peer materializations so a flood test reaches it
+    /// in a handful of handshakes instead of a thousand. Null keeps production's cap;
+    /// the bound is checked before insert either way (see NodeEngine.CreateIncoming).</summary>
+    internal int? MaxConnectionsOverride { get; init; }
+
     internal static readonly Uri[] PublicIrohRelays =
     [
         new Uri("https://aps1-1.relay.n0.iroh.link/"),
@@ -241,6 +247,8 @@ public sealed record PinholeOptions
             throw new ArgumentOutOfRangeException(nameof(options), "KeepaliveInterval must be zero (off) or at least 100 ms");
         if (options.PmtuReprobeInterval < TimeSpan.FromSeconds(1))
             throw new ArgumentOutOfRangeException(nameof(options), "PmtuReprobeInterval must be at least 1 s");
+        if (options.MaxConnectionsOverride is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxConnectionsOverride must be positive when set");
     }
 
     private static async Task<IPEndPoint[]> ResolveStunCatalogAsync(PinholeOptions options, CancellationToken ct)

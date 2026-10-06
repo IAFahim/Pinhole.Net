@@ -193,8 +193,9 @@ Collected in one place so nothing relies on tribal knowledge:
 - **`BlobProgress.FilesDone`** — counts only fully root-verified files; the
   in-flight file's ordinal is `min(FilesDone + 1, FilesTotal)` for progress
   displays. Fixed while still unshipped (#37).
-- **`NodeEngine.MaxConnections` flood** — the 1024-connection cap has no test
-  seam; filling it has not been exercised. Open under #34.
+- **`NodeEngine.MaxConnections` flood** — covered: an internal
+  `MaxConnectionsOverride` test seam shrinks the cap, and the flood test proves
+  admission refusal and slot recovery with real handshakes.
 - **Byte-level wire fuzzing** — frame/ticket/manifest parsers are covered by
   hand-written hostile cases, not systematic fuzzing yet. Open under #34.
 - **Mobile and AOT/trimming** — untested; no claims are made for them.

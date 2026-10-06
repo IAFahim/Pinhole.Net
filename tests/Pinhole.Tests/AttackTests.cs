@@ -193,6 +193,66 @@ public sealed class AttackTests
         Assert.Equal("through the flood"u8.ToArray(), await got.Task.WaitAsync(TimeSpan.FromSeconds(1)));
     }
 
+    /// <summary>The 1024 cap proven with REAL handshakes instead of raw datagrams (#34
+    /// seam): a listener whose MaxConnectionsOverride is 4 admits exactly four strangers,
+    /// refuses the rest (their PUNCs stop materializing state, so their dials only ever
+    /// see silence), and hands the freed slot to the next stranger the moment one
+    /// admitted connection closes.</summary>
+    [Fact]
+    public async Task MaxConnectionsFlood_RealHandshakes_RefusesOverflowAndRecovers()
+    {
+        const int cap = 4;
+        const int strangers = 6;
+        await using PinholeNode listener = await PinholeNode.BindAsync(
+            Opts() with { MaxConnectionsOverride = cap });
+        string cs = LoopbackString(listener);
+        PinholeOptions dialerOpts = Opts() with { ConnectTimeout = TimeSpan.FromSeconds(3) };
+
+        var nodes = new List<PinholeNode>();
+        var dials = new List<Task<PinholeConnection>>();
+        try
+        {
+            for (int i = 0; i < strangers; i++)
+            {
+                nodes.Add(await PinholeNode.BindAsync(dialerOpts));
+                dials.Add(nodes[i].ConnectAsync(cs));
+            }
+
+            var results = await Task.WhenAll(dials.Select(d => RecordAsync(d)));
+            Assert.Equal(cap, results.Count(r => r is not null));
+            Assert.Equal(strangers - cap, results.Count(r => r is null));
+            Assert.True(listener.Connections.Count <= cap,
+                $"cap exceeded: {listener.Connections.Count} materialized");
+
+            // A closed slot is handed to the next stranger: the table does not pin
+            // refused capacity.
+            await results.First(r => r is not null)!.DisposeAsync();
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap - 1);
+
+            await using PinholeNode late = await PinholeNode.BindAsync(dialerOpts);
+            await using PinholeConnection recovered = await late.ConnectAsync(cs).WaitAsync(Timeout);
+        }
+        finally
+        {
+            foreach (PinholeNode n in nodes)
+            {
+                await n.DisposeAsync();
+            }
+        }
+
+        static async Task<PinholeConnection?> RecordAsync(Task<PinholeConnection> dial)
+        {
+            try
+            {
+                return await dial;
+            }
+            catch (TimeoutException)
+            {
+                return null;
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- dial races
 
     [Fact]
