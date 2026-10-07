@@ -57,6 +57,9 @@ jobs:
             grep -hE "^  Failed " run1.log run2.log run3.log | sort -u || echo "no failures in any of the three runs"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Also print to stdout: step summaries need a signed-in browser, the
+          # plain log is readable via gh/api.
+          grep -hE "^  Failed " run1.log run2.log run3.log | sort -u || true
 
       - name: Verdict
         run: |
