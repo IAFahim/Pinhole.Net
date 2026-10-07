@@ -66,12 +66,14 @@ public sealed class BlobFlowBudget
 
     internal bool TryReserve(long bytes)
     {
-        if (Interlocked.Add(ref _used, bytes) <= CapacityBytes)
+        long used = Interlocked.Read(ref _used);
+        while (bytes <= CapacityBytes - used)
         {
-            return true;
+            long observed = Interlocked.CompareExchange(ref _used, used + bytes, used);
+            if (observed == used) return true;
+            used = observed;
         }
-
-        Interlocked.Add(ref _used, -bytes);
+        // Failed reservations never become visible in the ledger, even briefly.
         return false;
     }
 

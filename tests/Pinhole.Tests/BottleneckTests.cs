@@ -37,13 +37,16 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             await using BlobServer server = await ServeAsync(lab, dir);
             AddBottleneck(lab, queuePackets: 256);
 
+            var transfer = new TransferProgress();
             var sw = Stopwatch.StartNew();
-            BlobDownloadResult result = await DownloadAsync(lab, server, dir).WaitAsync(FlowBudget);
+            BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer).WaitAsync(FlowBudget);
             sw.Stop();
             AssertVerified(dir, result);
 
-            double kibPerSecond = result.Bytes / sw.Elapsed.TotalSeconds / 1024;
-            output.WriteLine($"deep queue: {result.Bytes} B in {sw.Elapsed.TotalSeconds:F2}s = {kibPerSecond:F0} KiB/s " +
+            Assert.True(transfer.Bytes > 0 && transfer.Elapsed > TimeSpan.Zero);
+            double kibPerSecond = transfer.Bytes / transfer.Elapsed.TotalSeconds / 1024;
+            output.WriteLine($"deep queue: {result.Bytes} B in {sw.Elapsed.TotalSeconds:F2}s total; " +
+                             $"{transfer.Bytes} B in {transfer.Elapsed.TotalSeconds:F2}s receiving = {kibPerSecond:F0} KiB/s " +
                              $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()}");
             Assert.True(kibPerSecond <= LinkBits / 8 / 1024 * 1.05,
                 $"measured {kibPerSecond:F0} KiB/s exceeds the 16 Mbit/s link — the shaper is not shaping");
@@ -193,12 +196,13 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         });
     }
 
-    private static Task<BlobDownloadResult> DownloadAsync(VirtualLab lab, BlobServer server, string dir) =>
-        DownloadAtAsync(lab, server, dir, "198.51.100.20", 32020, "out");
+    private static Task<BlobDownloadResult> DownloadAsync(VirtualLab lab, BlobServer server, string dir,
+        IProgress<BlobProgress>? progress = null) =>
+        DownloadAtAsync(lab, server, dir, "198.51.100.20", 32020, "out", progress);
 
     private static Task<BlobDownloadResult> DownloadAtAsync(VirtualLab lab, BlobServer server, string dir,
-        string address, int port, string name) =>
-        BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, name + "-out"),
+        string address, int port, string name, IProgress<BlobProgress>? progress = null) =>
+        BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, name + "-out"), progress,
             options: new BlobDownloadOptions
             {
                 NodeOptions = lab.BaseOptions(o => o with
@@ -208,4 +212,25 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             });
 
     private static void AssertVerified(string dir, BlobDownloadResult result) => Assert.Equal(FlowBytes, result.Bytes);
+
+    private sealed class TransferProgress : IProgress<BlobProgress>
+    {
+        private long _firstTick;
+        private long _lastTick;
+        private long _firstBytes;
+        private long _lastBytes;
+        public long Bytes => _lastBytes - _firstBytes;
+        public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_firstTick, _lastTick);
+        public void Report(BlobProgress progress)
+        {
+            long now = Stopwatch.GetTimestamp();
+            if (_firstTick == 0)
+            {
+                _firstTick = now;
+                _firstBytes = progress.VerifiedBytes;
+            }
+            _lastTick = now;
+            _lastBytes = progress.VerifiedBytes;
+        }
+    }
 }

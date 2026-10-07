@@ -27,6 +27,11 @@ dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category=Perform
 The flake hunter keeps the same separation: its parallel runs cover the functional
 suite, and its sequential run includes the throughput floors.
 
+The clean-link throughput floor times verified chunk arrivals, from the first to the
+last, using a synchronous progress observer. The whole-call duration is logged separately:
+node discovery, the session handshake, and socket shutdown are setup costs whose OS
+differences must not be mistaken for the link's transfer rate.
+
 ## Where it lives
 
 - `src/Pinhole/UdpSocket.cs` — the seam: `internal interface IUdpSocket` (bind, local
