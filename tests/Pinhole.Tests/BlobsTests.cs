@@ -207,6 +207,57 @@ public sealed class BlobsTests
     }
 
     [Fact]
+    public async Task ServerDisposal_WaitsForActiveFileReaders()
+    {
+        string dir = TempDir();
+        using var releaseReader = new ManualResetEventSlim();
+        using var stopDownload = new CancellationTokenSource(TestBudget.Scenario);
+        var readerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        BlobServer? server = null;
+        Task<BlobDownloadResult>? download = null;
+        try
+        {
+            string src = Path.Combine(dir, "held.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(4096));
+            server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+            server.CorruptChunk = (_, _) =>
+            {
+                // ReadChunk has opened the file. Hold that worker at a real chunk
+                // boundary so shutdown cannot win a race with resource cleanup.
+                readerEntered.TrySetResult();
+                if (!releaseReader.Wait(TestBudget.Teardown))
+                    throw new TimeoutException("the test did not release the file reader");
+            };
+            download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
+                options: new BlobDownloadOptions { NodeOptions = Offline() }, ct: stopDownload.Token);
+            await readerEntered.Task.WaitAsync(TestBudget.Io);
+
+            Task disposing = server.DisposeAsync().AsTask();
+            await Task.WhenAny(disposing, Task.Delay(200));
+            Assert.False(disposing.IsCompleted, "server shutdown must wait for its active file reader");
+            releaseReader.Set();
+            stopDownload.Cancel();
+            await disposing.WaitAsync(TestBudget.Teardown);
+
+            // In particular, Windows must allow immediate exclusive access after
+            // DisposeAsync returns, without sleeps or deletion retries.
+            using FileStream reopened = File.Open(src, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        finally
+        {
+            releaseReader.Set();
+            stopDownload.Cancel();
+            if (server is not null) await server.DisposeAsync().AsTask().WaitAsync(TestBudget.Teardown);
+            if (download is not null)
+            {
+                try { await download.WaitAsync(TestBudget.Teardown); }
+                catch (OperationCanceledException) { }
+            }
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProviderDisposedMidTransfer_FailsFastAndHonestly()
     {
         // The sendme Ctrl-C contract: when the provider goes away, the downloader must

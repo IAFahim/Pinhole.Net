@@ -30,6 +30,8 @@ public sealed class BlobServer : IAsyncDisposable
     private readonly BlobServeOptions _options;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _acceptLoop;
+    private readonly object _servingGate = new();
+    private readonly HashSet<Task> _serving = new();
 
     private BlobServer(PinholeNode node, BlobServeOptions options)
     {
@@ -154,7 +156,22 @@ public sealed class BlobServer : IAsyncDisposable
             }
 
             ConnectionsAccepted++;
-            _ = Task.Run(() => ServeConnectionAsync(conn, ct), ct);
+            Task serving = Task.Run(() => ServeConnectionAsync(conn, ct), CancellationToken.None);
+            lock (_servingGate)
+            {
+                _serving.Add(serving);
+            }
+
+            _ = serving.ContinueWith(completed =>
+            {
+                // Observe failures and retain only active workers, never a history of
+                // ticket holders. Completion includes releasing the worker's files.
+                _ = completed.Exception;
+                lock (_servingGate)
+                {
+                    _serving.Remove(completed);
+                }
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
 
@@ -314,7 +331,8 @@ public sealed class BlobServer : IAsyncDisposable
     }
 
     /// <summary>Stops serving and releases the node; in-flight downloaders see their
-    /// streams end. The ticket dies with the server.</summary>
+    /// streams end. Waits for their workers to release all open files before returning.
+    /// The ticket dies with the server.</summary>
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
@@ -327,6 +345,13 @@ public sealed class BlobServer : IAsyncDisposable
         }
 
         await _node.DisposeAsync().ConfigureAwait(false);
+        Task[] serving;
+        lock (_servingGate)
+        {
+            serving = _serving.ToArray();
+        }
+
+        await Task.WhenAll(serving).ConfigureAwait(false);
     }
 
     /// <summary>Mutable frame counter shared by a connection's send path.</summary>
