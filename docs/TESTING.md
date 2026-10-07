@@ -306,7 +306,7 @@ adaptation of RFC 6298/8085/9002/6675 ideas. The wire is unchanged.
 
 | Claim | Test | Proof |
 |---|---|---|
-| thin-queue collapse healed | `ThinQueue_ControllerAvoidsTheFixedWindowCollapse` | ≥ 90 KiB/s where the fixed window collapses to ~31 KiB/s (measured 194–353) |
+| thin-queue collapse healed | `ThinQueue_ControllerAvoidsTheFixedWindowCollapse` | controller beats the fixed-window baseline through the same 16-packet queue, measured sequentially on the same host |
 | loss recovery, same process | `LossyLink_BothModesRecoverAndVerify_InProcess` | both modes encounter real packet drops, retransmit, and finish byte-exact; relative elapsed times are logged as measurements |
 | timer and window adaptation | `Controller_AdaptsToRttAndBacksOffRepeatedLoss` | controlled RTT samples shorten the timer; repeated loss backs it off; clustered loss reduces the window; migration resets estimates |
 | response bytes accounted | `RetransmittedResponses_AreCountedAsWireLoad` | a duplicating provider (1 chunk in 8 twice) lands exactly 64 KiB of duplicate bytes in `BlobTransferStats`, counted as wire load, transfer still completes |
