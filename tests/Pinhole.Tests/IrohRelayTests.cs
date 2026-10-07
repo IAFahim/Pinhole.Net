@@ -203,7 +203,20 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
         public async Task Send(byte[] message, CancellationToken ct)
         {
             await Gate.WaitAsync(ct);
-            try { await Socket.SendAsync(message, WebSocketMessageType.Binary, true, ct); }
+            try
+            {
+                if (Socket.State != WebSocketState.Open) throw new WebSocketException(WebSocketError.InvalidState);
+                await Socket.SendAsync(message, WebSocketMessageType.Binary, true, ct);
+            }
+            finally { Gate.Release(); }
+        }
+
+        public async Task CloseOutput(CancellationToken ct)
+        {
+            // CloseOutput shares WebSocket's send lane. Use the same gate as forwarded
+            // packets so disconnect injection cannot create overlapping sends on Windows.
+            await Gate.WaitAsync(ct);
+            try { await Socket.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable, "killed", ct); }
             finally { Gate.Release(); }
         }
     }
@@ -339,8 +352,8 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
         {
             try
             {
-                await client.Socket.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable, "killed",
-                    CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(1));
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                await client.CloseOutput(timeout.Token);
             }
             catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException
                 or InvalidOperationException or OperationCanceledException or TimeoutException)

@@ -3186,13 +3186,17 @@ internal sealed class NodeEngine : IDisposable
                 return; // test hook: this direct path is dead; nothing can confirm it
             }
 
-            if (SameEndPoint(c.DirectRemote, source))
+            if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct
+                && SameEndPoint(c.DirectRemote, source))
             {
                 // Fast path, taken for every ordinary datagram: the endpoint is already the
                 // connection's truth, so the frame only refreshes direct-path activity.
                 Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
                 return;
             }
+
+            // A restored UDP path can have exactly the same address as before its
+            // outage. It must still promote a relay-carried or pending session to Open.
 
             // The receive loop reuses its scratch SocketAddress; an adopted endpoint must be
             // private to the connection. Cloning only on change keeps the per-datagram

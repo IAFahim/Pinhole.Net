@@ -96,9 +96,14 @@ public sealed class PathValidationTests
     public async Task RestoredUdp_UpgradesTheSameConnectionBackToDirect()
     {
         await using var server = new FakeIrohRelay();
-        await using var a = await PinholeNode.BindAsync(Opts(server: server));
-        await using var b = await PinholeNode.BindAsync(Opts(server: server));
+        // Bind to loopback so alternate NIC addresses cannot accidentally reopen the
+        // session and hide a failure to promote its ORIGINAL direct address.
+        var options = Opts(server: server) with { Bind = new IPEndPoint(IPAddress.Loopback, 0) };
+        await using var a = await PinholeNode.BindAsync(options);
+        await using var b = await PinholeNode.BindAsync(options);
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
+        IPEndPoint originalA = a.Engine.Lookup(b.PeerId)!.DirectRemoteEp!;
+        IPEndPoint originalB = b.Engine.Lookup(a.PeerId)!.DirectRemoteEp!;
         await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
             && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
 
@@ -113,6 +118,8 @@ public sealed class PathValidationTests
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
             && atB.State == PinholeConnectionState.Open);
         Assert.Equal(PathKind.Direct, atA.Path.Kind);
+        Assert.Equal(originalA, a.Engine.Lookup(b.PeerId)!.DirectRemoteEp);
+        Assert.Equal(originalB, b.Engine.Lookup(a.PeerId)!.DirectRemoteEp);
         Assert.Same(atA, a.Connections.Single());
         await AssertExchangeAsync(atB, atA, "back on direct, same object");
     }
