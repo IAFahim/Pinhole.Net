@@ -151,12 +151,16 @@ MTU than the last path proved.
 ## LAN discovery (mDNS)
 
 Nodes may announce on the local link as `<peer-id-hex>._pinhole._udp.local`
-(RFC 6762/6763 subset): PTR + SRV + TXT + A records in one response, the RFC's 3×
+(RFC 6762/6763 subset): PTR + SRV + TXT + A/AAAA records in one response, the RFC's 3×
 startup burst plus a 120 s heartbeat, unicast answers to legacy queriers, and a
 TTL-0 goodbye on shutdown. TXT carries `id` (16 hex), `hint` (0/1/2), and `key`
 (64 hex = the static public key) — so a discovered peer is immediately dialable
-with the same key pinning as a shared string. Record TTLs are 120 s with the
-cache-flush bit on unique records.
+with key-pinned encryption. Announcements are unsigned; a handshake proves key
+possession rather than a previously trusted device identity. Record TTLs are 120 s
+with the cache-flush bit on unique records. IPv4 224.0.0.251 and IPv6 ff02::fb are
+joined on active multicast interfaces. Memberships refresh after network changes;
+new host addresses trigger an announcement. AAAA link-local results are scoped to
+the receiving interface, never to the announcing device's interface index.
 
 ## Connection lifecycle
 
@@ -317,7 +321,7 @@ into a synchronized retry storm. TURN allocation retries follow the same idea
 | Replay window / epoch | 64 frames / rekey every 2^28 frames |
 | Crypto handshake frames | Punc 77 B, Pack 97 B, Hsck 29 B |
 | PMTU ladder | 1237 B floor, +128 B steps, 1472 B (v4) / 1452 B (v6) ceiling, 3 tries/size, 5 min cooldown |
-| mDNS | `_pinhole._udp.local` on 224.0.0.251:5353, TTL 120 s, heartbeat 120 s |
+| mDNS | `_pinhole._udp.local` on 224.0.0.251 / ff02::fb port 5353, TTL 120 s, heartbeat 120 s |
 | Punch pace | 200 ms |
 | Direct-upgrade pace | 1 s, ≤120 attempts |
 | Path-validation defaults | 5 s idle, 1 s interval, 3 unanswered |

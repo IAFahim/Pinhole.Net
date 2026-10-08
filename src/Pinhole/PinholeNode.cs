@@ -101,7 +101,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     private IReadOnlyList<IPAddress> LocalLanAddresses() =>
         _engine.LocalCandidatesSnapshot()
-            .Where(c => c.Kind == CandidateKind.Direct && c.Address.AddressFamily == AddressFamily.InterNetwork)
+            .Where(c => c.Kind == CandidateKind.Direct)
             .Select(c => c.Address.Address)
             .Where(a => !IPAddress.IsLoopback(a))
             .Distinct()
@@ -110,7 +110,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// <summary>Asks the local link for pinhole nodes and collects who answers during the
     /// window (both query responses and unsolicited announcements count). Each result is a
     /// dialable peer — v2 strings carrying the announcer's static key when it runs
-    /// encryption, so discovered sessions are man-in-the-middle proof like any other.
+    /// encryption. The handshake proves possession of that key; authenticate a device's
+    /// identity separately if the LAN is untrusted. Discovery metadata is not signed.
     /// Needs no node of your own; two queries a second apart cover ordinary loss.</summary>
     public static async Task<IReadOnlyList<LanPeer>> DiscoverLanPeersAsync(TimeSpan window, CancellationToken ct = default)
     {

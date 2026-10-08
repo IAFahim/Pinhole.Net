@@ -16,11 +16,17 @@ public sealed class LanDiscoveryTests
     /// endpoint, recording everything sent so goodbye/query behavior is observable.</summary>
     private sealed class DirectChannel : ILanChannel
     {
-        public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        public readonly Socket Sock;
         public readonly List<(byte[] Packet, IPEndPoint? To)> Sent = new();
         public IPEndPoint Group = new(IPAddress.Loopback, 1);
 
-        public DirectChannel() => Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        public long LastReceiveIpv6Scope { get; set; }
+        public DirectChannel(AddressFamily family = AddressFamily.InterNetwork)
+        {
+            Sock = new Socket(family, SocketType.Dgram, ProtocolType.Udp);
+            Sock.Bind(new IPEndPoint(family == AddressFamily.InterNetwork ? IPAddress.Loopback : IPAddress.IPv6Loopback, 0));
+            Group = new IPEndPoint(family == AddressFamily.InterNetwork ? IPAddress.Loopback : IPAddress.IPv6Loopback, 1);
+        }
 
         public IPEndPoint Local => (IPEndPoint)Sock.LocalEndPoint!;
 
@@ -42,7 +48,7 @@ public sealed class LanDiscoveryTests
                 return false;
             }
 
-            EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+            EndPoint remote = new IPEndPoint(Sock.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0);
             length = Sock.ReceiveFrom(buffer, ref remote);
             from = (IPEndPoint)remote;
             return true;
@@ -105,7 +111,7 @@ public sealed class LanDiscoveryTests
     {
         using var side = new DirectChannel();
         using var announcer = new LanDiscovery(
-            side, 0x1122334455667788, RandomNumberGenerator.GetBytes(32), () => [IPAddress.Any], 1, NatHint.Unknown);
+            side, 0x1122334455667788, RandomNumberGenerator.GetBytes(32), () => [IPAddress.Parse("192.168.1.5")], 1, NatHint.Unknown);
         await TestPoll.UntilAsync(Timeout, () =>
         {
             lock (side.Sent) { return side.Sent.Count >= 3; }
@@ -190,6 +196,116 @@ public sealed class LanDiscoveryTests
         int pos = owner;
         while (packet[pos] != 0) pos += 1 + packet[pos];
         return pos + 1 + 10; // root label + type/class/ttl/rdlength, rdata starts here
+    }
+
+    [Fact]
+    public async Task Ipv6OnlyAnnouncement_BrowsesAndDialsEncryptedOverIpv6()
+    {
+        Assert.True(Socket.OSSupportsIPv6);
+        using var side = new DirectChannel(AddressFamily.InterNetworkV6);
+        using var browser = new DirectChannel(AddressFamily.InterNetworkV6);
+        side.Group = browser.Local;
+        browser.Group = side.Local;
+        var options = new PinholeOptions
+        {
+            Bind = new IPEndPoint(IPAddress.IPv6Loopback, 0),
+            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
+            ReceiveBufferCapacity = 4,
+        };
+        await using var listener = await PinholeNode.BindAsync(options);
+        await using var dialer = await PinholeNode.BindAsync(options);
+        using var announcer = new LanDiscovery(side, listener.PeerId, listener.StaticPublicKey,
+            () => [IPAddress.IPv6Loopback], listener.LocalPort, NatHint.Unknown);
+        LanPeer peer = Assert.Single(await LanDiscovery.BrowseAsync(browser, TimeSpan.FromSeconds(1.2), CancellationToken.None));
+        Assert.Equal(IPAddress.IPv6Loopback, Assert.Single(peer.Endpoints).Address);
+        Task<PinholeConnection> accept = listener.AcceptAsync();
+        await using var outgoing = await dialer.ConnectAsync(peer.ToConnectionString().ToString()).WaitAsync(Timeout);
+        await using var incoming = await accept.WaitAsync(Timeout);
+        Assert.True(outgoing.IsEncrypted);
+        Assert.Equal(PathKind.Direct, outgoing.Path.Kind);
+        Assert.NotNull(outgoing.Path.Remote);
+        Assert.Equal(AddressFamily.InterNetworkV6, outgoing.Path.Remote.AddressFamily);
+        outgoing.Send([42, 73]);
+        ReadOnlyMemory<byte>? received = await incoming.ReceiveAsync().AsTask().WaitAsync(Timeout);
+        Assert.NotNull(received);
+        Assert.Equal(new byte[] { 42, 73 }, received.Value.ToArray());
+    }
+
+    [Fact]
+    public async Task Browse_MergesBothFamiliesAndScopesLinkLocal_WithoutReplacingTheKey()
+    {
+        using var sender = new DirectChannel();
+        using var browser = new DirectChannel { LastReceiveIpv6Scope = 42 };
+        sender.Group = browser.Local;
+        browser.Group = sender.Local;
+        byte[] key = RandomNumberGenerator.GetBytes(32);
+        const ulong id = 0x1234567812345678;
+        sender.Send(Announcement(id, key, IPAddress.Parse("192.168.4.2")), null);
+        sender.Send(Announcement(id, key, IPAddress.Parse("fe80::beef")), null);
+        sender.Send(Announcement(id, key, IPAddress.Parse("2001:db8::4")), null);
+        sender.Send(Announcement(id, RandomNumberGenerator.GetBytes(32), IPAddress.Parse("192.168.4.99")), null);
+        LanPeer found = Assert.Single(await LanDiscovery.BrowseAsync(browser, TimeSpan.FromMilliseconds(250), CancellationToken.None));
+        Assert.Equal(key, found.StaticKey);
+        Assert.Equal(3, found.Endpoints.Count);
+        Assert.Contains(found.Endpoints, ep => ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 42);
+        Assert.DoesNotContain(found.Endpoints, ep => ep.Address.Equals(IPAddress.Parse("192.168.4.99")));
+        Assert.All(ConnectionString.Parse(found.ToConnectionString().ToString()).Candidates.Where(c => c.Address.Address.IsIPv6LinkLocal),
+            c => Assert.Equal(0, c.Address.Address.ScopeId)); // local scope never goes in a ticket
+    }
+
+    private static byte[] Announcement(ulong id, byte[] key, IPAddress address)
+    {
+        var w = new DnsCodec.Writer();
+        string instance = LanDiscovery.IdText(id);
+        w.Header(0x8400, 0, 4, 0, 0);
+        w.WritePtr(LanDiscovery.Service, instance, 120);
+        w.WriteSrv(LanDiscovery.Service, instance, LanDiscovery.HostOf(id), 7777, 120);
+        w.WriteTxt(LanDiscovery.Service, instance, [("key", Convert.ToHexString(key))], 120);
+        w.WriteAddress(LanDiscovery.HostOf(id), address, 120);
+        return w.ToArray();
+    }
+
+    [Fact]
+    public void AnnouncementLimit_KeepsIpv6AndLinkLocalDespiteManyIpv4Addresses()
+    {
+        IPAddress[] input = Enumerable.Range(1, 8).Select(i => IPAddress.Parse($"10.0.0.{i}"))
+            .Concat([IPAddress.Parse("2001:db8::1"), IPAddress.Parse("fe80::2%7")]).ToArray();
+        IReadOnlyList<IPAddress> selected = LanDiscovery.AnnouncementAddresses(input);
+        Assert.Equal(4, selected.Count);
+        Assert.Contains(IPAddress.Parse("2001:db8::1"), selected);
+        Assert.Contains(IPAddress.Parse("fe80::2%7"), selected);
+        Assert.Contains(selected, a => a.AddressFamily == AddressFamily.InterNetwork);
+    }
+
+    [Fact]
+    public async Task AddressChanges_AnnouncePromptlyRatherThanWaitingForHeartbeat()
+    {
+        using var side = new DirectChannel();
+        using var sink = new DirectChannel();
+        side.Group = sink.Local;
+        IPAddress[] addresses = [IPAddress.Parse("10.1.0.2")];
+        using var announcer = new LanDiscovery(side, 123, null, () => Volatile.Read(ref addresses), 7070, NatHint.Unknown);
+        await TestPoll.UntilAsync(Timeout, () => { lock (side.Sent) return side.Sent.Count >= 3; });
+        Volatile.Write(ref addresses, [IPAddress.Parse("2001:db8::9")]);
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(6), () =>
+        {
+            lock (side.Sent)
+                return side.Sent.Any(p => DnsCodec.TryParsePeers(p.Packet, out var peers)
+                    && peers.Any(peer => peer.Endpoints.Any(ep => ep.Address.Equals(IPAddress.Parse("2001:db8::9")))));
+        });
+    }
+
+    [Fact]
+    public void Parser_InvalidAddressRecordSizesAndNonUnicast_DoNotYieldDialablePeers()
+    {
+        foreach (IPAddress address in new[] { IPAddress.Any, IPAddress.IPv6Any, IPAddress.Parse("ff02::1"), IPAddress.Parse("224.1.2.3") })
+            Assert.False(DnsCodec.TryParsePeers(Announcement(99, new byte[32], address), out _));
+        byte[] packet = Announcement(99, new byte[32], IPAddress.Parse("2001:db8::1"));
+        // The last AAAA record advertises 15 bytes and supplies exactly that amount.
+        packet[^18] = 0;
+        packet[^17] = 15;
+        Assert.False(DnsCodec.TryParsePeers(packet.AsSpan(0, packet.Length - 1), out _));
     }
 
     [Fact]

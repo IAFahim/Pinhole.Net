@@ -7,7 +7,9 @@ NAT test does not establish an Internet-wide connection success rate.
 The core was reviewed from `0ce33ae`; the Kotlin implementation was reviewed from
 OpusVoice `d804a58`. The PCP correction described below is part of this audit.
 The defaults below include the subsequent discovery-default change tracked in
-[#39](https://github.com/IAFahim/Pinhole.Net/issues/39).
+[#39](https://github.com/IAFahim/Pinhole.Net/issues/39), phone router mapping
+[#2](https://github.com/IAFahim/OpusVoice/issues/2), and dual-family LAN discovery
+[#41](https://github.com/IAFahim/Pinhole.Net/issues/41).
 
 ## Implemented methods and their defaults
 
@@ -17,10 +19,10 @@ The defaults below include the subsequent discovery-default change tracked in
 | IPv6 link-local addresses | Enabled by default; bounded LAN interface scopes | Enabled on Wi-Fi/Ethernet scopes; omitted on mobile-only links |
 | Same-socket STUN against several servers | Enabled by default; refresh every minute | Enabled by default; refresh every minute and after host address changes |
 | Simultaneous UDP attempts and observed peer addresses | Authenticated handshake replies and direct path confirmation | Initial probes, reverse punch replies, and authenticated path confirmation |
-| Automatic PCP / NAT-PMP / UPnP mapping | Enabled by default; PCP corrected during this audit | Not implemented |
+| Automatic PCP / NAT-PMP / UPnP mapping | Enabled by default; PCP corrected during this audit | Enabled by default with Android OS-route gateways; lease renewal/release and authenticated candidate updates |
 | Introduction through iroh HTTPS relay | Enabled by default; direct upgrade attempts continue after a relayed session starts | Supported when the peer supplies relay addresses; direct probes continue while relayed |
 | Candidate updates and direct recovery | Announcements, STUN refresh, network watch, lookup hooks, and path validation | Announcements, host/STUN refresh, keepalive, and path recovery; fewer roaming capabilities than the core |
-| LAN discovery without ticket exchange | IPv4 mDNS announcements enabled by default; explicit opt-out available | Not integrated |
+| LAN discovery without ticket exchange | IPv4/IPv6 mDNS on active multicast interfaces, enabled by default; explicit opt-out available | Not integrated |
 | Stable identity and signed address lookup | Native publishing and direct-address publishing enabled by default; persist a seed for restart identity | Resolves signed native IDs/tickets; no equivalent general listener/publisher API |
 | Configured TURN relay | Supported with operator credentials; no TURN default | TURN candidates are not supported |
 | Direct TCP transport | Not implemented | Not implemented |
@@ -28,7 +30,7 @@ The defaults below include the subsequent discovery-default change tracked in
 Core references: [options](../src/Pinhole/PinholeOptions.cs),
 [engine](../src/Pinhole/NodeEngine.cs), [node](../src/Pinhole/PinholeNode.cs),
 [port mapping](../src/Pinhole/PortMappingService.cs).
-Phone reference: [PinholeDialer.kt at the audited revision](https://github.com/IAFahim/OpusVoice/blob/d804a58e92f0326fed5aea3b5c3b006520b382db/pinhole/src/main/kotlin/pinhole/PinholeDialer.kt).
+Phone reference: [PinholeDialer.kt with automatic router mapping](https://github.com/IAFahim/OpusVoice/blob/affd577e7d013a824116e2a9d2f1e755c0cb87af/pinhole/src/main/kotlin/pinhole/PinholeDialer.kt).
 
 LAN discovery makes nearby peers discoverable; it does not traverse Internet NAT.
 Keepalive and PMTU discovery preserve and tune an existing path. They do not create
@@ -69,10 +71,13 @@ Test reference: [PcpClientTests](../tests/Pinhole.Tests/PcpClientTests.cs).
    report blocked reachability clearly. Router mapping does not grant host
    firewall permission. Port 53317 is evidence from this machine, not a universal
    library default.
-2. **Bring router mapping to the Kotlin implementation.** A supported home router
-   could make the phone reachable even if its peer's mapping is difficult. The
-   phone currently omits all three mapping protocols. A mobile carrier may expose
-   none of these services, so adding them must tolerate refusal or silence.
+2. **Router mapping in the Kotlin implementation: implemented.** PCP, NAT-PMP,
+   and UPnP now run in the background using Android OS routes and the audio socket's
+   port, with renewal, expiry withdrawal, network-change handling, and release.
+   The interop case checks the authenticated candidate at the .NET peer. A mobile
+   carrier may expose none of these services; refusal or silence contributes no
+   mapping and never prevents session establishment. See
+   [OpusVoice #2](https://github.com/IAFahim/OpusVoice/issues/2).
 3. **Add direct TCP candidates and reverse initiation.** Try TCP as an additional
    authenticated route where UDP is blocked but a peer can accept TCP. More
    advanced simultaneous-open can be considered after platform testing. This

@@ -101,8 +101,12 @@ addresses. Publication makes the advertised IPs retrievable by anyone holding th
 endpoint ID. `Encryption = Disabled` also requires `PublishIrohAddress = false`;
 signed Pinhole discovery cannot bind a plaintext session key.
 
-LAN announcements use IPv4 mDNS today; native signed records and tickets can carry
-both IPv4 and IPv6 candidates. Application-supplied lookup providers and rendezvous
+LAN announcements and browsing use IPv4 and IPv6 mDNS on active multicast
+interfaces. Link-local IPv6 results use the receiving interface's scope. LAN
+metadata is unsigned: the encrypted handshake proves possession of the discovered
+key, while a trusted ticket or another app-level check establishes device identity.
+Native signed records and tickets also carry both address families.
+Application-supplied lookup providers and rendezvous
 servers still need configuration. Discovery failures are tolerated and publication
 retries in the background. More candidates improve the available direct attempts;
 they do not guarantee a direct route through every NAT or host firewall.

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 
@@ -21,7 +22,8 @@ public sealed record LanPeer(ulong PeerId, IReadOnlyList<IPEndPoint> Endpoints, 
 /// link (RFC 6762/6763 subset) and browses for peers doing the same — how two machines on
 /// one LAN find each other with no server at all. The announcement carries the peer ID,
 /// the static public key, the NAT hint, and the local addresses: everything a dialer needs
-/// to build a v2 connection string, authenticated by the same key pinning as any other.
+/// to build a v2 connection string. The handshake proves possession of the advertised
+/// key; the announcement itself is untrusted discovery, not a verified device identity.
 /// Production traffic rides the mDNS multicast group; tests inject a direct channel.</summary>
 internal sealed class LanDiscovery : IDisposable
 {
@@ -39,6 +41,7 @@ internal sealed class LanDiscovery : IDisposable
     private readonly NatHint _hint;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _loop;
+    private int _disposed;
 
     public LanDiscovery(ILanChannel channel, ulong peerId, byte[]? staticKey, Func<IReadOnlyList<IPAddress>> addresses, int port, NatHint hint)
     {
@@ -66,6 +69,8 @@ internal sealed class LanDiscovery : IDisposable
         }
 
         long nextHeartbeat = Environment.TickCount64 + HeartbeatMs;
+        long nextAddressCheck = Environment.TickCount64 + 2_000;
+        string addressSet = AddressSet();
         byte[] buf = new byte[1500];
         while (!ct.IsCancellationRequested)
         {
@@ -79,7 +84,15 @@ internal sealed class LanDiscovery : IDisposable
                     }
                 }
 
-                if (Environment.TickCount64 >= nextHeartbeat)
+                bool changed = false;
+                if (Environment.TickCount64 >= nextAddressCheck)
+                {
+                    nextAddressCheck = Environment.TickCount64 + 2_000;
+                    string current = AddressSet();
+                    changed = current != addressSet;
+                    addressSet = current;
+                }
+                if (changed || Environment.TickCount64 >= nextHeartbeat)
                 {
                     nextHeartbeat = Environment.TickCount64 + HeartbeatMs;
                     SendAnnouncement(RecordTtl);
@@ -96,7 +109,7 @@ internal sealed class LanDiscovery : IDisposable
     /// address — as one mDNS response. TTL 0 makes the same packet the goodbye.</summary>
     private void SendAnnouncement(uint ttl, IPEndPoint? unicastTo = null)
     {
-        IReadOnlyList<IPAddress> addresses = _addresses();
+        IReadOnlyList<IPAddress> addresses = AnnouncementAddresses(_addresses());
         string instance = IdText(_peerId);
         string host = instance + HostSuffix;
 
@@ -129,6 +142,7 @@ internal sealed class LanDiscovery : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _shutdown.Cancel();
         try
         {
@@ -140,6 +154,28 @@ internal sealed class LanDiscovery : IDisposable
         _channel.Dispose();
     }
 
+    private string AddressSet() => string.Join(",", _addresses().Select(a => a.ToString()).Order(StringComparer.Ordinal));
+
+    /// <summary>Reserve room for both families and link-local fallback before filling
+    /// the remaining slots. A machine with many IPv4/VPN addresses must not lose IPv6.</summary>
+    internal static IReadOnlyList<IPAddress> AnnouncementAddresses(IReadOnlyList<IPAddress> addresses)
+    {
+        var all = addresses.Distinct().ToArray();
+        var selected = new List<IPAddress>(MaxAddresses);
+        foreach (IPAddress? ip in new[]
+        {
+            all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork),
+            all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6 && !a.IsIPv6LinkLocal),
+            all.FirstOrDefault(a => a.IsIPv6LinkLocal),
+        })
+        {
+            if (ip is not null && !selected.Contains(ip)) selected.Add(ip);
+        }
+        foreach (IPAddress ip in all)
+            if (selected.Count < MaxAddresses && !selected.Contains(ip)) selected.Add(ip);
+        return selected;
+    }
+
     // ------------------------------------------------------------------ browsing
 
     /// <summary>Asks the link who else is a pinhole node and collects answers for one
@@ -148,11 +184,16 @@ internal sealed class LanDiscovery : IDisposable
     public static async Task<IReadOnlyList<LanPeer>> BrowseAsync(ILanChannel channel, TimeSpan window, CancellationToken ct)
     {
         byte[] query = BuildQuery();
-        _ = Task.Run(() =>
+        using var queriesStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task queries = Task.Run(async () =>
         {
-            channel.Send(query, null);
-            Thread.Sleep(1000);
-            try { channel.Send(query, null); } catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }
+            try
+            {
+                channel.Send(query, null);
+                await Task.Delay(1000, queriesStop.Token).ConfigureAwait(false);
+                channel.Send(query, null);
+            }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException) { }
         }, CancellationToken.None);
 
         var peers = new Dictionary<ulong, LanPeer>();
@@ -163,12 +204,20 @@ internal sealed class LanDiscovery : IDisposable
             long remaining = deadline - Environment.TickCount64;
             try
             {
-                if (channel.TryReceive(buf, out int len, out _, (int)Math.Clamp(remaining, 1, 500))
+                if (channel.TryReceive(buf, out int len, out IPEndPoint from, (int)Math.Clamp(remaining, 1, 500))
                     && DnsCodec.TryParsePeers(buf.AsSpan(0, len), out IReadOnlyList<LanPeer> found))
                 {
                     foreach (LanPeer peer in found)
                     {
-                        peers.TryAdd(peer.PeerId, peer);
+                        LanPeer scoped = ScopePeer(peer, channel.LastReceiveIpv6Scope > 0
+                            ? channel.LastReceiveIpv6Scope
+                            : from.Address.AddressFamily == AddressFamily.InterNetworkV6 ? from.Address.ScopeId : 0);
+                        if (!peers.TryGetValue(peer.PeerId, out LanPeer? existing))
+                        {
+                            if (peers.Count < 256) peers.Add(peer.PeerId, scoped);
+                        }
+                        else if (KeysEqual(existing.StaticKey, scoped.StaticKey))
+                            peers[peer.PeerId] = existing with { Endpoints = existing.Endpoints.Concat(scoped.Endpoints).Distinct().Take(16).ToArray() };
                     }
                 }
             }
@@ -178,8 +227,18 @@ internal sealed class LanDiscovery : IDisposable
             }
         }
 
+        queriesStop.Cancel();
+        await queries.ConfigureAwait(false);
         return peers.Values.ToArray();
     }
+
+    internal static LanPeer ScopePeer(LanPeer peer, long scope) => scope <= 0 ? peer : peer with
+    {
+        Endpoints = peer.Endpoints.Select(ep => ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0
+            ? new IPEndPoint(new IPAddress(ep.Address.GetAddressBytes(), scope), ep.Port) : ep).ToArray(),
+    };
+
+    private static bool KeysEqual(byte[]? left, byte[]? right) => left is null ? right is null : right is not null && left.AsSpan().SequenceEqual(right);
 
     private static byte[] BuildQuery()
     {
@@ -213,57 +272,206 @@ internal interface ILanChannel : IDisposable
 
     /// <summary>Receives one datagram if any arrives within the timeout.</summary>
     bool TryReceive(byte[] buffer, out int length, out IPEndPoint from, int timeoutMs);
+
+    /// <summary>The local IPv6 interface index for the last received packet, including
+    /// IPv4 packets carrying AAAA records. Zero when the channel cannot determine it.</summary>
+    long LastReceiveIpv6Scope => 0;
 }
 
-/// <summary>The production channel: one UDP socket on the mDNS port joined to the
-/// link-scope multicast group. Multiple processes share the port (SO_REUSEADDR), as the
-/// RFC requires; 224.0.0.251 is never forwarded by routers, so announcements stay on the
-/// local link by construction.</summary>
+/// <summary>Shared-port IPv4 and IPv6 mDNS sockets, joined on each active multicast
+/// interface. An unavailable family or membership does not disable the others.</summary>
 internal sealed class MulticastLanChannel : ILanChannel
 {
     public static readonly IPEndPoint GroupV4 = new(IPAddress.Parse("224.0.0.251"), 5353);
+    public static readonly IPEndPoint GroupV6 = new(IPAddress.Parse("ff02::fb"), 5353);
+    internal sealed record Interface(IPAddress? V4, int V4Index, int V6Index);
+    private readonly object _gate = new();
+    private readonly Socket? _v4, _v6;
+    private readonly Func<IReadOnlyList<Interface>> _interfaces;
+    private readonly IPEndPoint _groupV4, _groupV6;
+    private readonly HashSet<IPAddress> _joinedV4 = [];
+    private readonly HashSet<int> _joinedV6 = [];
+    private IReadOnlyList<Interface> _current = [];
+    private long _nextRefresh;
+    private int _dirty = 1, _disposed;
+    public long LastReceiveIpv6Scope { get; private set; }
 
-    private readonly Socket _socket;
+    public MulticastLanChannel() : this(ReadInterfaces, GroupV4, GroupV6) { }
 
-    public MulticastLanChannel()
+    // Alternate endpoints/port let tests exercise the production dual-socket receive
+    // path using actual loopback UDP, without multicast availability in hosted runners.
+    internal MulticastLanChannel(Func<IReadOnlyList<Interface>> interfaces, IPEndPoint groupV4, IPEndPoint groupV6, int? bindPort = null)
     {
-        _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        _interfaces = interfaces;
+        _groupV4 = groupV4;
+        _groupV6 = groupV6;
+        _v4 = Bind(AddressFamily.InterNetwork, bindPort ?? groupV4.Port);
+        _v6 = Bind(AddressFamily.InterNetworkV6, bindPort ?? groupV6.Port);
+        if (_v4 is null && _v6 is null) throw new SocketException((int)SocketError.NetworkUnreachable);
+        RefreshInterfaces();
+        NetworkChange.NetworkAddressChanged += OnAddressChanged;
+    }
+
+    internal IPEndPoint? LocalV4 => (IPEndPoint?)_v4?.LocalEndPoint;
+    internal IPEndPoint? LocalV6 => (IPEndPoint?)_v6?.LocalEndPoint;
+
+    private static Socket? Bind(AddressFamily family, int port)
+    {
+        Socket? socket = null;
         try
         {
-            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _socket.MulticastLoopback = true; // hearing ourselves is harmless — peers dedupe by id
-            _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
-            _socket.Bind(new IPEndPoint(IPAddress.Any, 5353));
-            _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(GroupV4.Address));
+            socket = new Socket(family, SocketType.Dgram, ProtocolType.Udp);
+            if (family == AddressFamily.InterNetworkV6) socket.DualMode = false;
+            var level = family == AddressFamily.InterNetwork ? SocketOptionLevel.IP : SocketOptionLevel.IPv6;
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            socket.MulticastLoopback = true;
+            socket.SetSocketOption(level, SocketOptionName.MulticastTimeToLive, 255);
+            socket.SetSocketOption(level, SocketOptionName.PacketInformation, true);
+            socket.Bind(new IPEndPoint(family == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, port));
+            return socket;
         }
-        catch
+        catch (Exception ex) when (ex is SocketException or NotSupportedException)
         {
-            _socket.Dispose();
-            throw;
+            socket?.Dispose();
+            return null;
+        }
+    }
+
+    private void OnAddressChanged(object? sender, EventArgs e) => Interlocked.Exchange(ref _dirty, 1);
+
+    internal void RefreshInterfaces(bool force = false)
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            if (Interlocked.Exchange(ref _dirty, 0) == 0 && !force && Environment.TickCount64 < _nextRefresh) return;
+            _nextRefresh = Environment.TickCount64 + 5_000;
+            try { _current = _interfaces().Distinct().Take(32).ToArray(); }
+            catch (NetworkInformationException) { return; }
+            var v4 = _current.Where(i => i.V4 is not null).Select(i => i.V4!).ToHashSet();
+            var v6 = _current.Where(i => i.V6Index > 0).Select(i => i.V6Index).ToHashSet();
+            if (_v4 is not null)
+            {
+                foreach (IPAddress ip in _joinedV4.Except(v4).ToArray())
+                {
+                    try { _v4.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership, new MulticastOption(GroupV4.Address, ip)); } catch (SocketException) { }
+                    _joinedV4.Remove(ip);
+                }
+                foreach (IPAddress ip in v4.Except(_joinedV4))
+                {
+                    try { _v4.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(GroupV4.Address, ip)); _joinedV4.Add(ip); } catch (SocketException) { }
+                }
+            }
+            if (_v6 is not null)
+            {
+                foreach (int index in _joinedV6.Except(v6).ToArray())
+                {
+                    try { _v6.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.DropMembership, new IPv6MulticastOption(GroupV6.Address, index)); } catch (SocketException) { }
+                    _joinedV6.Remove(index);
+                }
+                foreach (int index in v6.Except(_joinedV6))
+                {
+                    try { _v6.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.AddMembership, new IPv6MulticastOption(GroupV6.Address, index)); _joinedV6.Add(index); } catch (SocketException) { }
+                }
+            }
         }
     }
 
     public void Send(ReadOnlySpan<byte> packet, IPEndPoint? unicastTo)
     {
-        _socket.SendTo(packet, SocketFlags.None, unicastTo ?? GroupV4);
+        RefreshInterfaces();
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            if (unicastTo is not null)
+            {
+                Socket? target = unicastTo.AddressFamily == AddressFamily.InterNetwork ? _v4 : _v6;
+                target?.SendTo(packet, SocketFlags.None, unicastTo);
+                return;
+            }
+            foreach (IPAddress ip in _joinedV4)
+            {
+                try
+                {
+                    _v4!.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, ip.GetAddressBytes());
+                    _v4.SendTo(packet, SocketFlags.None, _groupV4);
+                }
+                catch (SocketException) { } // one failed route cannot suppress other links
+            }
+            foreach (int index in _joinedV6)
+            {
+                try
+                {
+                    _v6!.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.MulticastInterface, index);
+                    _v6.SendTo(packet, SocketFlags.None, new IPEndPoint(new IPAddress(_groupV6.Address.GetAddressBytes(), index), _groupV6.Port));
+                }
+                catch (SocketException) { }
+            }
+        }
     }
 
     public bool TryReceive(byte[] buffer, out int length, out IPEndPoint from, int timeoutMs)
     {
-        if (!_socket.Poll(timeoutMs * 1000, SelectMode.SelectRead))
-        {
-            length = 0;
-            from = new IPEndPoint(IPAddress.Any, 0);
-            return false;
-        }
-
-        EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-        length = _socket.ReceiveFrom(buffer, ref remote);
+        RefreshInterfaces();
+        var readable = new List<Socket>(2);
+        if (_v4 is not null) readable.Add(_v4);
+        if (_v6 is not null) readable.Add(_v6);
+        Socket.Select(readable, null, null, (int)Math.Clamp((long)timeoutMs * 1000, 0, int.MaxValue));
+        length = 0;
+        from = new IPEndPoint(IPAddress.Any, 0);
+        LastReceiveIpv6Scope = 0;
+        if (readable.Count == 0) return false;
+        Socket socket = readable[0];
+        EndPoint remote = new IPEndPoint(socket.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0);
+        SocketFlags flags = SocketFlags.None;
+        length = socket.ReceiveMessageFrom(buffer, 0, buffer.Length, ref flags, ref remote, out IPPacketInformation info);
         from = (IPEndPoint)remote;
+        if (socket.AddressFamily == AddressFamily.InterNetworkV6) LastReceiveIpv6Scope = info.Interface;
+        else
+        {
+            lock (_gate) LastReceiveIpv6Scope = _current.FirstOrDefault(i => i.V4Index == info.Interface)?.V6Index ?? 0;
+        }
+        if (from.Address.IsIPv6LinkLocal && from.Address.ScopeId == 0 && LastReceiveIpv6Scope > 0)
+            from = new IPEndPoint(new IPAddress(from.Address.GetAddressBytes(), LastReceiveIpv6Scope), from.Port);
+        if ((flags & SocketFlags.Truncated) != 0) { length = 0; return false; }
         return true;
     }
 
-    public void Dispose() => _socket.Dispose();
+    internal static IReadOnlyList<Interface> ReadInterfaces()
+    {
+        var interfaces = new List<Interface>();
+        try
+        {
+            foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up || !nic.SupportsMulticast || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                try
+                {
+                    IPInterfaceProperties properties = nic.GetIPProperties();
+                    int v4 = nic.Supports(NetworkInterfaceComponent.IPv4) ? properties.GetIPv4Properties()?.Index ?? 0 : 0;
+                    int v6 = nic.Supports(NetworkInterfaceComponent.IPv6) ? properties.GetIPv6Properties()?.Index ?? 0 : 0;
+                    var addresses = properties.UnicastAddresses.Select(a => a.Address)
+                        .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a) && !a.Equals(IPAddress.Any)).ToArray();
+                    if (addresses.Length == 0 && v6 > 0) interfaces.Add(new Interface(null, v4, v6));
+                    foreach (IPAddress address in addresses) interfaces.Add(new Interface(address, v4, v6));
+                }
+                catch (NetworkInformationException) { }
+            }
+        }
+        catch (NetworkInformationException) { }
+        return interfaces;
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            NetworkChange.NetworkAddressChanged -= OnAddressChanged;
+            _v4?.Dispose();
+            _v6?.Dispose();
+        }
+    }
 }
 
 /// <summary>Strict, minimal DNS wire codec: one PTR question out, the pinhole record set
@@ -535,7 +743,8 @@ internal static class DnsCodec
         for (int i = 0; i < records.Count; i++)
         {
             if (owners[i].Equals(target, StringComparison.OrdinalIgnoreCase)
-                && records[i].Type is TypeA or TypeAaaa)
+                && (records[i].Type == TypeA && records[i].RdataLength == 4
+                    || records[i].Type == TypeAaaa && records[i].RdataLength == 16))
             {
                 hostAddresses.Add(packet.Slice(records[i].RdataStart, records[i].RdataLength).ToArray());
             }
@@ -571,7 +780,10 @@ internal static class DnsCodec
             staticKey = Convert.FromHexString(keyHex);
         }
 
-        var endpoints = hostAddresses.Select(a => new IPEndPoint(new IPAddress(a), port)).ToList();
+        var endpoints = hostAddresses.Select(a => new IPAddress(a))
+            .Where(a => !a.Equals(IPAddress.Any) && !a.Equals(IPAddress.IPv6Any) && !a.IsIPv6Multicast
+                && !(a.AddressFamily == AddressFamily.InterNetwork && a.GetAddressBytes()[0] is >= 224))
+            .Distinct().Take(16).Select(a => new IPEndPoint(a, port)).ToList();
         return endpoints.Count == 0 ? null : new LanPeer(ulong.Parse(instance, System.Globalization.NumberStyles.HexNumber), endpoints, hint, staticKey);
     }
 
