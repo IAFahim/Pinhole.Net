@@ -490,6 +490,13 @@ internal sealed class NodeEngine : IDisposable
     {
         var seen = new HashSet<IPAddress>();
         var list = new List<IPEndPoint>();
+        // Link-locals are collected separately and appended last: they are a fallback for
+        // access networks that isolate IPv4 between wireless and wired clients but bridge
+        // IPv6. Only radio/ethernet links qualify (tunnels and bridges on macOS/Windows
+        // runners would flood the candidate list and crowd out routable addresses), and
+        // at most two ride along. Scope stays local — peers re-scope onto their own
+        // outgoing interface when sending, so the address rides the wire bare.
+        var linkLocal = new List<(int Rank, IPEndPoint EndPoint)>();
         try
         {
             foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
@@ -502,12 +509,17 @@ internal sealed class NodeEngine : IDisposable
                 foreach (UnicastIPAddressInformation addr in nic.GetIPProperties().UnicastAddresses)
                 {
                     IPAddress ip = addr.Address;
-                    // Link-locals ARE advertised: on access networks that isolate IPv4 between
-                    // wireless and wired clients (but bridge IPv6) they are the only direct path.
-                    // Scope stays local — peers re-scope onto their own outgoing interface when
-                    // sending, so the address rides the wire bare.
                     if (ip.IsIPv6Teredo || ip.Equals(IPAddress.IPv6Any) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Loopback))
                     {
+                        continue;
+                    }
+
+                    if (ip.IsIPv6LinkLocal)
+                    {
+                        if (nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet)
+                        {
+                            linkLocal.Add((nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? 0 : 1, new IPEndPoint(ip, port)));
+                        }
                         continue;
                     }
 
@@ -525,6 +537,15 @@ internal sealed class NodeEngine : IDisposable
         }
         catch (NetworkInformationException)
         {
+        }
+
+        foreach (IPEndPoint ep in linkLocal.OrderBy(t => t.Rank).Take(2).Select(t => t.EndPoint))
+        {
+            if (list.Count >= 8) break;
+            if (seen.Add(ep.Address))
+            {
+                list.Add(ep);
+            }
         }
 
         return list;
