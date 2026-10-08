@@ -41,17 +41,41 @@ jobs:
           -c Release --filter "Category!=Performance"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
-      - name: Run throughput floors without competing test workloads
-        run: >
-          dotnet test tests/Pinhole.Tests -c Release --no-build
-          --filter "Category=Performance"
-          --logger trx --logger "console;verbosity=detailed"
-          -- xUnit.MaxParallelThreads=1
       - name: Upload test results (hang diagnostics)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: testresults-${{ matrix.os }}
+          path: tests/Pinhole.Tests/TestResults/
+          retention-days: 5
+
+  performance:
+    name: throughput-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Use a fresh runner for the throughput gates. On macOS the same code measured
+    # 107–164 KiB/s after the full suite, versus 929–936 KiB/s for both the previous
+    # and current commits on an isolated runner. Keep the absolute floors intact.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run throughput floors without functional-test workloads
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release
+          --filter "Category=Performance"
+          --logger trx --logger "console;verbosity=detailed"
+          -- xUnit.MaxParallelThreads=1
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ matrix.os }}
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 
