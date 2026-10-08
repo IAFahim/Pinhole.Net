@@ -271,14 +271,29 @@ public sealed class ResilienceTests
         // Migrate B: a forced rebind gives it a fresh port, so the direct endpoint changes —
         // a path migration. The confirmed MTU belonged to the old endpoint and must be
         // forgotten, then re-earned on the new path.
+        // Capture the reset at the Open transition: the engine invokes it under the
+        // connection lock, before a PMTU reply can raise the floor again. Polling for the
+        // transient floor after awaiting the rebind can miss it on a busy CI runner.
+        var reopenedMtu = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void ObserveReopen(PinholeConnectionState state)
+        {
+            if (state == PinholeConnectionState.Open) reopenedMtu.TrySetResult(atB.PathMtu);
+        }
+        atB.StateChanged += ObserveReopen;
         int oldPort = nodeB.LocalPort;
-        await nodeB.Engine.SimulateInterfaceLossAsync();
-        Assert.NotEqual(oldPort, nodeB.LocalPort);
-        await TestPoll.UntilAsync(TimeSpan.FromSeconds(20),
-            () => atB.State == PinholeConnectionState.Open && atB.PathMtu == floor);
-        await TestPoll.UntilAsync(TimeSpan.FromSeconds(30), () => atB.PathMtu > floor);
-        Assert.True(await ExchangeUntilAsync(atB, atA, "after the migration", Settle));
-        _output.WriteLine($"migration reset the climb ({oldPort} -> {nodeB.LocalPort}) and re-climbed");
+        try
+        {
+            await nodeB.Engine.SimulateInterfaceLossAsync();
+            Assert.NotEqual(oldPort, nodeB.LocalPort);
+            Assert.Equal(floor, await reopenedMtu.Task.WaitAsync(TimeSpan.FromSeconds(20)));
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(30), () => atB.PathMtu > floor);
+            Assert.True(await ExchangeUntilAsync(atB, atA, "after the migration", Settle));
+            _output.WriteLine($"migration reset the climb ({oldPort} -> {nodeB.LocalPort}) and re-climbed");
+        }
+        finally
+        {
+            atB.StateChanged -= ObserveReopen;
+        }
     }
 
     // ------------------------------------------------------------------ terminal semantics
