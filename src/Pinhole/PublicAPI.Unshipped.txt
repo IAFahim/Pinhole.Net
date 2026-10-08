@@ -359,3 +359,5 @@ Pinhole.PinholeOptions.PublishDirectIrohAddresses.get -> bool
 Pinhole.PinholeOptions.PublishDirectIrohAddresses.init -> void
 Pinhole.PinholeOptions.PublishIrohAddress.get -> bool
 Pinhole.PinholeOptions.PublishIrohAddress.init -> void
+Pinhole.PinholeOptions.AdvertiseLinkLocal.get -> bool
+Pinhole.PinholeOptions.AdvertiseLinkLocal.init -> void

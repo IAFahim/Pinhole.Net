@@ -452,7 +452,7 @@ internal sealed class NodeEngine : IDisposable
         int port = LocalPort;
         _localCandidates.Clear();
         _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, port)));
-        foreach (IPEndPoint ep in HostEndpoints(port))
+        foreach (IPEndPoint ep in HostEndpoints(port, _options.AdvertiseLinkLocal))
         {
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
         }
@@ -486,16 +486,16 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private static List<IPEndPoint> HostEndpoints(int port)
+    private static List<IPEndPoint> HostEndpoints(int port, bool advertiseLinkLocal)
     {
         var seen = new HashSet<IPAddress>();
         var list = new List<IPEndPoint>();
-        // Link-locals are collected separately and appended last: they are a fallback for
-        // access networks that isolate IPv4 between wireless and wired clients but bridge
-        // IPv6. Only radio/ethernet links qualify (tunnels and bridges on macOS/Windows
-        // runners would flood the candidate list and crowd out routable addresses), and
-        // at most two ride along. Scope stays local — peers re-scope onto their own
-        // outgoing interface when sending, so the address rides the wire bare.
+        // Link-locals are collected separately and appended last, and only when opted in:
+        // they are a fallback for access networks that isolate IPv4 between wireless and
+        // wired clients but bridge IPv6. Only radio/ethernet links qualify (tunnels and
+        // bridges on macOS/Windows would flood the candidate list), at most two ride along,
+        // wireless first. Scope stays local — peers re-scope onto their own outgoing
+        // interface when sending, so the address rides the wire bare.
         var linkLocal = new List<(int Rank, IPEndPoint EndPoint)>();
         try
         {
@@ -516,7 +516,7 @@ internal sealed class NodeEngine : IDisposable
 
                     if (ip.IsIPv6LinkLocal)
                     {
-                        if (nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet)
+                        if (advertiseLinkLocal && nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet)
                         {
                             linkLocal.Add((nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? 0 : 1, new IPEndPoint(ip, port)));
                         }
@@ -539,12 +539,15 @@ internal sealed class NodeEngine : IDisposable
         {
         }
 
-        foreach (IPEndPoint ep in linkLocal.OrderBy(t => t.Rank).Take(2).Select(t => t.EndPoint))
+        if (advertiseLinkLocal)
         {
-            if (list.Count >= 8) break;
-            if (seen.Add(ep.Address))
+            foreach (IPEndPoint ep in linkLocal.OrderBy(t => t.Rank).Take(2).Select(t => t.EndPoint))
             {
-                list.Add(ep);
+                if (list.Count >= 8) break;
+                if (seen.Add(ep.Address))
+                {
+                    list.Add(ep);
+                }
             }
         }
 
