@@ -87,6 +87,20 @@ public sealed class PortMappingTests
     }
 
     [Fact]
+    public async Task UnsupportedIpv6PcpGateway_StillReachesUpnpFallback()
+    {
+        using var gateway = new FakeGateway(IPAddress.IPv6Loopback) { RefusePcp = true };
+        await using FakeUpnpIgd igd = new();
+        await using PinholeNode node = await PinholeNode.BindAsync(
+            Opts(ssdp: igd.SsdpEndpoint, gateways: [gateway.Endpoint]));
+
+        await UntilAsync(() => node.PortMappedEndpoint is not null, "upnp fallback landed");
+        Assert.Equal(new IPEndPoint(IPAddress.Parse("203.0.113.40"), 55555), node.PortMappedEndpoint);
+        Assert.Contains(igd.Actions, a => a.StartsWith("AddAnyPortMapping"));
+        Assert.DoesNotContain(gateway.Actions, a => a.StartsWith("pmp-"));
+    }
+
+    [Fact]
     public async Task Disabled_NeverProbesTheNetwork()
     {
         using var gateway = new FakeGateway();
@@ -173,9 +187,9 @@ public sealed class FakeGateway : IDisposable
     private readonly byte[] _buf = new byte[1500];
     private readonly byte[] _externalIp = { 203, 0, 113, 66 };
 
-    public FakeGateway()
+    public FakeGateway(IPAddress? bindAddress = null)
     {
-        _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        _udp = new UdpClient(new IPEndPoint(bindAddress ?? IPAddress.Loopback, 0));
         Endpoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
         _ = Task.Run(RunAsync);
     }
@@ -189,6 +203,10 @@ public sealed class FakeGateway : IDisposable
     public bool RefusePmp { get; set; }
 
     public ushort ExternalPort { get; set; } = 44444;
+
+    public IPAddress PcpExternalAddress { get; set; } = IPAddress.Parse("203.0.113.66");
+
+    public ConcurrentQueue<byte[]> PcpRequests { get; } = new();
 
     public ConcurrentQueue<string> Actions { get; } = new();
 
@@ -216,7 +234,7 @@ public sealed class FakeGateway : IDisposable
             {
                 await HandlePmpAsync(d, res.RemoteEndPoint).ConfigureAwait(false);
             }
-            else if (d[0] == 2 && d.Length >= 44)
+            else if (d[0] == 2 && d.Length >= 60)
             {
                 await HandlePcpAsync(d, res.RemoteEndPoint).ConfigureAwait(false);
             }
@@ -269,29 +287,37 @@ public sealed class FakeGateway : IDisposable
 
     private async Task HandlePcpAsync(byte[] d, IPEndPoint from)
     {
-        if (d[1] != 1)
+        // RFC 6887 sections 7.1 and 11.1: a 24-byte common header, then
+        // a 36-byte MAP body. Refuse requests whose claimed client differs
+        // from the source address, as a real PCP server must do.
+        if (d[1] != 1 || d[36] != 17
+            || !d.AsSpan(8, 16).SequenceEqual(from.Address.MapToIPv6().GetAddressBytes()))
         {
-            return; // only MAP is spoken here
+            return;
         }
 
+        PcpRequests.Enqueue(d);
         uint lifetime = BinaryPrimitives.ReadUInt32BigEndian(d.AsSpan(4));
-        byte[] nonce = d[8..20];
-        int internalPort = BinaryPrimitives.ReadUInt16BigEndian(d.AsSpan(24));
+        byte[] nonce = d[24..36];
+        int internalPort = BinaryPrimitives.ReadUInt16BigEndian(d.AsSpan(40));
 
-        byte[] reply = new byte[50];
+        byte[] reply = new byte[RefusePcp ? 24 : 60];
         reply[0] = 2;
         reply[1] = 129;
+        reply[3] = RefusePcp ? (byte)4 : (byte)0; // UNSUPP_OPCODE
         BinaryPrimitives.WriteUInt32BigEndian(reply.AsSpan(4), lifetime);
-        BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(12), RefusePcp ? (ushort)2 : (ushort)0);
-        nonce.CopyTo(reply, 14);
-        reply[26] = 17; // UDP
-        BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(30), (ushort)internalPort);
+        if (RefusePcp)
+        {
+            await _udp.SendAsync(reply, from).ConfigureAwait(false);
+            return;
+        }
+        nonce.CopyTo(reply, 24);
+        reply[36] = 17; // UDP
+        BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(40), (ushort)internalPort);
         if (!RefusePcp)
         {
-            BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(32), ExternalPort);
-            reply[44] = 0xFF;
-            reply[45] = 0xFF; // ::ffff:a.b.c.d: the mapped-v4 marker sits at the field's tail
-            _externalIp.CopyTo(reply, 46);
+            BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(42), ExternalPort);
+            PcpExternalAddress.MapToIPv6().GetAddressBytes().CopyTo(reply, 44);
             Actions.Enqueue(lifetime == 0
                 ? $"pcp-delete int={internalPort}"
                 : $"pcp-map int={internalPort} ext={ExternalPort} life={lifetime}");

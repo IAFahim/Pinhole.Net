@@ -18,71 +18,76 @@ internal static class PcpClient
     public static async Task<PcpMapping?> TryMapAsync(IReadOnlyList<IPEndPoint>? gatewayOverride,
         int internalPort, TimeSpan lease, CancellationToken ct)
     {
-        foreach (IPEndPoint gateway in gatewayOverride ?? GatewayDiscovery.DefaultGateways())
+        foreach (IPEndPoint gateway in gatewayOverride ?? GatewayDiscovery.DefaultGateways(includeIpv6: true))
         {
-            byte[] nonce = RandomNumberGenerator.GetBytes(12);
-            byte[] request = BuildMapRequest(nonce, internalPort, lease);
-            using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-            byte[]? response = await RoundTripAsync(udp, gateway, request, 50, ct).ConfigureAwait(false);
-            if (TryParseMapResponse(response, nonce, out IPEndPoint? external, out uint granted))
+            try
             {
-                return new PcpMapping(gateway, nonce, internalPort, external!,
-                    TimeSpan.FromSeconds(Math.Max(1, granted)));
+                byte[] nonce = RandomNumberGenerator.GetBytes(12);
+                using var udp = new UdpClient(gateway.AddressFamily);
+                udp.Connect(gateway);
+                // Connecting selects the actual source address and pins replies to this
+                // gateway. RFC 6887 section 16.4 requires that source in the header.
+                byte[] request = BuildMapRequest(nonce, ((IPEndPoint)udp.Client.LocalEndPoint!).Address, internalPort, lease);
+                byte[]? response = await RoundTripAsync(udp, request, ct).ConfigureAwait(false);
+                if (TryParseMapResponse(response, request, out IPEndPoint? external, out uint granted))
+                {
+                    return new PcpMapping(gateway, nonce, internalPort, external!, TimeSpan.FromSeconds(granted));
+                }
+            }
+            catch (SocketException)
+            {
+                // An unavailable interface must not hide a mapping on another gateway.
             }
         }
 
         return null;
     }
 
-    private static byte[] BuildMapRequest(byte[] nonce, int internalPort, TimeSpan lease)
+    internal static byte[] BuildMapRequest(byte[] nonce, IPAddress clientAddress, int internalPort,
+        TimeSpan lease, IPEndPoint? suggestedExternal = null)
     {
-        // Common header (version, opcode MAP, reserved, lifetime) + MAP body: nonce,
-        // protocol UDP, reserved, internal port, external port 0 = "assign any",
-        // unspecified external address.
-        byte[] request = new byte[44];
+        // RFC 6887 sections 7.1 and 11.1: 24-byte common header + 36-byte MAP
+        // body. The two-byte result field from NAT-PMP is NOT part of PCP.
+        byte[] request = new byte[60];
         request[0] = 2;
         request[1] = 1;
         BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(4), (uint)lease.TotalSeconds);
-        nonce.CopyTo(request, 8);
-        request[20] = 17; // UDP
-        BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(24), (ushort)internalPort);
+        clientAddress.MapToIPv6().GetAddressBytes().CopyTo(request, 8);
+        nonce.CopyTo(request, 24);
+        request[36] = 17; // UDP
+        BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(40), (ushort)internalPort);
+        BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(42), (ushort)(suggestedExternal?.Port ?? 0));
+        IPAddress suggestedAddress = suggestedExternal?.Address
+            ?? (clientAddress.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any);
+        suggestedAddress.MapToIPv6().GetAddressBytes().CopyTo(request, 44);
         return request;
     }
 
-    private static bool TryParseMapResponse(byte[]? response, byte[] nonce, out IPEndPoint? external, out uint granted)
+    internal static bool TryParseMapResponse(byte[]? response, byte[] request, out IPEndPoint? external, out uint granted)
     {
         external = null;
         granted = 0;
-        if (response is null || response.Length < 50 || response[0] != 2 || response[1] != 129)
-        {
-            return false;
-        }
-
-        uint result = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(12));
-        if (result != 0)
+        if (response is null || response.Length is < 60 or > 1100 || response.Length % 4 != 0
+            || response[0] != 2 || response[1] != 129 || response[3] != 0
+            || !response.AsSpan(24, 12).SequenceEqual(request.AsSpan(24, 12))
+            || response[36] != request[36]
+            || !response.AsSpan(40, 2).SequenceEqual(request.AsSpan(40, 2)))
         {
             return false;
         }
 
         granted = BinaryPrimitives.ReadUInt32BigEndian(response.AsSpan(4));
-        if (granted == 0)
+        if (granted == 0 && BinaryPrimitives.ReadUInt32BigEndian(request.AsSpan(4)) != 0)
         {
             return false;
         }
 
-        if (!nonce.AsSpan().SequenceEqual(response.AsSpan(14, 12)))
-        {
-            return false; // a reply to someone else's request (or a broken gateway)
-        }
-
-        int externalPort = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(32));
-        byte[] externalAddress = response[34..50];
-
-        // The gateway reports the mapped address as 16 bytes: an IPv4 mapping arrives as
-        // ::ffff:a.b.c.d; a non-v4-mapped address cannot be advertised as a v4 candidate.
-        IPAddress? parsed = new IPAddress(externalAddress);
+        int externalPort = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(42));
+        IPAddress parsed = new(response.AsSpan(44, 16));
         IPAddress unmapped = parsed.IsIPv4MappedToIPv6 ? parsed.MapToIPv4() : parsed;
-        if (externalPort == 0 || unmapped.AddressFamily != AddressFamily.InterNetwork)
+        if (externalPort == 0 || unmapped.Equals(IPAddress.Any) || unmapped.Equals(IPAddress.IPv6Any)
+            || unmapped.IsIPv6Multicast || (unmapped.AddressFamily == AddressFamily.InterNetwork
+                && unmapped.GetAddressBytes()[0] is >= 224 and <= 239))
         {
             return false;
         }
@@ -91,8 +96,7 @@ internal static class PcpClient
         return true;
     }
 
-    private static async Task<byte[]?> RoundTripAsync(UdpClient udp, IPEndPoint gateway, byte[] request,
-        int minLength, CancellationToken ct)
+    private static async Task<byte[]?> RoundTripAsync(UdpClient udp, byte[] request, CancellationToken ct)
     {
         Task<UdpReceiveResult>? pending = null;
         try
@@ -105,23 +109,22 @@ internal static class PcpClient
                 }
 
                 pending ??= udp.ReceiveAsync(ct).AsTask();
-                await udp.SendAsync(request, gateway, ct).ConfigureAwait(false);
-
-                if (await Task.WhenAny(pending, Task.Delay(250, ct)).ConfigureAwait(false) != pending)
+                await udp.SendAsync(request, ct).ConfigureAwait(false);
+                Task timeout = Task.Delay(250, ct);
+                while (!timeout.IsCompleted && await Task.WhenAny(pending, timeout).ConfigureAwait(false) == pending)
                 {
-                    continue;
-                }
-
-                if (pending.IsFaulted)
-                {
-                    return null;
-                }
-
-                byte[] data = pending.Result.Buffer;
-                pending = null;
-                if (data.Length >= minLength && data[0] == request[0] && data[1] == (byte)(request[1] | 0x80))
-                {
-                    return data;
+                    byte[] data = (await pending.ConfigureAwait(false)).Buffer;
+                    pending = null;
+                    if (data.Length >= 24 && data[0] == 2 && data[1] == 129 && data[3] != 0)
+                    {
+                        return null; // a gateway error permits the next mapping protocol
+                    }
+                    if (TryParseMapResponse(data, request, out _, out _))
+                    {
+                        return data;
+                    }
+                    // Ignore unrelated/malformed replies without abandoning this attempt.
+                    pending = udp.ReceiveAsync(ct).AsTask();
                 }
             }
         }
@@ -142,23 +145,25 @@ internal static class PcpClient
 
         public async Task<bool> RenewAsync(CancellationToken ct)
         {
-            byte[] request = BuildMapRequest(nonce, internalPort, Lifetime);
-            using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-            byte[]? response = await RoundTripAsync(udp, gateway, request, 50, ct).ConfigureAwait(false);
-            if (!TryParseMapResponse(response, nonce, out IPEndPoint? renewed, out uint granted))
+            using var udp = new UdpClient(gateway.AddressFamily);
+            udp.Connect(gateway);
+            byte[] request = BuildMapRequest(nonce, ((IPEndPoint)udp.Client.LocalEndPoint!).Address, internalPort, Lifetime, External);
+            byte[]? response = await RoundTripAsync(udp, request, ct).ConfigureAwait(false);
+            if (!TryParseMapResponse(response, request, out IPEndPoint? renewed, out uint granted))
             {
                 return false;
             }
 
             Lifetime = TimeSpan.FromSeconds(granted);
-            return renewed!.Port == External.Port;
+            return renewed!.Equals(External);
         }
 
         public async Task ReleaseAsync(CancellationToken ct)
         {
-            byte[] request = BuildMapRequest(nonce, internalPort, TimeSpan.Zero);
-            using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-            _ = await RoundTripAsync(udp, gateway, request, 50, ct).ConfigureAwait(false);
+            using var udp = new UdpClient(gateway.AddressFamily);
+            udp.Connect(gateway);
+            byte[] request = BuildMapRequest(nonce, ((IPEndPoint)udp.Client.LocalEndPoint!).Address, internalPort, TimeSpan.Zero, External);
+            _ = await RoundTripAsync(udp, request, ct).ConfigureAwait(false);
         }
 
         public void Dispose()

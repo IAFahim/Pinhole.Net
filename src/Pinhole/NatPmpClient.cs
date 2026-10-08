@@ -19,7 +19,8 @@ internal static class NatPmpClient
     public static async Task<PmpMapping?> TryMapAsync(IReadOnlyList<IPEndPoint>? gatewayOverride,
         int internalPort, TimeSpan lease, CancellationToken ct)
     {
-        foreach (IPEndPoint gateway in gatewayOverride ?? GatewayDiscovery.DefaultGateways())
+        foreach (IPEndPoint gateway in (gatewayOverride ?? GatewayDiscovery.DefaultGateways())
+            .Where(g => g.AddressFamily == AddressFamily.InterNetwork))
         {
             using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
             IPAddress? externalIp = await PublicAddressAsync(udp, gateway, ct).ConfigureAwait(false);
@@ -144,10 +145,10 @@ internal static class NatPmpClient
 }
 
 /// <summary>OS-level default-gateway discovery in pure BCL: the routing table's gateway
-/// list per interface. Empty on hosts with no IPv4 default route.</summary>
+/// list per interface. NAT-PMP requests IPv4 only; PCP can also use IPv6 gateways.</summary>
 internal static class GatewayDiscovery
 {
-    public static IReadOnlyList<IPEndPoint> DefaultGateways()
+    public static IReadOnlyList<IPEndPoint> DefaultGateways(bool includeIpv6 = false)
     {
         var gateways = new List<IPEndPoint>();
         try
@@ -159,13 +160,24 @@ internal static class GatewayDiscovery
                     continue;
                 }
 
-                foreach (GatewayIPAddressInformation gw in nic.GetIPProperties().GatewayAddresses)
+                IPInterfaceProperties properties = nic.GetIPProperties();
+                foreach (GatewayIPAddressInformation gw in properties.GatewayAddresses)
                 {
-                    if (gw.Address.AddressFamily == AddressFamily.InterNetwork
-                        && !gw.Address.Equals(IPAddress.Loopback)
-                        && gateways.All(g => !g.Address.Equals(gw.Address)))
+                    IPAddress address = gw.Address;
+                    if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)
+                        || (!includeIpv6 && address.AddressFamily != AddressFamily.InterNetwork))
                     {
-                        gateways.Add(new IPEndPoint(gw.Address, 5351));
+                        continue;
+                    }
+                    if (address.IsIPv6LinkLocal && address.ScopeId == 0)
+                    {
+                        int scope = properties.GetIPv6Properties()?.Index ?? 0;
+                        if (scope <= 0) continue;
+                        address = new IPAddress(address.GetAddressBytes(), scope);
+                    }
+                    if (gateways.All(g => !g.Address.Equals(address)))
+                    {
+                        gateways.Add(new IPEndPoint(address, 5351));
                         if (gateways.Count >= 4)
                         {
                             return gateways;

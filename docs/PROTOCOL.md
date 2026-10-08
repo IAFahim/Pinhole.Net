@@ -263,10 +263,17 @@ close or rebind, and retried once a minute if a previously-working mapping dies.
 Everything is background and best-effort: a network with none of these protocols
 contributes no mapping, silently.
 
-PCP MAP requests carry a per-mapping random nonce; renewals reuse it so the gateway
-updates the existing mapping instead of allocating a second one. Responses are
-accepted only when the nonce is echoed, the result code is success, and the external
-address is IPv4 (or v4-mapped) — the candidate vocabulary is IPv4/IPv6 endpoints.
+PCP MAP requests use the RFC 6887 24-byte common header and 36-byte MAP body. The
+header carries the socket's actual source address; IPv4 addresses use IPv4-mapped
+IPv6 encoding. IPv4 and IPv6 gateways are eligible, including scoped link-local
+IPv6 gateways. NAT-PMP remains IPv4-only.
+
+Requests carry a per-mapping random nonce. Renewals and deletion reuse it and suggest
+the previously assigned external endpoint so a restarted gateway can restore the
+mapping. The UDP socket is connected to the gateway, excluding replies from other
+sources. A successful response must echo the nonce, UDP protocol, and internal port,
+and report a valid external IPv4 or IPv6 endpoint. A renewal that changes either
+external IP or port invalidates the old advertised mapping and triggers rediscovery.
 
 ## STUN usage
 

@@ -430,6 +430,10 @@ invisible. Late joins don't disturb existing pairs.
 Reachability depends on both peers' NATs, host firewalls, and available relay infrastructure
 ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 
+The [direct connectivity audit](docs/CONNECTIVITY_AUDIT.md) compares the .NET core
+with the Kotlin phone dialer, identifies missing methods, and records the evidence
+needed before claiming broad automatic direct connectivity.
+
 | Dialer side | Publisher side | Direct punch | Path used |
 |---|---|---|---|
 | Reachable IPv6 | Reachable IPv6 | Yes, when both firewalls permit it | Direct IPv6 |
