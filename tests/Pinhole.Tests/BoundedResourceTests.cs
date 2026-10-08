@@ -7,13 +7,19 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
+// GC.GetTotalMemory measures the whole test process. Run these measurements while
+// other collections are idle so their allocations cannot masquerade as a leak.
+[CollectionDefinition(nameof(ProcessResourceCollection), DisableParallelization = true)]
+public sealed class ProcessResourceCollection { }
+
 /// <summary>#34 — bounded resources: cancelled, recovered, and restarted transfers must
 /// hand back every reservation, socket, connection-table slot, and byte of heap they
 /// borrowed. Each test asserts the specific counter that would grow if the layer leaked —
 /// the budget's used-bytes, the lab's live-socket ledger, the node's connection table —
-/// and treats process heap only as a coarse slope check (parallel tests share this
-/// process, so the deterministic counters carry the proof). The env-gated soak
+/// and treats process heap only as a coarse slope check. Other test collections stay
+/// idle during the process-wide measurements. The env-gated soak
 /// (PINHOLE_SOAK_MINUTES) runs the same measurements over arbitrary durations.</summary>
+[Collection(nameof(ProcessResourceCollection))]
 public sealed class BoundedResourceTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;
@@ -96,8 +102,8 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 }
             }
 
-            // Median per-cycle heap growth, robust to parallel tests' transient garbage:
-            // a leak grows every cycle; noise does not.
+            // Median per-cycle heap growth after warmup. Collection isolation excludes
+            // allocations from other tests; the per-layer counters above stay exact.
             var deltas = heapSamples.Zip(heapSamples.Skip(1), (a, b) => b - a).OrderBy(d => d).ToList();
             long medianDelta = deltas[deltas.Count / 2];
             output.WriteLine($"after {cycles} cancel/resume cycles: heap {heapAtRest / 1048576.0:F1} -> " +
