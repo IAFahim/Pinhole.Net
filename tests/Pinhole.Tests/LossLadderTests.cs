@@ -6,6 +6,11 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
+// Wall-clock goodput comparisons require steady CPU availability. Other test
+// collections must not start/finish workloads between the measured rungs.
+[CollectionDefinition(nameof(LossLadderTimingCollection), DisableParallelization = true)]
+public sealed class LossLadderTimingCollection { }
+
 /// <summary>The loss ladder (#20's baseline deliverable): the blob ARQ's fixed 4×64-chunk
 /// window and 900 ms re-requests driven by increasing loss — independent rungs and a
 /// Gilbert-Elliott burst rung — with goodput recorded per rung. These curves are the
@@ -14,6 +19,7 @@ namespace Pinhole.Tests;
 /// ordering) — exact goodput numbers are machine-dependent and belong in the logs, not the
 /// asserts. Each rung runs in its own lab and directory: loss chains, counters, and resume
 /// sidecars never bleed between rungs.</summary>
+[Collection(nameof(LossLadderTimingCollection))]
 public sealed class LossLadderTests(ITestOutputHelper output)
 {
     private const long RungBytes = 512 * 1024; // 512 chunks — enough for the window to cycle

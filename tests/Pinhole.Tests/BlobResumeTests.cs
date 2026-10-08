@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using Pinhole.Blobs;
@@ -151,27 +153,57 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             };
 
             await using BlobServer server = await BlobServer.ServeAsync(src, Opts());
+            // Hold the provider at the intended restart boundary. Packets queued by
+            // the provider are not evidence that the downloader has checkpointed them.
+            server.DropChunk = index => index >= 120;
             Task<BlobDownloadResult> run = Task.Run(() => RunAsync(server).WaitAsync(Budget));
 
-            // Real verified progress first (a checkpoint worth resuming), then the plug.
-            await TestPoll.UntilAsync(TimeSpan.FromSeconds(20), () => server.ChunksServed >= 120);
+            string statePath = Path.Combine(dir, "out", "rung.bin.pinhole-part", "state");
+            long savedPrefix = 0;
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(20), () =>
+            {
+                try
+                {
+                    // Read the documented PBPART01 prefix without excluding the
+                    // downloader's periodic writer. Ignore a concurrent rewrite.
+                    using var state = new FileStream(statePath, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    if (state.Length != 56) return false;
+                    Span<byte> body = stackalloc byte[56];
+                    state.ReadExactly(body);
+                    if (!body[..8].SequenceEqual("PBPART01"u8)) return false;
+                    savedPrefix = BinaryPrimitives.ReadInt64LittleEndian(body[48..]);
+                    return savedPrefix >= 120;
+                }
+                catch (IOException) { return false; }
+            });
             await server.DisposeAsync();
 
             // The successor: same identity, same port, same content — but a brand-new
             // process that knows nothing of the old connection.
+            Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
+            LinkRule cut = LinkRule.Blackhole(region);
+            lab.Net.AddRule(cut);
             await using BlobServer successor = await BlobServer.ServeAsync(src, Opts());
+            var requested = new ConcurrentQueue<long>();
+            successor.DropChunk = index => { requested.Enqueue(index); return false; };
+            lab.Net.RemoveRule(cut); // no request can precede the observation hook
 
             BlobDownloadResult result = await run;
             Assert.Equal(FlowBytes, result.Bytes);
+            Assert.True(result.Resumed);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "rung.bin")));
+            Assert.NotEmpty(requested);
+            Assert.True(requested.Min() >= savedPrefix,
+                $"successor requested chunk {requested.Min()} below saved prefix {savedPrefix}");
             output.WriteLine($"result.Resumed={result.Resumed}, successor connections={successor.ConnectionsAccepted}, " +
                              $"first-server connections={server.ConnectionsAccepted}");
-            // 120+ chunks were served before the death; the applied prefix minus the
-            // in-flight window (~64 chunks) is what the checkpoint holds, so a resumed
-            // re-dial must leave the successor well short of a full 512-chunk serve.
+            // A real saved 120-chunk prefix must leave the successor well short of
+            // a full 512-chunk serve. Retain the original request-count threshold.
             Assert.True(successor.ChunksServed < 460,
                 $"the re-dial resumed from the checkpoint, not from zero (successor served {successor.ChunksServed})");
             output.WriteLine($"provider died and restarted; the original call re-dialed the same ticket and finished " +
-                             $"({successor.ChunksServed} chunks served by the successor vs 120+ already verified before the death)");
+                             $"({successor.ChunksServed} chunks served by the successor vs {savedPrefix} checkpointed before the death)");
         }
         finally
         {
