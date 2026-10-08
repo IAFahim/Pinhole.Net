@@ -70,7 +70,7 @@ public sealed class InteropTests
     [InteropFact]
     public async Task OldDownloader_CurrentProvider_V2Ticket_CompletesVerifiedTransfer()
     {
-        // A current node with no endpoint identity (no seed, no iroh relays) still
+        // A current node with no endpoint identity (no seed, relays, or publication) still
         // produces v2 connection strings — which old clients consume. The whole stack
         // is then compatible: v2 conn string, node handshake pinned to the static key,
         // blob wire v3 on both sides.
@@ -241,6 +241,7 @@ public sealed class InteropTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         EnableLanDiscovery = false,

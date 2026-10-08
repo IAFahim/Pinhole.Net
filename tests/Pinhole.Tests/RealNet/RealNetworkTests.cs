@@ -31,6 +31,8 @@ public sealed class RealNetworkTests
         Listen = listen,
         ConnectTimeout = TimeSpan.FromSeconds(12),
         BindProbeBudget = TimeSpan.FromSeconds(10),
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         ReceiveBufferCapacity = 4096,
@@ -79,8 +81,8 @@ public sealed class RealNetworkTests
         (ExternalProcess relay, Uri url, string version, string logDir) = await StartRelayAsync();
         await using var relayGuard = relay;
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await using var a = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false) });
-        await using var b = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false) });
+        await using var a = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false), PublishAddress = false });
+        await using var b = await IrohTransport.BindAsync(new IrohTransportOptions { Network = RealRelayOptions(url, listen: false), PublishAddress = false });
         await TestPoll.UntilAsync(TestBudget.Bind, () => a.HasRelay && b.HasRelay);
         IrohRoute route = await a.ConnectAsync(new IrohAddress(b.EndpointId, relayUrls: [url]).ToString());
         Assert.All(route.Paths, p => Assert.Null(p.DirectAddress));
@@ -299,6 +301,8 @@ public sealed class RealNetworkTests
                 Listen = listen,
                 ConnectTimeout = TimeSpan.FromSeconds(12),
                 BindProbeBudget = TimeSpan.FromSeconds(10),
+                PublishIrohAddress = false,
+                EnableLanDiscovery = false,
                 EnableNetworkWatch = false,
                 EnablePortMapping = false,
                 ReceiveBufferCapacity = 4096,

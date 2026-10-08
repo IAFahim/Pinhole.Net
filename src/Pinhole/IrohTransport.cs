@@ -17,12 +17,12 @@ public sealed class IrohTransportOptions
     /// <summary>The HTTP pkarr service used by native iroh DNS discovery. HTTPS by default;
     /// HTTP is accepted only on loopback for self-contained tests.</summary>
     public Uri DiscoveryUrl { get; init; } = new("https://dns.iroh.link/pkarr");
-    /// <summary>Publish signed endpoint reachability at bind and periodically (default false).
-    /// Enable to let native iroh peers find this endpoint by ID alone.</summary>
-    public bool PublishAddress { get; init; }
-    /// <summary>Include direct IP addresses when publishing (default false). Relay-only
-    /// publication avoids making local/public IPs discoverable through the discovery service.</summary>
-    public bool PublishDirectAddresses { get; init; }
+    /// <summary>Publish signed endpoint reachability at bind and periodically (default true),
+    /// letting native iroh peers find this endpoint by ID alone. Set false for offline use.</summary>
+    public bool PublishAddress { get; init; } = true;
+    /// <summary>Include direct and reflexive IP addresses when publishing (default true),
+    /// so endpoint-ID lookup supplies direct candidates. Set false for relay-only publication.</summary>
+    public bool PublishDirectAddresses { get; init; } = true;
     /// <summary>Bounded raw receive queue; oldest packets are dropped when full. Default 256.</summary>
     public int ReceiveBufferCapacity { get; init; } = 256;
     internal HttpMessageHandler? DiscoveryHandler { get; init; }

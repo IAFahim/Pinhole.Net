@@ -21,6 +21,8 @@ public sealed class StunRefreshTests
             StunServers = [stun.LocalEndPoint],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
             EnablePathValidation = false, // isolate this suite: refresh, not probe, behavior
             StunRefreshInterval = refresh,
@@ -34,6 +36,8 @@ public sealed class StunRefreshTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
             EnablePathValidation = false,
         }).WaitAsync(Timeout);

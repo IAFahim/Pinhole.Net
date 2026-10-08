@@ -72,9 +72,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>Announces on the LAN when <see cref="PinholeOptions.EnableLanDiscovery"/>
     /// is set: the node becomes <c>&lt;peer-id&gt;._pinhole._udp.local</c> on the local
-    /// link, answerable by <see cref="DiscoverLanPeersAsync"/>. Off by default — announcing
-    /// is a network-visible behavior an app should choose. Never throws: a multicast-less
-    /// environment simply stays unannounced.</summary>
+    /// link, answerable by <see cref="DiscoverLanPeersAsync"/>. Enabled by default.
+    /// A multicast-less environment simply stays unannounced.</summary>
     private void StartLanAnnouncement()
     {
         if (!_options.EnableLanDiscovery)
@@ -84,7 +83,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
         try
         {
-            var channel = new MulticastLanChannel();
+            ILanChannel channel = _options.LanChannelFactory?.Invoke() ?? new MulticastLanChannel();
             _lan = new LanDiscovery(
                 channel,
                 PeerId,
@@ -139,10 +138,10 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// strings: the key its signed address records are verified against, which is what lets
     /// a peer holding an old ticket adopt this node's rediscovered addresses without
     /// trusting the lookup provider. Null when the node has no endpoint identity (neither a
-    /// persisted seed nor iroh relays).</summary>
+    /// persisted seed, iroh relays, nor signed publication).</summary>
     public byte[]? EndpointPublicKey => _engine.EndpointPublicKey;
 
-    /// <summary>The single discovery artifact: "pinhole1:..." carrying this peer's ID, its
+    /// <summary>A self-contained discovery artifact: "pinhole1:..." carrying this peer's ID, its
     /// static and endpoint keys, and direct/reflexive/relay candidates. When both peers run
     /// lookup providers (see <see cref="PinholeOptions.RendezvousEndpoints"/>), an old string
     /// keeps working across reboots and address changes — the peer's current record is
@@ -155,7 +154,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         _engine.EndpointPublicKey).ToString();
 
     /// <summary>A native iroh endpoint ticket for this Pinhole node. To dial it securely,
-    /// publish its signed Pinhole key binding with PublishIrohAddress=true. This does not
+    /// its signed Pinhole key binding is published by default unless
+    /// <see cref="PinholeOptions.PublishIrohAddress"/> is disabled. This does not
     /// change the Pinhole session wire protocol into a native iroh application session.</summary>
     public IrohAddress IrohAddress
     {

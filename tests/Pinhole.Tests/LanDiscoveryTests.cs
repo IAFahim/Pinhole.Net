@@ -193,10 +193,56 @@ public sealed class LanDiscoveryTests
     }
 
     [Fact]
-    public async Task Node_WithLanDiscovery_BindsAndDialsRegardlessOfMulticast()
+    public async Task DefaultNode_AnnouncesItsAuthenticatedLanTicket()
     {
-        // CI runners may have no multicast at all: announcing must be optional machinery
-        // that never fails the bind, and the node stays fully functional either way.
+        using var announcerSide = new DirectChannel();
+        using var browserSide = new DirectChannel();
+        announcerSide.Group = browserSide.Local;
+        browserSide.Group = announcerSide.Local;
+        await using var node = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            EnablePortMapping = false, PublishIrohAddress = false,
+            LanChannelFactory = () => announcerSide,
+        });
+        IReadOnlyList<LanPeer> found = await LanDiscovery.BrowseAsync(browserSide, TimeSpan.FromSeconds(2), CancellationToken.None);
+        LanPeer peer = Assert.Single(found);
+        Assert.Equal(node.PeerId, peer.PeerId);
+        Assert.Equal(node.StaticPublicKey, peer.StaticKey);
+        Assert.Equal(node.NatHint, peer.NatHint);
+        Assert.All(peer.Endpoints, ep => Assert.Equal(node.LocalPort, ep.Port));
+
+        await using var dialer = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
+        });
+        Task<PinholeConnection> incoming = node.AcceptAsync();
+        await using PinholeConnection outgoing = await dialer.ConnectAsync(peer.ToConnectionString().ToString()).WaitAsync(Timeout);
+        await using PinholeConnection accepted = await incoming.WaitAsync(Timeout);
+        Assert.True(outgoing.IsEncrypted);
+        Assert.True(accepted.IsEncrypted);
+        Assert.Equal(PathKind.Direct, outgoing.Path.Kind);
+    }
+
+    [Fact]
+    public async Task LanOptOut_DoesNotCreateAnAnnouncementChannel()
+    {
+        int created = 0;
+        await using var node = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
+            LanChannelFactory = () => { Interlocked.Increment(ref created); return new DirectChannel(); },
+        });
+        Assert.Equal(0, created);
+        Assert.NotNull(node.StaticPublicKey);
+    }
+
+    [Fact]
+    public async Task DefaultLanDiscovery_BindsAndDialsWhenMulticastIsUnavailable()
+    {
+        // Inject the OS failure so every runner exercises best-effort default discovery.
         await using PinholeNode announcing = await PinholeNode.BindAsync(new PinholeOptions
         {
             StunServers = [],
@@ -204,7 +250,8 @@ public sealed class LanDiscoveryTests
             IrohRelayUrls = [],
             EnableNetworkWatch = false,
             EnablePortMapping = false,
-            EnableLanDiscovery = true,
+            PublishIrohAddress = false,
+            LanChannelFactory = () => throw new SocketException((int)SocketError.NetworkUnreachable),
         });
         await using PinholeNode other = await PinholeNode.BindAsync(new PinholeOptions
         {
@@ -213,6 +260,8 @@ public sealed class LanDiscoveryTests
             IrohRelayUrls = [],
             EnableNetworkWatch = false,
             EnablePortMapping = false,
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
         });
         Assert.NotNull(announcing.StaticPublicKey);
 

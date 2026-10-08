@@ -55,9 +55,10 @@ internal sealed class LanDiscovery : IDisposable
     {
         // The RFC's three startup announcements, then a slow heartbeat keeping neighbors'
         // caches warm, answering queries in between.
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 3 && !ct.IsCancellationRequested; i++)
         {
-            SendAnnouncement(RecordTtl);
+            try { SendAnnouncement(RecordTtl); }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { return; }
             if (i < 2)
             {
                 await SafeDelay(150, ct).ConfigureAwait(false);
@@ -227,11 +228,19 @@ internal sealed class MulticastLanChannel : ILanChannel
     public MulticastLanChannel()
     {
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        _socket.MulticastLoopback = true; // hearing ourselves is harmless — peers dedupe by id
-        _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
-        _socket.Bind(new IPEndPoint(IPAddress.Any, 5353));
-        _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(GroupV4.Address));
+        try
+        {
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _socket.MulticastLoopback = true; // hearing ourselves is harmless — peers dedupe by id
+            _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
+            _socket.Bind(new IPEndPoint(IPAddress.Any, 5353));
+            _socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(GroupV4.Address));
+        }
+        catch
+        {
+            _socket.Dispose();
+            throw;
+        }
     }
 
     public void Send(ReadOnlySpan<byte> packet, IPEndPoint? unicastTo)

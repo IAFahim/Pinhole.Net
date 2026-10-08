@@ -337,6 +337,7 @@ public sealed class RelayFailoverTests
         {
             StunServers = [],
             IrohRelayUrls = [new Uri("https://relay-that-does-not-resolve.invalid/")],
+            PublishIrohAddress = false,
             EnableNetworkWatch = false,
             EnablePortMapping = false,
             EnableLanDiscovery = false,

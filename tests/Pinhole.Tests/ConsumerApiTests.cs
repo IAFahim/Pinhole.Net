@@ -9,6 +9,8 @@ public sealed class ConsumerApiTests
     private static PinholeOptions Options(bool listen = true) => new()
     {
         StunServers = [], Relays = [], IrohRelayUrls = [],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         Listen = listen, EnableNetworkWatch = false, EnablePortMapping = false,
         ConnectTimeout = TimeSpan.FromMilliseconds(300),
     };

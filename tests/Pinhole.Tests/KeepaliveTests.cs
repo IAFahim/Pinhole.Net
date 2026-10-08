@@ -15,6 +15,8 @@ public sealed class KeepaliveTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         EnablePathValidation = false,

@@ -38,6 +38,8 @@ public sealed class NatHintTests
             StunServers = stun,
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false,
             EnablePathValidation = false,
             EnablePortMapping = false,

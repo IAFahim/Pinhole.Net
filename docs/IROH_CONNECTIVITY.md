@@ -10,7 +10,6 @@ using Pinhole;
 await using var transport = await IrohTransport.BindAsync(new IrohTransportOptions
 {
     SecretKeySeed = persisted32ByteEd25519Seed,
-    PublishAddress = true,
 });
 
 Console.WriteLine(transport.EndpointId);       // native iroh Ed25519 ID
@@ -59,7 +58,6 @@ publish a native iroh endpoint ID and ticket:
 ```csharp
 await using var node = await PinholeNode.BindAsync(new PinholeOptions
 {
-    PublishIrohAddress = true,
     ReceiveBufferCapacity = 256,
     // Persist IdentityKeySeed to keep the ID and session key across restarts.
 });
@@ -82,13 +80,16 @@ An endpoint without the signed Pinhole protocol binding is rejected. This adapte
 uses the Pinhole session wire above iroh discovery/relay connectivity; it does not
 turn the session into a native iroh `Endpoint` application connection.
 
-Publication remains opt-in. `PublishDirectIrohAddresses` additionally publishes
-IP paths; the default publishes relay URLs and the public key binding. Signed
+Publication and direct-address publication are enabled by default. Set
+`PublishIrohAddress = false` to disable signed publication, or
+`PublishDirectIrohAddresses = false` to publish only relay URLs and the public key
+binding. Plaintext nodes must disable signed Pinhole publication. Signed
 Pinhole `Announce` frames also supply current direct candidates after connection,
 allowing the Kotlin client to validate and upgrade a relayed session to UDP.
 
 The receiver program supports `dotnet run --project src/OpusVoice.Receiver -- iroh`
-to publish this binding and print a native QR ticket.
+to print a native QR ticket. Normal `pinhole` mode publishes the same signed binding
+and direct candidates while displaying the usual Pinhole ticket instead.
 
 | Layer | Behavior |
 |---|---|
@@ -105,10 +106,22 @@ adapters; this API implements IP/relay paths. Legacy `node...` tickets and nativ
 iroh mDNS are not implemented. Pinhole's `_pinhole._udp.local` service is not an
 iroh LAN discovery service.
 
-Publication is opt-in. By default, published records contain live relay URLs only;
-set `PublishDirectAddresses = true` to include IP addresses. Automatic publication
+Raw transport publication is enabled by default and includes direct addresses and
+live relay URLs. Set `PublishAddress = false` for no publication, or
+`PublishDirectAddresses = false` for relay-only publication. Automatic publication
 runs at bind and then about every 30 seconds, with jitter and bounded outage
 backoff. A persisted seed preserves the native endpoint ID across restarts.
+Records are bounded by pkarr's DNS size limit: publication keeps the relay URLs
+and session-key metadata, prioritizes routable addresses, and fits the remaining
+direct candidates into the record. Tickets can still carry the complete candidate set.
+Publication errors and service timeouts never prevent the bound transport from
+operating. Cancellation still aborts the bind and releases its resources.
+
+`PinholeNode` also announces its authenticated `_pinhole._udp.local` service by
+default, with `EnableLanDiscovery = false` as an opt-out. This does not run in the
+raw transport, whose upper protocol owns peer authentication. Published IP
+addresses are discoverable by anyone holding the endpoint ID; disabling direct
+publication does not remove IPs from shared tickets.
 
 Direct datagrams do not carry an authenticated source ID. Relayed datagrams report
 their routing source ID, which also does not replace end-to-end authentication.

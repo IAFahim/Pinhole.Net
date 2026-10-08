@@ -21,6 +21,8 @@ public class CryptoTests
             StunServers = [],
             IrohRelayUrls = [],
             EnablePortMapping = false,
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false,
             EnablePathValidation = false,
             StunRefreshInterval = TimeSpan.Zero,

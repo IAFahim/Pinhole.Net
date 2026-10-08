@@ -18,6 +18,8 @@ public sealed class IrohRelayTests
     private static PinholeOptions Options(FakeIrohRelay server) => new()
     {
         StunServers = [], Relays = [], IrohRelayUrls = [server.Url],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false, ConnectTimeout = Timeout,
     };
 

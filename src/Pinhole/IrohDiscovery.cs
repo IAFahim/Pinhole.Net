@@ -59,11 +59,42 @@ internal sealed class IrohDiscovery
             previous = Volatile.Read(ref _timestamp);
             next = Math.Max(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000, previous + 1);
         } while (Interlocked.CompareExchange(ref _timestamp, next, previous) != previous);
-        byte[] payload = CreatePayload(address, identity, (ulong)next);
+        byte[] payload = CreatePublicationPayload(address, identity, (ulong)next);
         using var content = new ByteArrayContent(payload);
         content.Headers.ContentType = new("application/octet-stream");
         using HttpResponseMessage response = await _http.PutAsync(Url(address.Key), content, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+    }
+
+    private static byte[] CreatePublicationPayload(IrohAddress address, RelayIdentity identity, ulong timestamp)
+    {
+        // Many active interfaces or STUN mappings can exceed pkarr's DNS size limit.
+        // Keep relay reachability and the session-key binding, then fit as many direct
+        // candidates as possible. Routable addresses take priority over LAN fallbacks.
+        IPEndPoint[] direct = address.DirectAddresses.OrderBy(ep => PublicationPriority(ep.Address)).ToArray();
+        for (int count = direct.Length; ; count--)
+        {
+            var record = new IrohAddress(address.EndpointId, direct.Take(count).ToArray(), address.RelayUrls)
+            { UserData = address.UserData };
+            try { return CreatePayload(record, identity, timestamp); }
+            catch (InvalidDataException) when (count > 0) { }
+        }
+    }
+
+    private static int PublicationPriority(IPAddress address)
+    {
+        if (IPAddress.IsLoopback(address)) return 3;
+        if (address.IsIPv6LinkLocal) return 2;
+        byte[] bytes = address.GetAddressBytes();
+        if (bytes.Length == 4)
+        {
+            if (bytes[0] == 169 && bytes[1] == 254) return 2;
+            if (bytes[0] == 10 || bytes[0] == 172 && bytes[1] is >= 16 and <= 31
+                || bytes[0] == 192 && bytes[1] == 168 || bytes[0] == 100 && bytes[1] is >= 64 and <= 127)
+                return 1;
+        }
+        else if (address.IsIPv6SiteLocal || (bytes[0] & 0xfe) == 0xfc) return 1;
+        return 0;
     }
 
     internal static byte[] CreatePayload(IrohAddress address, RelayIdentity identity, ulong timestamp)

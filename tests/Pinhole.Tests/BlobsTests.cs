@@ -21,6 +21,8 @@ public sealed class BlobsTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
     };
@@ -738,6 +740,8 @@ public sealed class BlobsTests
                 StunServers = [],
                 Relays = [],
                 IrohRelayUrls = [relay.Url],
+                PublishIrohAddress = false,
+                EnableLanDiscovery = false,
                 EnableNetworkWatch = false,
                 ConnectTimeout = Timeout,
             };

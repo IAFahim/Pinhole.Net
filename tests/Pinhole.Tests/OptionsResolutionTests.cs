@@ -37,6 +37,38 @@ public sealed class OptionsResolutionTests
         Assert.Equal(catalog, customized.ResolvedStun);
         Assert.Equal(TimeSpan.FromSeconds(30), customized.ConnectTimeout); // scalar kept
         Assert.Empty(customized.ResolvedRelays);                            // no TURN by default
+        Assert.True(def.EnableLanDiscovery);
+        Assert.True(customized.EnableLanDiscovery);
+        Assert.True(def.PublishIrohAddress);
+        Assert.True(customized.PublishIrohAddress);
+        Assert.True(def.PublishDirectIrohAddresses);
+        Assert.True(customized.PublishDirectIrohAddresses);
+    }
+
+    [Fact]
+    public async Task DiscoveryOptOuts_SurviveInfrastructureResolution()
+    {
+        PinholeOptions resolved = await PinholeOptions.ResolveAsync(Partial(new PinholeOptions
+        {
+            EnableLanDiscovery = false, PublishIrohAddress = false, PublishDirectIrohAddresses = false,
+        }));
+        Assert.Equal(PinholeOptions.PublicIrohRelays, resolved.ResolvedIrohRelays);
+        Assert.False(resolved.EnableLanDiscovery);
+        Assert.False(resolved.PublishIrohAddress);
+        Assert.False(resolved.PublishDirectIrohAddresses);
+    }
+
+    [Fact]
+    public async Task PlaintextNodes_MustOptOutOfSignedSessionPublication()
+    {
+        var options = new PinholeOptions
+        {
+            StunServers = [], IrohRelayUrls = [], Encryption = PinholeEncryption.Disabled,
+            EnableNetworkWatch = false, EnablePortMapping = false, EnableLanDiscovery = false,
+        };
+        await Assert.ThrowsAsync<ArgumentException>(() => PinholeNode.BindAsync(options));
+        await using var node = await PinholeNode.BindAsync(options with { PublishIrohAddress = false });
+        Assert.Null(node.StaticPublicKey);
     }
 
     [Fact]
@@ -49,6 +81,8 @@ public sealed class OptionsResolutionTests
             StunServers = [mine.LocalEndPoint],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
             StunCatalog = _ => { Interlocked.Increment(ref lookedUp); return Task.FromResult(Array.Empty<IPEndPoint>()); },
         });
@@ -68,6 +102,8 @@ public sealed class OptionsResolutionTests
             StunServers = [stun.LocalEndPoint],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using var withoutStun = await PinholeNode.BindAsync(new PinholeOptions
@@ -75,6 +111,8 @@ public sealed class OptionsResolutionTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
@@ -93,6 +131,8 @@ public sealed class OptionsResolutionTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
             BindProbeBudget = TimeSpan.FromSeconds(1),
         }));
@@ -112,6 +152,8 @@ public sealed class OptionsResolutionTests
         stopped.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PinholeNode.BindAsync(new PinholeOptions
         {
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
             StunCatalog = Hanging,
         }, stopped.Token));

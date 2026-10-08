@@ -7,7 +7,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 - **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
 - **LAN IPv6 fallback by default.** Link-local candidates supplement routable addresses, with probes on each eligible local Wi-Fi/Ethernet interface. Mobile and tunnel interfaces are excluded from link-local probing.
-- **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + static key + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's. On a LAN, mDNS discovery can even replace the clipboard: `EnableLanDiscovery` announces the node as `_pinhole._udp.local` and `DiscoverLanPeersAsync` finds peers with no server at all.
+- **Discovery enabled by default.** Nodes announce `_pinhole._udp.local` on the LAN and publish signed native iroh records with direct addresses and relay URLs. `DiscoverLanPeersAsync` finds nearby peers; `ConnectIrohAsync` resolves a shared endpoint ID. A `pinhole1:` connection string also carries the peer's keys and candidates, so it can be dialed without a discovery lookup.
 - **Encrypted and authenticated, by default.** Every session is AES-256-GCM per frame over a triple-DH X25519 handshake; the answering key is pinned to the connection string, so a man in the middle kills the dial instead of intercepting it. No certificates, no downgrade window — a stripped handshake fails, it never falls back. `Optional` speaks plaintext only with pre-1.6 peers; `Disabled` reproduces the old wire. [`Pinhole.Blobs`](#moving-files-pinholeblobs) rides the same session encryption.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
 - **Payload ceilings that follow the path.** 1200 bytes guaranteed on every session; RFC 8899-style path-MTU discovery probes upward and lifts the per-connection ceiling (to 1435 on an ordinary Ethernet path) as the path proves it can carry more.
@@ -15,7 +15,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 ## Scope contract
 
-**In scope**: a connection between machines using all free STUN + all free relays; connection strings as the discovery artifact (transport of the string = app's concern, with optional LAN discovery via mDNS); encryption, authentication, and anti-replay on the wire; path-MTU discovery; open-forever with roaming and path-failure handling; an optional keepalive heartbeat; connection tools.
+**In scope**: a connection between machines using all free STUN + all free relays; connection strings, LAN discovery via mDNS, and signed iroh address records (sharing a remote peer's ticket or ID = app's concern); encryption, authentication, and anti-replay on the wire; path-MTU discovery; open-forever with roaming and path-failure handling; an optional keepalive heartbeat; connection tools.
 
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
@@ -30,7 +30,8 @@ dotnet add package Pinhole.Blobs        # verified, encrypted, resumable file tr
 
 `Pinhole.Net` pulls in `Pinhole.Turn` (RFC 5766 relay client), `Pinhole.Providers` (the
 free STUN/TURN catalog), and managed BouncyCastle cryptography. Parameterless `BindAsync()`
-gets the free STUN catalog and public iroh relays by default. `dotnet test` from a fresh
+gets the free STUN catalog, public iroh relays, LAN announcements, and signed
+endpoint/direct-address publication by default. `dotnet test` from a fresh
 clone needs no submodules, Rust, or native toolchain — pure C# end to end.
 
 ## Platforms
@@ -65,7 +66,7 @@ using Pinhole;
 // ---------- PC A (listener) ----------
 await using PinholeNode a = await PinholeNode.BindAsync();
 // binds UDP and registers with public iroh HTTPS relays as the standing fallback,
-// probes free STUN (Google/Cloudflare) for the reflexive candidate.
+// probes free STUN, announces on the LAN, and publishes signed direct/relay addresses.
 
 string cs = a.ConnectionString;
 // "pinhole1:AAE..." — peer ID + relay + direct/reflexive candidates.
@@ -91,6 +92,20 @@ life, across every network change.
 
 `ConnectAsync` accepts surrounding whitespace and codes with or without `pinhole1:`.
 The library validates the code and rejects a self-dial; callers do not need to parse it first.
+
+Discovery defaults can be disabled independently: `EnableLanDiscovery = false`
+stops LAN announcements, `PublishIrohAddress = false` stops signed publication,
+and `PublishDirectIrohAddresses = false` keeps the published record to relay URLs
+and the authenticated session-key binding. A shared ticket may still include IP
+addresses. Publication makes the advertised IPs retrievable by anyone holding the
+endpoint ID. `Encryption = Disabled` also requires `PublishIrohAddress = false`;
+signed Pinhole discovery cannot bind a plaintext session key.
+
+LAN announcements use IPv4 mDNS today; native signed records and tickets can carry
+both IPv4 and IPv6 candidates. Application-supplied lookup providers and rendezvous
+servers still need configuration. Discovery failures are tolerated and publication
+retries in the background. More candidates improve the available direct attempts;
+they do not guarantee a direct route through every NAT or host firewall.
 
 Or run it with no code at all:
 

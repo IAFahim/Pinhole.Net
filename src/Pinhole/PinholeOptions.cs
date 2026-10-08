@@ -27,20 +27,24 @@ public sealed record PinholeOptions
     /// Null (default) uses the public n0 relays; an empty list disables them.</summary>
     public IReadOnlyList<Uri>? IrohRelayUrls { get; init; }
 
-    /// <summary>Publish this node through native iroh signed pkarr discovery (default false).
+    /// <summary>Publish this node through native iroh signed pkarr discovery (default true).
     /// The record binds the endpoint ID to this node's Pinhole static key, so compatible
-    /// Android clients can dial by ID or native ticket without dropping peer authentication.</summary>
-    public bool PublishIrohAddress { get; init; }
+    /// Android clients can dial by ID or native ticket without dropping peer authentication.
+    /// Set false for offline nodes or when <see cref="Encryption"/> is disabled.</summary>
+    public bool PublishIrohAddress { get; init; } = true;
 
-    /// <summary>Include IP addresses in native iroh discovery. Default false publishes
-    /// relay URLs only. A shared native ticket may still carry direct addresses.</summary>
-    public bool PublishDirectIrohAddresses { get; init; }
+    /// <summary>Include direct and reflexive IP addresses in native iroh discovery
+    /// (default true), so peers resolving an endpoint ID can attempt direct connections.
+    /// Set false to publish relay URLs and the signed session-key binding only.
+    /// A shared native ticket may still carry direct addresses.</summary>
+    public bool PublishDirectIrohAddresses { get; init; } = true;
 
     /// <summary>Native HTTP pkarr discovery service. Default https://dns.iroh.link/pkarr.
     /// HTTP is accepted only on loopback for local integration tests.</summary>
     public Uri IrohDiscoveryUrl { get; init; } = new("https://dns.iroh.link/pkarr");
 
     internal HttpMessageHandler? IrohDiscoveryHandler { get; init; }
+    internal Func<ILanChannel>? LanChannelFactory { get; init; }
 
     /// <summary>Accept connections dialed by unknown peers (default true). When false, only
     /// peers this node dials itself can establish a connection. Strangers are bounded: a
@@ -157,13 +161,13 @@ public sealed record PinholeOptions
     public bool EnablePmtud { get; init; } = true;
 
     /// <summary>Announce this node on the local network as
-    /// <c>&lt;peer-id&gt;._pinhole._udp.local</c> (default false) so peers running
+    /// <c>&lt;peer-id&gt;._pinhole._udp.local</c> (default true) so peers running
     /// <see cref="PinholeNode.DiscoverLanPeersAsync"/> find it with no server and no
     /// clipboard. The announcement carries the peer ID, static public key, NAT hint, and
     /// local addresses — discovered sessions get the same key pinning as shared-string
-    /// ones. Off by default: announcing is a network-visible behavior the app should
-    /// choose. Failures to announce (no multicast in containers) never fail the bind.</summary>
-    public bool EnableLanDiscovery { get; init; }
+    /// ones. Set false to disable LAN announcements. Failures to announce (no multicast
+    /// in containers) never fail the bind.</summary>
+    public bool EnableLanDiscovery { get; init; } = true;
 
     /// <summary>Send a heartbeat ping at this interval on every open connection (default
     /// zero = off). The pings ride the connection's current path — direct or relay — and
@@ -218,7 +222,8 @@ public sealed record PinholeOptions
     ];
 
     /// <summary>Default options: free STUN for reflexive candidates and the public n0 iroh
-    /// HTTPS relays for introductions and fallback. No TURN account or native library is needed.
+    /// HTTPS relays for introductions and fallback, signed endpoint/direct-address
+    /// publication, and LAN announcements. No TURN account or native library is needed.
     /// Unreachable infrastructure simply contributes fewer candidates.</summary>
     public static Task<PinholeOptions> DefaultAsync(CancellationToken ct = default) =>
         ResolveAsync(null, ct);

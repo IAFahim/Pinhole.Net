@@ -148,6 +148,8 @@ public sealed class PcpClientTests
         };
         PinholeNode node = await PinholeNode.BindAsync(new PinholeOptions
         {
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
             GatewayOverride = [gateway.Endpoint], PortMappingLease = TimeSpan.FromSeconds(30),
         });

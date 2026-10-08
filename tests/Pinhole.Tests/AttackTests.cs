@@ -23,6 +23,8 @@ public sealed class AttackTests
         IrohRelayUrls = [],
         Listen = true,
         ConnectTimeout = TimeSpan.FromSeconds(8),
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
     };
 
@@ -487,6 +489,8 @@ public sealed class AttackTests
             StunServers = [],
             Relays = [],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
         Assert.Equal(port, node.LocalPort);

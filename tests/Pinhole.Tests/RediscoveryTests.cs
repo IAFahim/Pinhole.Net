@@ -41,6 +41,7 @@ public sealed class RediscoveryTests
         LookupProviders = providers,
         StunServers = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         EnableLanDiscovery = false,

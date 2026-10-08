@@ -11,15 +11,16 @@ public sealed class PinholeIrohDiscoveryTests
     {
         Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], IrohRelayUrls = [],
         EnableNetworkWatch = false, EnablePortMapping = false, StunRefreshInterval = TimeSpan.Zero,
+        EnableLanDiscovery = false,
         IdentityKeySeed = RandomNumberGenerator.GetBytes(32), ReceiveBufferCapacity = 32,
-        PublishIrohAddress = true, PublishDirectIrohAddresses = true, IrohDiscoveryHandler = handler,
+        IrohDiscoveryHandler = handler,
         ConnectTimeout = TimeSpan.FromSeconds(5),
     };
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task NativeIdOrTicket_DialsAnEncryptedPinholeSession(bool useTicket)
+    public async Task DefaultPublication_NativeIdOrTicket_DialsAnEncryptedDirectSession(bool useTicket)
     {
         using var service = new MemoryPkarr();
         await using var listener = await PinholeNode.BindAsync(Options(service));
@@ -30,6 +31,8 @@ public sealed class PinholeIrohDiscoveryTests
         using PinholeConnection accepted = await incoming.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(outgoing.IsEncrypted);
         Assert.True(accepted.IsEncrypted);
+        Assert.Equal(PathKind.Direct, outgoing.Path.Kind);
+        Assert.Equal(PathKind.Direct, accepted.Path.Kind);
         outgoing.Send("native discovery; Pinhole session"u8);
         Assert.Equal("native discovery; Pinhole session"u8.ToArray(),
             (await accepted.ReceiveAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value.ToArray());
@@ -38,7 +41,72 @@ public sealed class PinholeIrohDiscoveryTests
             (await outgoing.ReceiveAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value.ToArray());
         byte[] payload = service.Records.Values.Single();
         IrohAddress record = IrohDiscovery.ParsePayload(address.Key, payload, out _);
+        Assert.Contains(new IPEndPoint(IPAddress.Loopback, listener.LocalPort), record.DirectAddresses);
         Assert.Equal(PinholeNode.IrohProtocolPrefix + Convert.ToHexString(listener.StaticPublicKey!).ToLowerInvariant(), record.UserData);
+    }
+
+    [Fact]
+    public async Task PublicationOptOut_DoesNotContactTheService()
+    {
+        using var service = new MemoryPkarr();
+        await using var node = await PinholeNode.BindAsync(Options(service) with { PublishIrohAddress = false });
+        Assert.Equal(0, service.PutAttempts);
+        Assert.Empty(service.Records);
+        Assert.NotNull(node.StaticPublicKey);
+    }
+
+    [Fact]
+    public async Task DirectAddressOptOut_KeepsTheSignedSessionBinding()
+    {
+        using var service = new MemoryPkarr();
+        await using var node = await PinholeNode.BindAsync(Options(service) with { PublishDirectIrohAddresses = false });
+        IrohAddress record = IrohDiscovery.ParsePayload(node.IrohAddress.Key, service.Records.Values.Single(), out _);
+        Assert.Empty(record.DirectAddresses);
+        Assert.Equal(PinholeNode.IrohProtocolPrefix + Convert.ToHexString(node.StaticPublicKey!).ToLowerInvariant(), record.UserData);
+    }
+
+    [Fact]
+    public async Task ManyDirectCandidates_FitNativeDiscoveryWithoutLosingTheSignedBinding()
+    {
+        using var service = new MemoryPkarr();
+        using var http = new HttpClient(service, disposeHandler: false);
+        var identity = new RelayIdentity();
+        var discovery = new IrohDiscovery(http, new Uri("http://127.0.0.1/pkarr"));
+        IPEndPoint[] local = Enumerable.Range(1, 24)
+            .Select(i => new IPEndPoint(IPAddress.Parse($"fd00:1111:2222:3333:4444:5555:6666:{i:x}"), 65535)).ToArray();
+        IPEndPoint[] routable = Enumerable.Range(1, 8)
+            .Select(i => new IPEndPoint(IPAddress.Parse($"2001:db8:2222:3333:4444:5555:6666:{i:x}"), 65535)).ToArray();
+        var address = new IrohAddress(Convert.ToHexString(identity.PublicKey), local.Concat(routable).ToArray(), PinholeOptions.PublicIrohRelays)
+        { UserData = PinholeNode.IrohProtocolPrefix + new string('a', 64) };
+        Assert.Throws<InvalidDataException>(() => IrohDiscovery.CreatePayload(address, identity, 1));
+
+        await discovery.PublishAsync(address, identity, CancellationToken.None);
+        byte[] payload = service.Records.Values.Single();
+        Assert.InRange(payload.Length, 84, IrohDiscovery.MaxPayloadSize);
+        IrohAddress record = IrohDiscovery.ParsePayload(identity.PublicKey, payload, out _);
+        Assert.Equal(address.UserData, record.UserData);
+        Assert.Equal(address.RelayUrls, record.RelayUrls);
+        Assert.True(record.DirectAddresses.Count < address.DirectAddresses.Count);
+        Assert.All(routable, ep => Assert.Contains(ep, record.DirectAddresses));
+    }
+
+    [Fact]
+    public async Task DiscoveryOutage_DoesNotPreventAnEncryptedDirectConnection()
+    {
+        using var service = new MemoryPkarr { RejectPuts = true };
+        await using var listener = await PinholeNode.BindAsync(Options(service));
+        await using var dialer = await PinholeNode.BindAsync(Options(service) with { PublishIrohAddress = false });
+        Task<PinholeConnection> incoming = listener.AcceptAsync();
+        await using PinholeConnection outgoing = await dialer.ConnectAsync(listener.ConnectionString);
+        await using PinholeConnection accepted = await incoming.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, service.PutAttempts);
+        Assert.Empty(service.Records);
+        Assert.True(outgoing.IsEncrypted);
+        Assert.True(accepted.IsEncrypted);
+        Assert.Equal(PathKind.Direct, outgoing.Path.Kind);
+        outgoing.Send("discovery is best effort"u8);
+        Assert.Equal("discovery is best effort"u8.ToArray(),
+            (await accepted.ReceiveAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value.ToArray());
     }
 
     [Fact]
@@ -81,11 +149,15 @@ public sealed class PinholeIrohDiscoveryTests
     private sealed class MemoryPkarr : HttpMessageHandler
     {
         internal ConcurrentDictionary<string, byte[]> Records { get; } = new();
+        internal bool RejectPuts { get; init; }
+        internal int PutAttempts;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             string key = request.RequestUri!.AbsolutePath;
             if (request.Method == HttpMethod.Put)
             {
+                Interlocked.Increment(ref PutAttempts);
+                if (RejectPuts) return new(HttpStatusCode.ServiceUnavailable);
                 Records[key] = await request.Content!.ReadAsByteArrayAsync(ct);
                 return new(HttpStatusCode.OK);
             }

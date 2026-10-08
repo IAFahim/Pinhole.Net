@@ -16,6 +16,8 @@ public sealed class PmtudTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         EnablePathValidation = false, // PMTUD has its own probes; these tests measure only those

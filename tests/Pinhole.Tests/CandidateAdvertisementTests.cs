@@ -11,6 +11,8 @@ public sealed class CandidateAdvertisementTests
         StunServers = [],
         Relays = [],
         IrohRelayUrls = [],
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
         AdvertiseLinkLocal = advertiseLinkLocal,

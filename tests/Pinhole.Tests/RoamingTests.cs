@@ -15,6 +15,8 @@ public sealed class RoamingTests
         IrohRelayUrls = [],
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
         BindProbeBudget = TimeSpan.FromSeconds(5),
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
     };
 

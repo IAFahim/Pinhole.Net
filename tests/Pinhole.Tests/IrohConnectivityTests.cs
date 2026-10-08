@@ -18,10 +18,13 @@ public sealed class IrohConnectivityTests
 
     private static IrohTransportOptions Offline(byte[]? seed = null) => new()
     {
+        PublishAddress = false,
         SecretKeySeed = seed,
         Network = new PinholeOptions
         {
             Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], Relays = [], IrohRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false, StunRefreshInterval = TimeSpan.Zero,
         },
     };
@@ -98,6 +101,7 @@ public sealed class IrohConnectivityTests
         // sockaddr sizes on every runner, including IPv6 after a shorter IPv4 address.
         await using var receiver = await IrohTransport.BindAsync(new IrohTransportOptions
         {
+            PublishAddress = false,
             Network = Offline().Network with { UdpSocketFactory = _ => receiverSocket },
         });
         foreach (IPEndPoint from in new[]
@@ -120,8 +124,8 @@ public sealed class IrohConnectivityTests
     {
         await using var server = new FakeIrohRelay();
         var network = Offline().Network with { IrohRelayUrls = [server.Url] };
-        await using var a = await IrohTransport.BindAsync(new IrohTransportOptions { Network = network });
-        await using var b = await IrohTransport.BindAsync(new IrohTransportOptions { Network = network });
+        await using var a = await IrohTransport.BindAsync(new IrohTransportOptions { Network = network, PublishAddress = false });
+        await using var b = await IrohTransport.BindAsync(new IrohTransportOptions { Network = network, PublishAddress = false });
         var relayOnly = new IrohAddress(b.EndpointId, relayUrls: [server.Url]);
         IrohRoute route = await a.ConnectAsync(relayOnly.ToString());
         Assert.Throws<ArgumentException>(() => a.SendTo(route.Paths[0], []));
@@ -140,19 +144,18 @@ public sealed class IrohConnectivityTests
     }
 
     [Fact]
-    public async Task SignedIrohDiscovery_PublishesAndDialsById_RejectsTamperAndRollback()
+    public async Task DefaultSignedIrohDiscovery_PublishesAndDialsById_RejectsTamperAndRollback()
     {
         using var service = new MemoryPkarr();
         var publisherOptions = new IrohTransportOptions
         {
-            Network = Offline().Network, DiscoveryHandler = service, PublishDirectAddresses = true,
+            Network = Offline().Network, DiscoveryHandler = service,
         };
         await using var publisher = await IrohTransport.BindAsync(publisherOptions);
         await using var dialer = await IrohTransport.BindAsync(new IrohTransportOptions
         {
-            Network = Offline().Network, DiscoveryHandler = service,
+            Network = Offline().Network, DiscoveryHandler = service, PublishAddress = false,
         });
-        await publisher.PublishAddressAsync();
         byte[] original = service.Payload!.ToArray();
         IrohAddress discovered = await dialer.ResolveAsync(publisher.EndpointId);
         Assert.Equal(publisher.EndpointId, discovered.EndpointId);
@@ -172,6 +175,51 @@ public sealed class IrohConnectivityTests
         // A valid record for another endpoint is also rejected against this ID's key.
         string stranger = Convert.ToHexString(new RelayIdentity().PublicKey);
         await Assert.ThrowsAsync<InvalidDataException>(() => dialer.ResolveAsync(stranger));
+    }
+
+    [Fact]
+    public async Task PublicationOptOut_DoesNotContactTheService()
+    {
+        using var service = new MemoryPkarr();
+        await using var transport = await IrohTransport.BindAsync(new IrohTransportOptions
+        {
+            Network = Offline().Network, DiscoveryHandler = service, PublishAddress = false,
+        });
+        Assert.Equal(0, service.PutAttempts);
+        Assert.Null(service.Payload);
+    }
+
+    [Fact]
+    public async Task DirectAddressOptOut_PublishesOnlyRelayReachability()
+    {
+        await using var relay = new FakeIrohRelay();
+        using var service = new MemoryPkarr();
+        await using var transport = await IrohTransport.BindAsync(new IrohTransportOptions
+        {
+            Network = Offline().Network with { IrohRelayUrls = [relay.Url] },
+            DiscoveryHandler = service, PublishDirectAddresses = false,
+        });
+        IrohAddress record = IrohDiscovery.ParsePayload(Convert.FromHexString(transport.EndpointId), service.Payload!, out _);
+        Assert.Empty(record.DirectAddresses);
+        Assert.Equal(relay.Url, Assert.Single(record.RelayUrls));
+        Assert.Null(record.UserData); // raw UDP never claims an authenticated Pinhole session
+    }
+
+    [Fact]
+    public async Task DiscoveryOutage_DoesNotPreventRawUdpTraffic()
+    {
+        using var service = new MemoryPkarr { RejectPuts = true };
+        await using var listener = await IrohTransport.BindAsync(new IrohTransportOptions
+        {
+            Network = Offline().Network, DiscoveryHandler = service,
+        });
+        await using var dialer = await IrohTransport.BindAsync(Offline());
+        Assert.Equal(1, service.PutAttempts);
+        Assert.Null(service.Payload);
+        IrohRoute route = await dialer.ConnectAsync(listener.Address.ToString());
+        route.Send("direct despite discovery outage"u8);
+        Assert.Equal("direct despite discovery outage"u8.ToArray(),
+            (await listener.ReceiveAsync().AsTask().WaitAsync(Budget)).Payload.ToArray());
     }
 
     [Fact]
@@ -203,10 +251,17 @@ public sealed class IrohConnectivityTests
     {
         public byte[]? Payload;
         public Uri? LastUrl;
+        public bool RejectPuts { get; init; }
+        public int PutAttempts;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             LastUrl = request.RequestUri;
-            if (request.Method == HttpMethod.Put) Payload = await request.Content!.ReadAsByteArrayAsync(ct);
+            if (request.Method == HttpMethod.Put)
+            {
+                Interlocked.Increment(ref PutAttempts);
+                if (RejectPuts) return new(HttpStatusCode.ServiceUnavailable);
+                Payload = await request.Content!.ReadAsByteArrayAsync(ct);
+            }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Payload ?? []) };
         }
     }

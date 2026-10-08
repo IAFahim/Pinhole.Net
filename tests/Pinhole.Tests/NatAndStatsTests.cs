@@ -62,6 +62,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
@@ -70,6 +72,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
@@ -99,6 +103,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
@@ -107,6 +113,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
@@ -136,6 +144,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
         await using PinholeNode b = await PinholeNode.BindAsync(new PinholeOptions
@@ -144,6 +154,8 @@ public sealed class NatDetectorTests
             Relays = [],
             IrohRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
         });
 
@@ -171,6 +183,8 @@ public sealed class PathStatsTests
         Relays = [],
         IrohRelayUrls = [],
         ConnectTimeout = TimeSpan.FromSeconds(8),
+        PublishIrohAddress = false,
+        EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
     };
 

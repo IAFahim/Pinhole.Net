@@ -6,6 +6,8 @@ NAT test does not establish an Internet-wide connection success rate.
 
 The core was reviewed from `0ce33ae`; the Kotlin implementation was reviewed from
 OpusVoice `d804a58`. The PCP correction described below is part of this audit.
+The defaults below include the subsequent discovery-default change tracked in
+[#39](https://github.com/IAFahim/Pinhole.Net/issues/39).
 
 ## Implemented methods and their defaults
 
@@ -18,8 +20,8 @@ OpusVoice `d804a58`. The PCP correction described below is part of this audit.
 | Automatic PCP / NAT-PMP / UPnP mapping | Enabled by default; PCP corrected during this audit | Not implemented |
 | Introduction through iroh HTTPS relay | Enabled by default; direct upgrade attempts continue after a relayed session starts | Supported when the peer supplies relay addresses; direct probes continue while relayed |
 | Candidate updates and direct recovery | Announcements, STUN refresh, network watch, lookup hooks, and path validation | Announcements, host/STUN refresh, keepalive, and path recovery; fewer roaming capabilities than the core |
-| LAN discovery without ticket exchange | mDNS exists; `EnableLanDiscovery` defaults to false | Not integrated |
-| Stable identity and signed address lookup | Available; native publishing and direct-address publishing are opt-in | Resolves signed native IDs/tickets; no equivalent general listener/publisher API |
+| LAN discovery without ticket exchange | IPv4 mDNS announcements enabled by default; explicit opt-out available | Not integrated |
+| Stable identity and signed address lookup | Native publishing and direct-address publishing enabled by default; persist a seed for restart identity | Resolves signed native IDs/tickets; no equivalent general listener/publisher API |
 | Configured TURN relay | Supported with operator credentials; no TURN default | TURN candidates are not supported |
 | Direct TCP transport | Not implemented | Not implemented |
 

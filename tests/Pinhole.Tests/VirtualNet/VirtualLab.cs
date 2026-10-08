@@ -73,6 +73,7 @@ internal sealed class VirtualLab : IDisposable
             StunServers = StunServers,
             Relays = [.. _turns.Select(t => t.Config)],
             IrohRelayUrls = [],
+            PublishIrohAddress = false,
             EnableNetworkWatch = false,
             EnablePortMapping = false,
             EnableLanDiscovery = false,
