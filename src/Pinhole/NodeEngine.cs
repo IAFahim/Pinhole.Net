@@ -502,7 +502,11 @@ internal sealed class NodeEngine : IDisposable
                 foreach (UnicastIPAddressInformation addr in nic.GetIPProperties().UnicastAddresses)
                 {
                     IPAddress ip = addr.Address;
-                    if (ip.IsIPv6LinkLocal || ip.IsIPv6Teredo || ip.Equals(IPAddress.IPv6Any) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Loopback))
+                    // Link-locals ARE advertised: on access networks that isolate IPv4 between
+                    // wireless and wired clients (but bridge IPv6) they are the only direct path.
+                    // Scope stays local — peers re-scope onto their own outgoing interface when
+                    // sending, so the address rides the wire bare.
+                    if (ip.IsIPv6Teredo || ip.Equals(IPAddress.IPv6Any) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Loopback))
                     {
                         continue;
                     }
@@ -2319,8 +2323,35 @@ internal sealed class NodeEngine : IDisposable
         {
             ep = new IPEndPoint(ep.Address.MapToIPv6(), ep.Port);
         }
+        else if (ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0 && LinkLocalSendScope() is { } scope)
+        {
+            // A bare link-local from a peer's connection string carries no interface hint;
+            // routing one needs OUR scope. Best effort: the first up interface that owns a
+            // link-local (single-radio machines — phones, laptops — have exactly one).
+            ep = new IPEndPoint(new IPAddress(ep.Address.GetAddressBytes(), scope), ep.Port);
+        }
 
         return ep.Serialize();
+    }
+
+    private static int? LinkLocalSendScope()
+    {
+        try
+        {
+            // WiFi and Ethernet first; virtual and tunnel links last — a bare link-local
+            // scopes onto exactly one interface, and a VPN/cellular one never reaches the LAN.
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(nic => nic.OperationalStatus == OperationalStatus.Up && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .OrderBy(nic => nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet ? 0 : 1)
+                .Select(nic => (Nic: nic, Props: nic.GetIPProperties()))
+                .Where(t => t.Props.UnicastAddresses.Any(a => a.Address.IsIPv6LinkLocal))
+                .Select(t => t.Props.GetIPv6Properties()?.Index)
+                .FirstOrDefault(index => index is not null && index != 0);
+        }
+        catch (NetworkInformationException)
+        {
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ receive
