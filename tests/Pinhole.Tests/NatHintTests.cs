@@ -13,6 +13,25 @@ public sealed class NatHintTests
 
     private static IPEndPoint Mapping(int port) => new(IPAddress.Parse("198.51.100.7"), port);
 
+    [Fact]
+    public void DualStackObservations_CompareMappingsWithinEachFamily()
+    {
+        var v4 = Mapping(40000);
+        var v6 = new IPEndPoint(IPAddress.Parse("2001:db8::7"), 50000);
+        Assert.Equal(NatType.Unknown, NatDetector.Classify([v4, v6]));
+        Assert.Equal(NatType.Cone, NatDetector.Classify([v4, v4, v6, v6]));
+        Assert.Equal(NatType.Symmetric, NatDetector.Classify([v4, Mapping(41000), v6, v6]));
+    }
+
+    [Fact]
+    public async Task SeparateFamilies_DoNotAdvertiseASymmetricHint()
+    {
+        using FakeStunServer v4 = new() { ReportMappedOverride = Mapping(40000) };
+        using FakeStunServer v6 = new() { ReportMappedOverride = new IPEndPoint(IPAddress.Parse("2001:db8::7"), 50000) };
+        await using var node = await BindAsync([v4.LocalEndPoint, v6.LocalEndPoint]);
+        Assert.Equal(NatHint.Unknown, node.NatHint);
+    }
+
     private static Task<PinholeNode> BindAsync(IReadOnlyList<IPEndPoint> stun, TimeSpan? refresh = null) =>
         PinholeNode.BindAsync(new PinholeOptions
         {

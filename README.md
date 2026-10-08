@@ -6,6 +6,7 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 - **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
+- **LAN IPv6 fallback by default.** Link-local candidates supplement routable addresses, with probes on each eligible local Wi-Fi/Ethernet interface. Mobile and tunnel interfaces are excluded from link-local probing.
 - **Connection string, iroh-style.** An endpoint produces a connection string (stable peer ID + static key + relay + direct candidates); the other side dials it. How the string travels between the two peers — clipboard, your server, your game lobby — is the application's concern, not this library's. On a LAN, mDNS discovery can even replace the clipboard: `EnableLanDiscovery` announces the node as `_pinhole._udp.local` and `DiscoverLanPeersAsync` finds peers with no server at all.
 - **Encrypted and authenticated, by default.** Every session is AES-256-GCM per frame over a triple-DH X25519 handshake; the answering key is pinned to the connection string, so a man in the middle kills the dial instead of intercepting it. No certificates, no downgrade window — a stripped handshake fails, it never falls back. `Optional` speaks plaintext only with pre-1.6 peers; `Disabled` reproduces the old wire. [`Pinhole.Blobs`](#moving-files-pinholeblobs) rides the same session encryption.
 - **Open forever.** WiFi→mobile, IP changes, NAT rebinding, path death: the connection re-punches, migrates, or falls back to relay and stays up — modeled on how iroh keeps connections alive. It closes when you close it.
@@ -303,10 +304,11 @@ Console.WriteLine($"{s.DatagramsSent} sent, {s.DatagramsReceived} received, " +
 
 The node classifies its own NAT from its ordinary bind-time STUN probes: when two or
 more servers observe the same mapping the NAT is a cone (the reflexive candidate is
-punchable); when they observe different mappings it is symmetric, and the hint is
+punchable); when servers in the same address family observe different mappings it is symmetric, and the hint is
 embedded in future connection strings so dialers go relay-first — public reflexive
-punching is hopeless per-destination, but LAN and router-mapped candidates keep a
-one-second trickle and still connect directly. The classification repeats on every
+punching depends on the other peer's filtering, but direct candidates keep a
+one-second trickle. LAN and router mappings can also provide direct paths. IPv4 and IPv6
+observations are compared separately. The classification repeats on every
 STUN refresh, so a network change is picked up without re-dialing, and a manual
 override always wins:
 
@@ -373,6 +375,7 @@ var node = await PinholeNode.BindAsync(new PinholeOptions
     StunServers = null,             // null = free catalog; [] = no reflexive stage
     Listen = true,                  // accept strangers dialing your string
     EnableNetworkWatch = true,      // auto-roam on OS network changes
+    AdvertiseLinkLocal = true,      // LAN IPv6 fallback; false omits link-local candidates
     EnablePathValidation = true,    // detect silent direct-path death (see failure table)
     StunRefreshInterval = TimeSpan.FromMinutes(1), // re-probe STUN; 0 = off
     ReceiveBufferCapacity = 0,      // > 0 enables ReceiveAsync/ReadAllAsync
@@ -424,20 +427,29 @@ invisible. Late joins don't disturb existing pairs.
 
 ## When does it connect?
 
-Every row of this matrix ends in a connection — the table is only about *which path*
-carries it ([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
+Reachability depends on both peers' NATs, host firewalls, and available relay infrastructure
+([#15](https://github.com/IAFahim/Pinhole.Net/issues/15)):
 
 | Dialer side | Publisher side | Direct punch | Path used |
 |---|---|---|---|
-| Any (IPv6) | Any (IPv6) | Yes | Direct IPv6 |
+| Reachable IPv6 | Reachable IPv6 | Yes, when both firewalls permit it | Direct IPv6 |
 | Cone/EIM NAT | Cone/EIM NAT | Yes — simultaneous open, both sides punch at each other | Direct UDP |
-| Cone NAT | Symmetric NAT | Demoted to a one-second trickle — their per-destination mapping makes the reflexive candidate useless, and their embedded `NatHint` (derived automatically from the STUN observations) says so, so the dialer goes relay-first; LAN and router-mapped candidates keep the trickle and still connect directly when they exist | Relay (unless the peer holds a router mapping or shares your LAN) |
+| Cone NAT | Symmetric NAT | Depends on filtering and explicit mappings; direct probes continue once a second | Direct UDP when reachable, otherwise relay |
 | Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
-| Symmetric NAT | Symmetric NAT | No | Relay |
+| Symmetric NAT | Symmetric NAT | Ordinary STUN-based punching is not guaranteed; explicit mappings can help | Usually relay |
 | UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
 | TURN credentials configured | Firewall allows only relayed UDP | — | TURN relayed address (RFC 5766) |
 | Both behind the same NAT (CGNAT hairpin) | Each other | Usually fails — hairpinning is router-dependent and rarely works on CGNAT | Relay automatically; direct is expected-not-guaranteed |
 | Path dies mid-session | Any | Re-punched in the background | Survives on the relay until the punch lands |
+
+A host firewall can block an otherwise reachable direct path. For a server with a restricted
+inbound firewall, bind an application-owned UDP port and permit it in that firewall. The
+library does not change host firewall rules. To verify direct connectivity without data
+relay fallback, set `IrohRelayUrls = []` and `Relays = []` on the node, share a fresh ticket,
+and check `connection.Path.Kind == PathKind.Direct`. This also disables iroh introductions;
+peers that need simultaneous punching should exchange both tickets out of band. Fresh
+authenticated direct-address announcements restart relay-to-direct probing even after the
+previous upgrade budget has been spent.
 
 Two former non-goals from that same audit are gone, retired deliberately:
 **path-MTU discovery now runs by default** — padded token-checked pings climb from the

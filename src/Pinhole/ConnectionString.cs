@@ -35,7 +35,7 @@ public sealed record PinholeCandidate(
     byte[]? RelayKey = null);
 
 /// <summary>A NAT classification hint a publisher can embed in its connection string so
-/// dialers can skip a hopeless punch (symmetric NAT) and go straight to relay.</summary>
+/// dialers can pace direct probes while racing relay fallback.</summary>
 public enum NatHint : byte
 {
     /// <summary>The publisher has not classified its NAT; dialers should attempt the punch.</summary>
@@ -44,7 +44,8 @@ public enum NatHint : byte
     /// <summary>Endpoint-independent mapping: the reflexive candidate is reusable, so a direct punch can land.</summary>
     Cone = 1,
 
-    /// <summary>Per-destination mapping: the observed reflexive address is useless to a dialer — skip the punch, go straight to relay.</summary>
+    /// <summary>Per-destination mapping: public direct paths depend on the other peer's
+    /// filtering behavior; LAN and explicit router mappings may still be reachable.</summary>
     Symmetric = 2,
 }
 

@@ -72,6 +72,52 @@ public sealed class IrohRelayTests
     }
 
     [Fact]
+    public async Task FreshDirectAnnouncement_RestartsPassiveRelayedSession_ThenUpgrades()
+    {
+        await using var server = new FakeIrohRelay();
+        using var socket = new PunchRecordingSocket(SystemUdpSocket.Create(null));
+        await using var a = await PinholeNode.BindAsync(Options(server) with { UdpSocketFactory = _ => socket });
+        await using var b = await PinholeNode.BindAsync(Options(server));
+        Task<PinholeConnection> accept = a.AcceptAsync();
+        await using var atB = await b.ConnectAsync(RelayOnly(a));
+        await using var atA = await accept.WaitAsync(Timeout);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        a.Engine.SimulateDirectPathDeath(b.PeerId);
+        b.Engine.SimulateDirectPathDeath(a.PeerId);
+        await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Degraded && atB.State == PinholeConnectionState.Degraded);
+        // End the old upgrade workers, as they do after their finite probing budget.
+        Interlocked.Increment(ref a.Engine.Lookup(b.PeerId)!.PunchGeneration);
+        Interlocked.Increment(ref b.Engine.Lookup(a.PeerId)!.PunchGeneration);
+        await Task.Delay(1200);
+        int oldPort = b.LocalPort;
+        await b.Engine.SimulateInterfaceLossAsync().WaitAsync(Timeout);
+        Assert.NotEqual(oldPort, b.LocalPort);
+        // The new address arrives over the authenticated relay channel. The listener must
+        // actively probe it even though its previous upgrade worker has gone passive.
+        await TestPoll.UntilAsync(Timeout, () => socket.PunchTargets.Any(target => target.Port == b.LocalPort));
+        a.Engine.SimulateDirectPathRestore(b.PeerId);
+        b.Engine.SimulateDirectPathRestore(a.PeerId);
+        await TestPoll.UntilAsync(Timeout, () => atA.Path.Kind == PathKind.Direct && atB.Path.Kind == PathKind.Direct);
+        await Exchange(atA, atB, "fresh mobile address A to B");
+        await Exchange(atB, atA, "fresh mobile address B to A");
+    }
+
+    private sealed class PunchRecordingSocket(IUdpSocket inner) : IUdpSocket
+    {
+        public readonly ConcurrentQueue<IPEndPoint> PunchTargets = new();
+        public IPEndPoint LocalEndPoint => inner.LocalEndPoint;
+        public void SendTo(ReadOnlySpan<byte> frame, SocketAddress to)
+        {
+            if (!frame.IsEmpty && frame[0] == (byte)FrameType.Punc)
+                PunchTargets.Enqueue((IPEndPoint)new IPEndPoint(IPAddress.IPv6Any, 0).Create(to));
+            inner.SendTo(frame, to);
+        }
+        public int ReceiveFrom(Span<byte> buffer, SocketAddress from) => inner.ReceiveFrom(buffer, from);
+        public void Dispose() => inner.Dispose();
+    }
+
+    [Fact]
     public async Task RelayIntroduction_ExchangesCandidates_ThenUpgradesBothSidesToUdp()
     {
         await using var server = new FakeIrohRelay();

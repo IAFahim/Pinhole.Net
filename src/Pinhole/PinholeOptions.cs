@@ -54,13 +54,14 @@ public sealed record PinholeOptions
     /// <see cref="PinholeNode.RoamNowAsync(System.Threading.CancellationToken)"/> yourself.</summary>
     public bool EnableNetworkWatch { get; init; } = true;
 
-    /// <summary>Advertise IPv6 link-local candidates (default false). Access networks that
+    /// <summary>Advertise IPv6 link-local candidates (default true). Access networks that
     /// isolate IPv4 between wireless and wired clients but bridge IPv6 — common on guest and
     /// enterprise WiFi — leave link-local as the only direct path, and a peer that dials the
     /// bare address re-scopes it onto its own radio/ethernet link. At most two candidates,
-    /// wireless first, appended after every routable address. Off by default: link-locals are
-    /// unreachable noise for ordinary internet peers.</summary>
-    public bool AdvertiseLinkLocal { get; init; }
+    /// wireless first, appended after every routable address. Link-local probes start after
+    /// routable probes and try each local LAN interface; cellular and tunnel interfaces are
+    /// excluded. Set false to omit these LAN-only fallback candidates.</summary>
+    public bool AdvertiseLinkLocal { get; init; } = true;
 
     /// <summary>Ask the network's router for an explicit UDP port mapping (PCP, then
     /// NAT-PMP, then UPnP — the same strategy iroh's portmapper uses; default true). A

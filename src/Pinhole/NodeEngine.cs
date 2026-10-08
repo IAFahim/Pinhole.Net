@@ -127,6 +127,7 @@ internal sealed class NodeEngine : IDisposable
     private const uint StunCookie = 0x2112A442;
 
     private static readonly TimeSpan PunchPace = TimeSpan.FromMilliseconds(200);
+    private const long LinkLocalFallbackDelayMs = 600;
     private static readonly TimeSpan UpgradePace = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SymmetricDirectTrickle = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan DeadBeaconPace = TimeSpan.FromSeconds(1);
@@ -452,7 +453,8 @@ internal sealed class NodeEngine : IDisposable
         int port = LocalPort;
         _localCandidates.Clear();
         _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, port)));
-        foreach (IPEndPoint ep in HostEndpoints(port, _options.AdvertiseLinkLocal))
+        List<IPEndPoint> hosts = HostEndpoints(port, _options.AdvertiseLinkLocal);
+        foreach (IPEndPoint ep in hosts.Where(ep => !ep.Address.IsIPv6LinkLocal))
         {
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
         }
@@ -478,6 +480,11 @@ internal sealed class NodeEngine : IDisposable
             }
         }
 
+        foreach (IPEndPoint ep in hosts.Where(ep => ep.Address.IsIPv6LinkLocal))
+        {
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, ep));
+        }
+
         if (_endpointIdentity is not null)
         {
             foreach (IrohRelay relay in _irohRelays.Values.Where(r => r.IsAlive))
@@ -490,7 +497,7 @@ internal sealed class NodeEngine : IDisposable
     {
         var seen = new HashSet<IPAddress>();
         var list = new List<IPEndPoint>();
-        // Link-locals are collected separately and appended last, and only when opted in:
+        // Link-locals are collected separately and appended last when enabled:
         // they are a fallback for access networks that isolate IPv4 between wireless and
         // wired clients but bridge IPv6. Only radio/ethernet links qualify (tunnels and
         // bridges on macOS/Windows would flood the candidate list), at most two ride along,
@@ -611,7 +618,8 @@ internal sealed class NodeEngine : IDisposable
 
     /// <summary>Classifies the NAT from the raw multi-server observations: two servers
     /// seeing the same mapping means endpoint-independent (cone) mapping, divergent ones
-    /// mean per-destination (symmetric) — the hint dialers use to skip a hopeless punch.
+    /// mean per-destination (symmetric), which changes punch pacing. Address families are
+    /// compared separately: different IPv4 and IPv6 endpoints are normal on dual-stack.
     /// One observation can never distinguish the behaviors, and a pass where too few
     /// servers answered never clears an earlier, better-informed classification.</summary>
     private void ObserveNatHint(IPEndPoint[] observedPerServer)
@@ -621,7 +629,9 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        NatHint seen = observedPerServer.Distinct().Count() > 1 ? NatHint.Symmetric : NatHint.Cone;
+        NatType classification = NatDetector.Classify(observedPerServer);
+        if (classification == NatType.Unknown) return;
+        NatHint seen = classification == NatType.Symmetric ? NatHint.Symmetric : NatHint.Cone;
         lock (_gate)
         {
             _observedNatHint = seen;
@@ -1641,6 +1651,14 @@ internal sealed class NodeEngine : IDisposable
                         continue;
                     }
 
+                    // Give ordinary routes (especially same-machine loopback) time to win
+                    // before probing LAN-only fallbacks. Once Open, this loop stops.
+                    if (candidate.Address.Address.IsIPv6LinkLocal
+                        && Environment.TickCount64 - c.LastKickTicks < LinkLocalFallbackDelayMs)
+                    {
+                        continue;
+                    }
+
                     try
                     {
                         if (candidate.Kind == CandidateKind.IrohRelay)
@@ -2313,6 +2331,15 @@ internal sealed class NodeEngine : IDisposable
     {
         // Volatile read, no lock: this runs once per sent frame, and the rebind that swaps
         // the socket is rare enough to pay for itself with a caught send error.
+        if (ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0)
+        {
+            foreach (IPEndPoint scoped in ScopeLinkLocal(ep, LinkLocalSendScopes()))
+            {
+                try { _udp.SendTo(frame, ToWire(scoped)); }
+                catch (SocketException) { } // one down link must not suppress the other LAN scopes
+            }
+            return;
+        }
         _udp.SendTo(frame, ToWire(ep));
     }
 
@@ -2347,35 +2374,35 @@ internal sealed class NodeEngine : IDisposable
         {
             ep = new IPEndPoint(ep.Address.MapToIPv6(), ep.Port);
         }
-        else if (ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0 && LinkLocalSendScope() is { } scope)
-        {
-            // A bare link-local from a peer's connection string carries no interface hint;
-            // routing one needs OUR scope. Best effort: the first up interface that owns a
-            // link-local (single-radio machines — phones, laptops — have exactly one).
-            ep = new IPEndPoint(new IPAddress(ep.Address.GetAddressBytes(), scope), ep.Port);
-        }
-
         return ep.Serialize();
     }
 
-    private static int? LinkLocalSendScope()
+    internal static IReadOnlyList<IPEndPoint> ScopeLinkLocal(IPEndPoint ep, IReadOnlyList<int> scopes)
+    {
+        if (!ep.Address.IsIPv6LinkLocal || ep.Address.ScopeId != 0) return [ep];
+        return scopes.Where(scope => scope > 0).Distinct().Take(4)
+            .Select(scope => new IPEndPoint(new IPAddress(ep.Address.GetAddressBytes(), scope), ep.Port)).ToArray();
+    }
+
+    private static IReadOnlyList<int> LinkLocalSendScopes()
     {
         try
         {
-            // WiFi and Ethernet first; virtual and tunnel links last — a bare link-local
-            // scopes onto exactly one interface, and a VPN/cellular one never reaches the LAN.
+            // A scope identifies OUR interface. Try each LAN link instead of choosing the
+            // first one; mobile, virtual, and tunnel interfaces cannot reach this LAN peer.
             return NetworkInterface.GetAllNetworkInterfaces()
-                .Where(nic => nic.OperationalStatus == OperationalStatus.Up && nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                .OrderBy(nic => nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet ? 0 : 1)
+                .Where(nic => nic.OperationalStatus == OperationalStatus.Up
+                    && nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet)
+                .OrderBy(nic => nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? 0 : 1)
                 .Select(nic => (Nic: nic, Props: nic.GetIPProperties()))
                 .Where(t => t.Props.UnicastAddresses.Any(a => a.Address.IsIPv6LinkLocal))
-                .Select(t => t.Props.GetIPv6Properties()?.Index)
-                .FirstOrDefault(index => index is not null && index != 0);
+                .Select(t => t.Props.GetIPv6Properties()?.Index ?? 0)
+                .Where(index => index > 0).Distinct().Take(4).ToArray();
         }
         catch (NetworkInformationException)
         {
         }
-        return null;
+        return [];
     }
 
     // ------------------------------------------------------------------ receive
@@ -3021,18 +3048,24 @@ internal sealed class NodeEngine : IDisposable
 
         byte[] body = frame[(HeaderSize + 4)..].ToArray();
         List<PinholeCandidate> fresh = new();
+        bool hasNewDirect;
         try
         {
             var reader = new CandidateCodec.Reader(body, 0);
             byte count = reader.ReadByte();
             fresh.EnsureCapacity(count);
-            for (int i = 0; i < count && !reader.AtEnd; i++)
+            if (count > ConnectionString.MaxCandidates) return;
+            for (int i = 0; i < count; i++)
             {
                 fresh.Add(CandidateCodec.Read(ref reader));
             }
 
+            if (!reader.AtEnd) return;
+
             lock (_gate)
             {
+                hasNewDirect = fresh.Any(candidate => candidate.Kind is CandidateKind.Direct or CandidateKind.Reflexive
+                    && !c.PeerCandidates.Any(old => old.Kind == candidate.Kind && old.Address.Equals(candidate.Address)));
                 c.PeerCandidates.Clear();
                 c.PeerCandidates.AddRange(fresh);
             }
@@ -3057,7 +3090,8 @@ internal sealed class NodeEngine : IDisposable
             DirectPathConfirmed(c, arrival.Direct!);
         }
 
-        if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+        if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
+            || c.State == PinholeConnectionState.Degraded && hasNewDirect)
         {
             KickPunch(c); // the peer just told us where it now lives
         }

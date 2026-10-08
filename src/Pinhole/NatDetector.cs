@@ -16,14 +16,14 @@ public enum NatType
     Cone,
 
     /// <summary>Different servers observed different mapped endpoints: the NAT creates a
-    /// mapping per destination. Pre-arranged punching between strangers is hopeless;
-    /// dial through a relay.</summary>
+    /// mapping per destination. Direct traversal depends on the other peer's filtering
+    /// behavior and any explicit port mapping; relay fallback may be needed.</summary>
     Symmetric,
 }
 
 /// <summary>Classifies the local NAT by comparing what several STUN servers observe of the
 /// SAME socket. This is the cheap, honest test: it separates symmetric NATs (per-destination
-/// mappings, punch is hopeless, go relay) from cone-shaped ones (punch away). Finer
+/// mappings) from endpoint-independent mappings. Finer
 /// subtyping (restricted vs port-restricted cone) needs a cooperating server answering from
 /// alternate ports, which public infrastructure does not offer.</summary>
 public static class NatDetector
@@ -49,7 +49,6 @@ public static class NatDetector
 
         using var socket = new PeerSocket(0x4E); // 'N': an idle frame type for a probe-only socket
         var seen = new List<IPEndPoint>();
-        int answered = 0;
         foreach (IPEndPoint server in servers)
         {
             IPEndPoint mapped;
@@ -66,18 +65,18 @@ public static class NatDetector
                 continue; // an unresponsive server must not sink the verdict
             }
 
-            answered++;
-            if (!seen.Contains(mapped))
-            {
-                seen.Add(mapped);
-            }
+            seen.Add(mapped);
         }
 
-        if (answered < 2)
-        {
-            return NatType.Unknown; // zero or one observation is not a comparison
-        }
+        return Classify(seen);
+    }
 
-        return seen.Count == 1 ? NatType.Cone : NatType.Symmetric;
+    // IPv4 and IPv6 naturally have different endpoints. Only compare observations within
+    // one family, or a healthy dual-stack network would be mislabeled symmetric.
+    internal static NatType Classify(IReadOnlyList<IPEndPoint> observations)
+    {
+        var comparable = observations.GroupBy(ep => ep.AddressFamily).Where(group => group.Count() >= 2).ToArray();
+        if (comparable.Length == 0) return NatType.Unknown;
+        return comparable.Any(group => group.Distinct().Count() > 1) ? NatType.Symmetric : NatType.Cone;
     }
 }
