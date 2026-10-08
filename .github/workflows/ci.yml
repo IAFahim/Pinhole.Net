@@ -38,7 +38,7 @@ jobs:
       - name: Run test suite
         run: >
           dotnet test tests/Pinhole.Tests
-          -c Release --filter "Category!=Performance"
+          -c Release --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
       - name: Upload test results (hang diagnostics)
@@ -46,6 +46,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: testresults-${{ matrix.os }}
+          path: tests/Pinhole.Tests/TestResults/
+          retention-days: 5
+
+  resources:
+    name: resources-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Collection isolation excludes concurrent test bodies, but cannot stop runtime
+    # caches and lingering background work from earlier collections. A fresh testhost
+    # makes the process-wide heap gate attributable to these resource scenarios.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Measure resources in a fresh test process
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release
+          --filter "FullyQualifiedName~BoundedResourceTests"
+          --logger trx --logger "console;verbosity=detailed"
+          --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
+      - name: Upload resource results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-${{ matrix.os }}
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 

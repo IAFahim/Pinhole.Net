@@ -85,6 +85,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 Assert.Equal(socketsAtRest, lab.Net.LiveSockets); // downloader node released its socket
                 GC.Collect();
                 heapSamples.Add(GC.GetTotalMemory(forceFullCollection: true));
+                output.WriteLine($"cycle {i}: heap {heapSamples[^1]} bytes");
 
                 // A cancelled attempt must leave an honest resumable prefix behind.
                 Assert.True(Directory.Exists(Path.Combine(outDir, "rung.bin.pinhole-part")),
