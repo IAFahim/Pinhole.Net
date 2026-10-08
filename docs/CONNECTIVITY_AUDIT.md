@@ -9,7 +9,8 @@ OpusVoice `d804a58`. The PCP correction described below is part of this audit.
 The defaults below include the subsequent discovery-default change tracked in
 [#39](https://github.com/IAFahim/Pinhole.Net/issues/39), phone router mapping
 [#2](https://github.com/IAFahim/OpusVoice/issues/2), and dual-family LAN discovery
-[#41](https://github.com/IAFahim/Pinhole.Net/issues/41).
+[#41](https://github.com/IAFahim/Pinhole.Net/issues/41) with Android browsing
+[#3](https://github.com/IAFahim/OpusVoice/issues/3).
 
 ## Implemented methods and their defaults
 
@@ -22,7 +23,7 @@ The defaults below include the subsequent discovery-default change tracked in
 | Automatic PCP / NAT-PMP / UPnP mapping | Enabled by default; PCP corrected during this audit | Enabled by default with Android OS-route gateways; lease renewal/release and authenticated candidate updates |
 | Introduction through iroh HTTPS relay | Enabled by default; direct upgrade attempts continue after a relayed session starts | Supported when the peer supplies relay addresses; direct probes continue while relayed |
 | Candidate updates and direct recovery | Announcements, STUN refresh, network watch, lookup hooks, and path validation | Announcements, host/STUN refresh, keepalive, and path recovery; fewer roaming capabilities than the core |
-| LAN discovery without ticket exchange | IPv4/IPv6 mDNS on active multicast interfaces, enabled by default; explicit opt-out available | Not integrated |
+| LAN discovery without ticket exchange | IPv4/IPv6 mDNS on active multicast interfaces, enabled by default; explicit opt-out available | Android NSD browsing enabled in the foreground; nearby receiver selection creates an encrypted-key ticket |
 | Stable identity and signed address lookup | Native publishing and direct-address publishing enabled by default; persist a seed for restart identity | Resolves signed native IDs/tickets; no equivalent general listener/publisher API |
 | Configured TURN relay | Supported with operator credentials; no TURN default | TURN candidates are not supported |
 | Direct TCP transport | Not implemented | Not implemented |
@@ -30,7 +31,8 @@ The defaults below include the subsequent discovery-default change tracked in
 Core references: [options](../src/Pinhole/PinholeOptions.cs),
 [engine](../src/Pinhole/NodeEngine.cs), [node](../src/Pinhole/PinholeNode.cs),
 [port mapping](../src/Pinhole/PortMappingService.cs).
-Phone reference: [PinholeDialer.kt with automatic router mapping](https://github.com/IAFahim/OpusVoice/blob/affd577e7d013a824116e2a9d2f1e755c0cb87af/pinhole/src/main/kotlin/pinhole/PinholeDialer.kt).
+Phone references: [PinholeDialer.kt with automatic router mapping](https://github.com/IAFahim/OpusVoice/blob/affd577e7d013a824116e2a9d2f1e755c0cb87af/pinhole/src/main/kotlin/pinhole/PinholeDialer.kt),
+[LAN receiver validation and ticket creation](https://github.com/IAFahim/OpusVoice/blob/169fd9d2be59a7457d2c68b51cb5a06b0e574c91/pinhole/src/main/kotlin/pinhole/LanReceiver.kt).
 
 LAN discovery makes nearby peers discoverable; it does not traverse Internet NAT.
 Keepalive and PMTU discovery preserve and tune an existing path. They do not create

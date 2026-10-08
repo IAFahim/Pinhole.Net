@@ -104,8 +104,18 @@ public sealed class PathValidationTests
         await using var a = await PinholeNode.BindAsync(options);
         await using var b = await PinholeNode.BindAsync(options);
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
-        IPEndPoint originalA = a.Engine.Lookup(b.PeerId)!.DirectRemoteEp!;
-        IPEndPoint originalB = b.Engine.Lookup(a.PeerId)!.DirectRemoteEp!;
+        // The initial race can establish a relay session first. This scenario restores
+        // the original UDP path, so record it only after BOTH sides actually select it.
+        IPEndPoint? originalA = null, originalB = null;
+        await TestPoll.UntilAsync(Timeout, () =>
+        {
+            PinholePath pathA = atA.Path, pathB = atB.Path;
+            if (atA.State != PinholeConnectionState.Open || atB.State != PinholeConnectionState.Open
+                || pathA.Kind != PathKind.Direct || pathB.Kind != PathKind.Direct || pathA.Remote is null || pathB.Remote is null) return false;
+            originalA = pathA.Remote;
+            originalB = pathB.Remote;
+            return true;
+        });
         await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
             && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
 
