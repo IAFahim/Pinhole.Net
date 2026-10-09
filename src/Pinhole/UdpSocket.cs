@@ -42,28 +42,36 @@ internal sealed class SystemUdpSocket : IUdpSocket
     private SystemUdpSocket(Socket udp) => _udp = udp;
 
     /// <summary>Creates and binds the socket exactly as the engine always did.</summary>
-    public static IUdpSocket Create(IPEndPoint? bind)
+    public static IUdpSocket Create(IPEndPoint? bind) => CreateCore(bind, 4 * 1024 * 1024);
+
+    internal static IUdpSocket CreateForInterface(IPEndPoint? bind) => CreateCore(bind, 512 * 1024);
+
+    private static IUdpSocket CreateCore(IPEndPoint? bind, int bufferBytes)
     {
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-        // Blocked receives must wake up periodically: closing a socket while a sync receive
-        // holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so disposal needs the
-        // receive loop to come back and observe the disposed state.
-        udp.ReceiveTimeout = 200;
-        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
-        udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, 4 * 1024 * 1024);
-        if (OperatingSystem.IsWindows())
+        try
         {
-            const int sioUdpConnreset = -1744830452;
-            udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
-        }
+            // Blocked receives must wake up periodically: closing a socket while a sync receive
+            // holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so disposal needs the
+            // receive loop to come back and observe the disposed state.
+            udp.ReceiveTimeout = 200;
+            udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, bufferBytes);
+            udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, bufferBytes);
+            if (OperatingSystem.IsWindows())
+            {
+                const int sioUdpConnreset = -1744830452;
+                udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
+            }
 
-        // A dual-mode socket cannot bind a bare IPv4 address; map it so a caller's
-        // IPAddress.Loopback/Any bind option works instead of throwing.
-        IPEndPoint? bindV6 = bind is { Address.AddressFamily: AddressFamily.InterNetwork }
-            ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
-            : bind;
-        udp.Bind(bindV6 ?? new IPEndPoint(IPAddress.IPv6Any, 0));
-        return new SystemUdpSocket(udp);
+            // A dual-mode socket cannot bind a bare IPv4 address; map it so a caller's
+            // IPAddress.Loopback/Any bind option works instead of throwing.
+            IPEndPoint? bindV6 = bind is { Address.AddressFamily: AddressFamily.InterNetwork }
+                ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
+                : bind;
+            udp.Bind(bindV6 ?? new IPEndPoint(IPAddress.IPv6Any, 0));
+            return new SystemUdpSocket(udp);
+        }
+        catch { udp.Dispose(); throw; }
     }
 
     public IPEndPoint LocalEndPoint => (IPEndPoint)_udp.LocalEndPoint!;

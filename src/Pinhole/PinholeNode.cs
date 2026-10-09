@@ -6,7 +6,8 @@ using System.Threading.Channels;
 
 namespace Pinhole;
 
-/// <summary>A Pinhole endpoint: one UDP socket, zero or more relay allocations, and every
+/// <summary>A Pinhole endpoint: a primary UDP socket, bounded interface sources,
+/// zero or more relay allocations, and every
 /// connection this peer is part of — all multiplexed over the same port.
 ///
 /// Bind, hand out the connection string, dial or accept. How the string travels between the
@@ -239,6 +240,11 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
+
+    /// <summary>Local and STUN-observed endpoints for each additional source-bound
+    /// UDP socket. Observations are kept per socket and do not assert that a peer
+    /// can reach them. Empty when interface candidates are disabled/unavailable.</summary>
+    public IReadOnlyList<PinholeInterfaceCandidates> InterfaceCandidates => _engine.InterfaceCandidatesSnapshot();
 
     /// <summary>The external endpoint the network's router granted this socket (UPnP,
     /// NAT-PMP, or PCP), or null. It is already advertised as a reflexive candidate in

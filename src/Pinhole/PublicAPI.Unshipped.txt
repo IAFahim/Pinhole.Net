@@ -1,4 +1,25 @@
 #nullable enable
+Pinhole.PinholeOptions.EnableInterfaceCandidates.get -> bool
+Pinhole.PinholeOptions.EnableInterfaceCandidates.init -> void
+Pinhole.PinholeNode.InterfaceCandidates.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeInterfaceCandidates!>!
+Pinhole.PinholeInterfaceCandidates
+Pinhole.PinholeInterfaceCandidates.<Clone>$() -> Pinhole.PinholeInterfaceCandidates!
+Pinhole.PinholeInterfaceCandidates.Deconstruct(out System.Net.IPEndPoint! LocalEndpoint, out System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>! ReflexiveEndpoints) -> void
+Pinhole.PinholeInterfaceCandidates.Equals(Pinhole.PinholeInterfaceCandidates? other) -> bool
+Pinhole.PinholeInterfaceCandidates.InterfaceIndex.get -> int
+Pinhole.PinholeInterfaceCandidates.InterfaceIndex.init -> void
+Pinhole.PinholeInterfaceCandidates.LocalEndpoint.get -> System.Net.IPEndPoint!
+Pinhole.PinholeInterfaceCandidates.LocalEndpoint.init -> void
+Pinhole.PinholeInterfaceCandidates.MappingHint.get -> Pinhole.NatHint
+Pinhole.PinholeInterfaceCandidates.MappingHint.init -> void
+Pinhole.PinholeInterfaceCandidates.PinholeInterfaceCandidates(System.Net.IPEndPoint! LocalEndpoint, System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>! ReflexiveEndpoints) -> void
+Pinhole.PinholeInterfaceCandidates.ReflexiveEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.PinholeInterfaceCandidates.ReflexiveEndpoints.init -> void
+override Pinhole.PinholeInterfaceCandidates.Equals(object? obj) -> bool
+override Pinhole.PinholeInterfaceCandidates.GetHashCode() -> int
+override Pinhole.PinholeInterfaceCandidates.ToString() -> string!
+static Pinhole.PinholeInterfaceCandidates.operator !=(Pinhole.PinholeInterfaceCandidates? left, Pinhole.PinholeInterfaceCandidates? right) -> bool
+static Pinhole.PinholeInterfaceCandidates.operator ==(Pinhole.PinholeInterfaceCandidates? left, Pinhole.PinholeInterfaceCandidates? right) -> bool
 Pinhole.PinholeOptions.RelaySignalingOnly.get -> bool
 Pinhole.PinholeOptions.RelaySignalingOnly.init -> void
 Pinhole.PinholeConnection.RelaySignalingReady.get -> bool
@@ -380,3 +401,26 @@ Pinhole.PinholeOptions.PublishIrohAddress.get -> bool
 Pinhole.PinholeOptions.PublishIrohAddress.init -> void
 Pinhole.PinholeOptions.AdvertiseLinkLocal.get -> bool
 Pinhole.PinholeOptions.AdvertiseLinkLocal.init -> void
+Pinhole.NatBehaviorReport
+Pinhole.NatBehaviorReport.AlternateRepliesMissing.get -> bool
+Pinhole.NatBehaviorReport.Elapsed.get -> System.TimeSpan
+Pinhole.NatBehaviorReport.Filtering.get -> Pinhole.NatFilteringBehavior
+Pinhole.NatBehaviorReport.LocalEndpoint.get -> System.Net.IPEndPoint!
+Pinhole.NatBehaviorReport.Mapping.get -> Pinhole.NatMappingBehavior
+Pinhole.NatBehaviorReport.MappingObservations.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.NatBehaviorReport.MeasuredAtUtc.get -> System.DateTimeOffset
+Pinhole.NatBehaviorReport.ProbesSent.get -> int
+Pinhole.NatBehaviorReport.SupportsAlternates.get -> bool
+Pinhole.NatFilteringBehavior
+Pinhole.NatFilteringBehavior.AddressDependent = 2 -> Pinhole.NatFilteringBehavior
+Pinhole.NatFilteringBehavior.EndpointIndependent = 1 -> Pinhole.NatFilteringBehavior
+Pinhole.NatFilteringBehavior.Unknown = 0 -> Pinhole.NatFilteringBehavior
+Pinhole.NatMappingBehavior
+Pinhole.NatMappingBehavior.AddressAndPortDependent = 3 -> Pinhole.NatMappingBehavior
+Pinhole.NatMappingBehavior.AddressDependent = 2 -> Pinhole.NatMappingBehavior
+Pinhole.NatMappingBehavior.EndpointIndependent = 1 -> Pinhole.NatMappingBehavior
+Pinhole.NatMappingBehavior.Unknown = 0 -> Pinhole.NatMappingBehavior
+static Pinhole.NatDetector.InspectAsync(System.Net.IPEndPoint! server, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.NatBehaviorReport!>!
+Pinhole.PinholeConnection.PortPredictionProbesSent.get -> long
+Pinhole.PinholeOptions.EnablePortPrediction.get -> bool
+Pinhole.PinholeOptions.EnablePortPrediction.init -> void

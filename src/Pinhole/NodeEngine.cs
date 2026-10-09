@@ -20,6 +20,7 @@ internal enum FrameType : byte
     Announce = 0x55, // body = [sender's token][count][candidate TLV stream]
     Bye = 0x56,   // body = [sender's token]
     Hsck = 0x57,  // handshake confirm; body = [sender's token][confirm MAC:16] — the dialer's proof after a verified PACK
+    Predict = 0x58, // sealed, negotiated, bounded prediction control; never a reflexive candidate
 }
 
 // Wire authentication model: every frame carries the sender's per-connection token at
@@ -29,7 +30,7 @@ internal enum FrameType : byte
 // string (public by design) lets a stranger dial, but not spoof, hijack, or kill an
 // established session.
 
-/// <summary>Per-peer state. One node multiplexes many of these over its single UDP socket;
+/// <summary>Per-peer state. One node multiplexes these over its shared UDP sources and TCP sidecar;
 /// every frame carries the sender's peer ID so the receiver demuxes without a socket pair per
 /// conversation. Frame handlers run on the receive thread, state transitions take
 /// <see cref="Gate"/>, counters are Interlocked.</summary>
@@ -45,15 +46,20 @@ internal sealed class ConnState
     public SocketAddress? DirectRemote;      // where direct frames go (last-wins by peer ID)
     public IPEndPoint? DirectRemoteEp;       // display form of DirectRemote
     public TcpLink? DirectTcp;               // null on UDP; authenticated stream on TCP
+    public IUdpSocket? DirectUdpSocket;      // null for the wildcard socket; actual source on a bound interface
     public TcpLink? PendingTcp;              // incoming TCP stranger, not accepted before proof
     public bool IncomingQueued;
     public bool IsIncoming;
     public bool PeerCandidatesReceived;
+    public bool AwaitInitialCandidateExchange;
     public long LastCandidateAnnouncement;
     public long RelayedDatagramsBlocked;
+    public long PortPredictionProbesSent;
+    public volatile PortPredictionState? Prediction;
     public int TcpDialing;
     public long LastTcpAttempt;
     public TcpLink? ProbeTcp;
+    public IUdpSocket? ProbeUdpSocket;
     public IPEndPoint? RelayRemote;          // peer's relayed address
     public volatile bool RelayReady;         // permission for RelayRemote exists on our allocation
     public readonly List<PinholeCandidate> PeerCandidates = new(); // guarded by engine gate
@@ -105,6 +111,7 @@ internal sealed class ConnState
     public int PmtuProbeTries;             // Gate
     public long PmtuDeadlineTicks;         // Gate
     public SocketAddress? PmtuProbeTarget; // Gate; the endpoint the probe went to
+    public IUdpSocket? PmtuProbeUdpSocket;
     public long PmtuNextProbeTicks;        // Gate; cooldown after failure / ceiling
     public long PmtuProbesSent;            // Interlocked
     public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
@@ -120,7 +127,7 @@ internal sealed class ConnState
     public int ConsecutiveSendFailures;
 }
 
-internal sealed class NodeEngine : IDisposable
+internal sealed partial class NodeEngine : IDisposable
 {
     public const int MaxPayload = 1200;
     private const int HeaderSize = CryptoWire.HeaderLength;
@@ -185,9 +192,13 @@ internal sealed class NodeEngine : IDisposable
     private PortMappingService? _portMap;
     private PortMappingService? _tcpPortMap;
     private IPv6FirewallService? _ipv6Firewall;
+    private InterfaceUdpTransport? _interfaceUdp;
+    private int _interfaceNetworkChanged;
+    private long _nextInterfaceRefresh;
     private int _ipv6NetworkChanged;
     private long _nextIPv6FirewallRefresh;
-    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
+    private sealed record StunAttempt(byte[] Transaction, IPEndPoint Server, IUdpSocket Socket, TaskCompletionSource<StunBindingReply> Reply);
+    private readonly ConcurrentDictionary<ulong, StunAttempt> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
     // Address-lookup providers (built-in rendezvous + application-supplied). Empty unless
     // configured: rediscovery is opt-in infrastructure, never a default network behavior.
@@ -309,6 +320,13 @@ internal sealed class NodeEngine : IDisposable
 
         StartRecvLoop();
 
+        if (_options.EnableInterfaceCandidates && _options.EnableDirectUdp && _rawReceive is null
+            && (_options.UdpSocketFactory is null || _options.InterfaceUdpSocketFactory is not null))
+        {
+            _interfaceUdp = new InterfaceUdpTransport(_options, TryProbeFromAsync, OnInterfaceFrame, OnInterfaceCandidatesChanged);
+            RefreshInterfaceCandidates();
+        }
+
         try
         {
             await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).WaitAsync(_options.BindProbeBudget, ct).ConfigureAwait(false);
@@ -375,6 +393,7 @@ internal sealed class NodeEngine : IDisposable
         }
 
         Volatile.Write(ref _ipv6NetworkChanged, 1);
+        Volatile.Write(ref _interfaceNetworkChanged, 1);
 
         // Interface churn fires several events per roam; collapse them into one recovery pass.
         _ = Task.Run(async () =>
@@ -402,8 +421,8 @@ internal sealed class NodeEngine : IDisposable
         lock (_gate)
         {
             changed = SynchronizeMappedLeasesNoLock();
-            if (changed) RefreshLocalCandidatesNoLock();
-            snapshot = _localCandidates.Take(ConnectionString.MaxCandidates).ToArray();
+            if (changed || _interfaceUdp is not null) RefreshLocalCandidatesNoLock();
+            snapshot = CandidateSelection.Published(_localCandidates, _mappedEndpoint, _mappedTcpEndpoint, InterfaceCandidatesSnapshot());
         }
         if (changed) PublishAddressRecordSoon();
         return snapshot;
@@ -425,6 +444,26 @@ internal sealed class NodeEngine : IDisposable
     }
 
     internal int? TcpListeningPort => _tcp?.ListeningPort;
+
+    internal IReadOnlyList<PinholeInterfaceCandidates> InterfaceCandidatesSnapshot() => _interfaceUdp?.Snapshot() ?? [];
+
+    private void RefreshInterfaceCandidates(bool invalidate = false)
+    {
+        if (_disposed || _interfaceUdp is null) return;
+        bool changed = Interlocked.Exchange(ref _interfaceNetworkChanged, 0) != 0;
+        _interfaceUdp.Refresh(invalidate || changed);
+        _nextInterfaceRefresh = Environment.TickCount64 + 30_000;
+    }
+
+    private void OnInterfaceCandidatesChanged()
+    {
+        if (_disposed) return;
+        lock (_gate) RefreshLocalCandidatesNoLock();
+        foreach (ConnState c in ConnectionsSnapshot())
+            if (c.DirectUdpSocket is { } socket && _interfaceUdp?.Contains(socket) != true) NotifyPathSuspect(c);
+        PublishAddressRecordSoon();
+        ReannounceAndRepunch();
+    }
 
     internal IReadOnlyList<IPEndPoint> IPv6FirewallSnapshot(bool tcp = false) =>
         _ipv6Firewall?.Snapshot(tcp ? ProtocolType.Tcp : ProtocolType.Udp) ?? [];
@@ -521,6 +560,15 @@ internal sealed class NodeEngine : IDisposable
         foreach (IPEndPoint ep in _reflexive)
         {
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, ep));
+        }
+
+        foreach (PinholeInterfaceCandidates source in InterfaceCandidatesSnapshot())
+        {
+            if (!_localCandidates.Any(c => c.Kind == CandidateKind.Direct && c.Address.Equals(source.LocalEndpoint)))
+                _localCandidates.Add(new(CandidateKind.Direct, source.LocalEndpoint));
+            foreach (IPEndPoint external in source.ReflexiveEndpoints)
+                if (!_localCandidates.Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(external)))
+                    _localCandidates.Add(new(CandidateKind.Reflexive, external));
         }
 
         // A router-granted mapping is advertised as a reflexive candidate: it is an address
@@ -636,18 +684,27 @@ internal sealed class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ STUN
 
-    public async Task<IPEndPoint> ProbeStunAsync(IPEndPoint server, CancellationToken ct = default)
+    public Task<IPEndPoint> ProbeStunAsync(IPEndPoint server, CancellationToken ct = default) => ProbeStunFromAsync(_udp, server, ct);
+
+    internal async Task<IPEndPoint> ProbeStunFromAsync(IUdpSocket source, IPEndPoint server, CancellationToken ct) =>
+        (await ProbeBindingFromAsync(source, server, server, 0, ct).ConfigureAwait(false)).Mapped;
+
+    internal IPEndPoint DiagnosticLocalEndpoint => _udp.LocalEndPoint;
+    internal Task<StunBindingReply> ProbeBindingAsync(IPEndPoint server, IPEndPoint expectedReply, uint change, CancellationToken ct) =>
+        ProbeBindingFromAsync(_udp, server, expectedReply, change, ct);
+
+    private async Task<StunBindingReply> ProbeBindingFromAsync(IUdpSocket source, IPEndPoint server, IPEndPoint expectedReply, uint change, CancellationToken ct)
     {
-        byte[] req = new byte[20];
-        BinaryPrimitives.WriteUInt16BigEndian(req, 0x0001);
-        BinaryPrimitives.WriteUInt32BigEndian(req.AsSpan(4), StunCookie);
-        RandomNumberGenerator.Fill(req.AsSpan(8));
+        ct.ThrowIfCancellationRequested();
+        byte[] req = StunBindingMessage.Request(change);
         ulong key = BinaryPrimitives.ReadUInt64BigEndian(req.AsSpan(8));
-        var tcs = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _stunPending[key] = tcs;
+        var tcs = new TaskCompletionSource<StunBindingReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new StunAttempt(req.AsSpan(8, 12).ToArray(), new IPEndPoint(expectedReply.Address, expectedReply.Port), source, tcs);
+        if (!_stunPending.TryAdd(key, pending)) throw new InvalidOperationException("STUN transaction collision");
         try
         {
-            _udp.SendTo(req, ToWire(server));
+            TrackPredictionContact(source, server);
+            source.SendTo(req, ToWire(server));
             // Two expiry sources on one WaitAsync race each other: on a stalled runner both
             // fire before either is observed and the timeout can mask the caller's token.
             // The probe's own deadline is a linked source instead, translated back — so an
@@ -716,7 +773,7 @@ internal sealed class NodeEngine : IDisposable
     /// (past the budget) are simply not part of the result.</summary>
     private async Task<IPEndPoint[]> ProbeStunObservedAsync(CancellationToken ct)
     {
-        IReadOnlyList<IPEndPoint> servers = ResolvedStun();
+        IReadOnlyList<IPEndPoint> servers = BasicStunServers();
         if (servers.Count == 0)
         {
             return Array.Empty<IPEndPoint>();
@@ -738,10 +795,13 @@ internal sealed class NodeEngine : IDisposable
     }
 
     private async Task<IPEndPoint?> TryProbe(IPEndPoint server, CancellationToken ct)
+        => await TryProbeFromAsync(_udp, server, ct).ConfigureAwait(false);
+
+    private async Task<IPEndPoint?> TryProbeFromAsync(IUdpSocket source, IPEndPoint server, CancellationToken ct)
     {
         try
         {
-            return await ProbeStunAsync(server, ct).ConfigureAwait(false);
+            return await ProbeStunFromAsync(source, server, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or TimeoutException or ObjectDisposedException)
         {
@@ -751,87 +811,25 @@ internal sealed class NodeEngine : IDisposable
 
     private IReadOnlyList<IPEndPoint> ResolvedStun() => _options.StunServers ?? _options.ResolvedStun;
 
-    private void OnStunResponse(byte[] buf, int n)
+    private StunAttempt? MatchingStun(byte[] buf, int n, IUdpSocket socket, SocketAddress remote)
     {
-        if (n < 20)
-        {
-            return;
-        }
-
+        if (n < 20 || BinaryPrimitives.ReadUInt16BigEndian(buf) != 0x0101
+            || BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) != StunCookie
+            || n != 20 + BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(2))) return null;
         ulong key = BinaryPrimitives.ReadUInt64BigEndian(buf.AsSpan(8));
-        if (!_stunPending.TryGetValue(key, out TaskCompletionSource<IPEndPoint>? tcs))
-        {
-            return;
-        }
-
-        int end = Math.Min(n, 20 + BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(2)));
-        int pos = 20;
-        while (pos + 4 <= end)
-        {
-            ushort attrType = BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(pos));
-            int attrLen = BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(pos + 2));
-            if (pos + 4 + attrLen > end)
-            {
-                break; // a hostile or broken server claims an attribute past the message end
-            }
-
-            if ((attrType is 0x0020 or 0x0001) && attrLen >= 8
-                && TryDecodeAddress(buf.AsSpan(pos + 4, attrLen), buf.AsSpan(8, 12), attrType == 0x0020, out IPEndPoint? ep))
-            {
-                tcs.TrySetResult(ep!);
-                return;
-            }
-
-            pos += 4 + ((attrLen + 3) & ~3);
-        }
+        return _stunPending.TryGetValue(key, out StunAttempt? pending) && ReferenceEquals(pending.Socket, socket)
+            && buf.AsSpan(8, 12).SequenceEqual(pending.Transaction) && ToEndpoint(remote).Equals(pending.Server) ? pending : null;
     }
 
-    private static bool TryDecodeAddress(ReadOnlySpan<byte> value, ReadOnlySpan<byte> txid, bool xor, out IPEndPoint? ep)
+    private void OnStunResponse(byte[] buf, int n, IUdpSocket socket, SocketAddress remote)
     {
-        ep = null;
-        byte family = value[1];
-        ushort port = BinaryPrimitives.ReadUInt16BigEndian(value[2..]);
-        if (xor)
+        if (MatchingStun(buf, n, socket, remote) is not { } pending)
         {
-            port ^= (ushort)(StunCookie >> 16);
+            return;
         }
 
-        if (family == 0x01 && value.Length >= 8)
-        {
-            Span<byte> raw = stackalloc byte[4];
-            value.Slice(4, 4).CopyTo(raw);
-            if (xor)
-            {
-                raw[0] ^= 0x21;
-                raw[1] ^= 0x12;
-                raw[2] ^= 0xA4;
-                raw[3] ^= 0x42;
-            }
-
-            ep = new IPEndPoint(new IPAddress(raw), port);
-            return true;
-        }
-
-        if (family == 0x02 && value.Length >= 20)
-        {
-            Span<byte> raw = stackalloc byte[16];
-            value.Slice(4, 16).CopyTo(raw);
-            if (xor)
-            {
-                Span<byte> mask = stackalloc byte[16];
-                BinaryPrimitives.WriteUInt32BigEndian(mask, StunCookie);
-                txid.CopyTo(mask[4..]);
-                for (int i = 0; i < 16; i++)
-                {
-                    raw[i] ^= mask[i];
-                }
-            }
-
-            ep = new IPEndPoint(new IPAddress(raw), port);
-            return true;
-        }
-
-        return false;
+        if (StunBindingMessage.TryRead(buf.AsSpan(0, n), pending.Server, out StunBindingReply? reply))
+            pending.Reply.TrySetResult(reply!);
     }
 
     // ------------------------------------------------------------------ relays
@@ -928,7 +926,7 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
         if (_disposed || frame.Length < HeaderSize + 4
-            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Hsck) return;
+            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Predict) return;
         ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
         if (sender != BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1))) return;
         try { Dispatch(frame, new Arrival(relay, source)); }
@@ -1459,6 +1457,8 @@ internal sealed class NodeEngine : IDisposable
             PeerId = cs.PeerId,
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
+            AwaitInitialCandidateExchange = _options.RelaySignalingOnly
+                && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay),
             // Crypto is attempted exactly when the string vouches for a static key: a v2
             // string's publisher speaks the handshake, a v1 string's does not, so nothing is
             // negotiated on the wire — no downgrade window exists to strip.
@@ -1564,6 +1564,7 @@ internal sealed class NodeEngine : IDisposable
             RemoteToken = token,
             RemoteTokenKnown = true,
             IsIncoming = true,
+            AwaitInitialCandidateExchange = _options.RelaySignalingOnly && arrival.ViaRelay,
             Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
         };
         c.Buffer = CreateBuffer();
@@ -1591,7 +1592,7 @@ internal sealed class NodeEngine : IDisposable
             DirectPathConfirmed(c, arrival);
         }
 
-        if (arrival.Tcp is null && !_options.RelaySignalingOnly)
+        if (arrival.Tcp is null && c.Crypto is null && !_options.RelaySignalingOnly)
         {
             c.IncomingQueued = true;
             _incoming?.Writer.TryWrite(c);
@@ -1720,6 +1721,8 @@ internal sealed class NodeEngine : IDisposable
                 // still connect directly even when the hint says the NAT maps
                 // per-destination; the hopeless cases cost one datagram per second.
                 bool punchDirects = !c.SymmetricHint || DateTimeOffset.UtcNow - lastDirectPunch >= SymmetricDirectTrickle;
+                MaybeStartPortPrediction(c);
+                if (c.Prediction is { Finished: false } || Volatile.Read(ref _predictionMeasuring) != 0) punchDirects = false;
                 if (punchDirects)
                 {
                     lastDirectPunch = DateTimeOffset.UtcNow;
@@ -1736,6 +1739,9 @@ internal sealed class NodeEngine : IDisposable
                     {
                         continue;
                     }
+
+                    if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)
+                        && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay)) continue;
 
                     // Give ordinary routes (especially same-machine loopback) time to win
                     // before probing LAN-only fallbacks. Once Open, this loop stops.
@@ -1768,6 +1774,7 @@ internal sealed class NodeEngine : IDisposable
                 }
 
                 if (_tcp is not null && c.Crypto is not null && c.DirectTcp is null
+                    && (!c.AwaitInitialCandidateExchange || Volatile.Read(ref c.PeerCandidatesReceived))
                     && Environment.TickCount64 - c.LastKickTicks >= 1200)
                     _ = TryTcpPathsAsync(c, candidates, stop.Token);
 
@@ -1852,6 +1859,8 @@ internal sealed class NodeEngine : IDisposable
 
             _portMap?.Tick(Environment.TickCount64);
             _tcpPortMap?.Tick(Environment.TickCount64);
+            _interfaceUdp?.Tick(Environment.TickCount64);
+            if (_interfaceUdp is not null && Environment.TickCount64 >= _nextInterfaceRefresh) RefreshInterfaceCandidates();
             if (_ipv6Firewall is not null && Environment.TickCount64 >= _nextIPv6FirewallRefresh)
                 RefreshIPv6Firewall();
 
@@ -2097,6 +2106,7 @@ internal sealed class NodeEngine : IDisposable
         c.ProbeOutstanding = false;
         c.ProbeTarget = null;
         c.ProbeTcp = null;
+        c.ProbeUdpSocket = null;
         c.UnansweredProbes = 0;
     }
 
@@ -2122,6 +2132,7 @@ internal sealed class NodeEngine : IDisposable
             c.ProbeNonce = nonce;
             c.ProbeTarget = target;
             c.ProbeTcp = c.DirectTcp;
+            c.ProbeUdpSocket = c.DirectUdpSocket;
             c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
         }
 
@@ -2254,6 +2265,7 @@ internal sealed class NodeEngine : IDisposable
             c.PmtuProbeNonce = now | PmtuProbeMarker;
             c.PmtuDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
             c.PmtuProbeTarget = c.DirectRemote;
+            c.PmtuProbeUdpSocket = c.DirectUdpSocket;
             target = c.PmtuProbeTarget;
             nonce = c.PmtuProbeNonce;
             size = c.PmtuProbeSize;
@@ -2440,7 +2452,8 @@ internal sealed class NodeEngine : IDisposable
             }
             return;
         }
-        _udp.SendTo(frame, ToWire(ep));
+        try { _udp.SendTo(frame, ToWire(ep)); }
+        finally { _interfaceUdp?.SendCandidates(frame, ep); } // a failed default route cannot suppress other interfaces
     }
 
     private void SendToWire(SocketAddress sa, ReadOnlySpan<byte> frame)
@@ -2455,6 +2468,7 @@ internal sealed class NodeEngine : IDisposable
         {
             if (!tcp.Send(frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
         }
+        else if (c.DirectUdpSocket is { } source) source.SendTo(frame, target);
         else SendToWire(target, frame);
     }
 
@@ -2607,12 +2621,13 @@ internal sealed class NodeEngine : IDisposable
         while (!_shutdown.IsCancellationRequested)
         {
             int n;
+            IUdpSocket receiving = _udp;
             try
             {
                 // BSD may return a native IPv4 sockaddr on a dual-mode socket. ReceiveFrom
                 // shrinks Size to that address; restore capacity before the next receive.
                 remote.Size = addressCapacity;
-                n = _udp.ReceiveFrom(buf, remote);
+                n = receiving.ReceiveFrom(buf, remote);
             }
             catch (ObjectDisposedException)
             {
@@ -2639,11 +2654,10 @@ internal sealed class NodeEngine : IDisposable
                 // Raw iroh packets can have any first byte, including Pinhole's frame tags.
                 // Consume only this engine's outstanding STUN responses; everything else
                 // belongs to the protocol above the raw transport.
-                bool stun = n >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) == StunCookie
-                    && _stunPending.ContainsKey(BinaryPrimitives.ReadUInt64BigEndian(buf.AsSpan(8)));
+                bool stun = MatchingStun(buf, n, receiving, remote) is not null;
                 if (stun)
                 {
-                    try { OnStunResponse(buf, n); } catch (Exception) { }
+                    try { OnStunResponse(buf, n, receiving, remote); } catch (Exception) { }
                 }
                 else
                 {
@@ -2670,7 +2684,7 @@ internal sealed class NodeEngine : IDisposable
             {
                 try
                 {
-                    OnStunResponse(buf, n);
+                    OnStunResponse(buf, n, receiving, remote);
                 }
                 catch (Exception)
                 {
@@ -2678,6 +2692,15 @@ internal sealed class NodeEngine : IDisposable
                 }
             }
         }
+    }
+
+    private void OnInterfaceFrame(IUdpSocket socket, byte[] buffer, int count, SocketAddress remote)
+    {
+        if (_disposed || _interfaceUdp?.Contains(socket) != true) return;
+        if (count >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) == StunCookie)
+            OnStunResponse(buffer, count, socket, remote);
+        else if (_options.EnableDirectUdp && count >= HeaderSize && buffer[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck)
+            Dispatch(buffer.AsSpan(0, count), new Arrival(remote, socket));
     }
 
     private readonly struct Arrival
@@ -2688,6 +2711,7 @@ internal sealed class NodeEngine : IDisposable
         public readonly IrohRelay? Iroh;
         public readonly byte[]? IrohPeerKey;
         public readonly TcpLink? Tcp;
+        public readonly IUdpSocket? UdpSocket;
 
         public Arrival(TcpLink tcp)
         {
@@ -2696,11 +2720,12 @@ internal sealed class NodeEngine : IDisposable
             Direct = ToWire(tcp.Remote);
         }
 
-        public Arrival(SocketAddress direct)
+        public Arrival(SocketAddress direct, IUdpSocket? udpSocket = null)
         {
             ViaRelay = false;
             Direct = direct;
             Relay = null;
+            UdpSocket = udpSocket;
         }
 
         public Arrival(IPEndPoint relay)
@@ -2813,6 +2838,7 @@ internal sealed class NodeEngine : IDisposable
             }
 
             cryptoState.MarkPeerConfirmed(); // only a key holder can seal a frame that opens
+            if (arrival.ViaRelay) RelayPathConfirmed(c, arrival);
             frame = scratch.AsSpan(0, HeaderSize + CryptoWire.TokenLength + plainLen);
         }
 
@@ -2835,6 +2861,9 @@ internal sealed class NodeEngine : IDisposable
                 break;
             case FrameType.Announce:
                 OnAnnounce(c, frame, arrival);
+                break;
+            case FrameType.Predict:
+                OnPrediction(c, frame, arrival);
                 break;
             case FrameType.Hsck:
                 OnHsck(c, frame, arrival);
@@ -2872,6 +2901,13 @@ internal sealed class NodeEngine : IDisposable
 
         bool cryptoPunc = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+
+        if (cryptoPunc && c.PinnedStaticKey is { } pinned
+            && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
+        {
+            c.Crypto?.CountRejected();
+            return; // an initial/reverse PUNC must honor the same pin as its PACK
+        }
 
         ConnectionCrypto? crypto;
         lock (c.Gate)
@@ -2921,6 +2957,7 @@ internal sealed class NodeEngine : IDisposable
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
             SendOnArrival(arrival, pack);
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
+            else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
         }
         else
         {
@@ -2943,7 +2980,7 @@ internal sealed class NodeEngine : IDisposable
         if (!c.Announced)
         {
             c.Announced = true;
-            AnnounceTo(c);
+            AnnounceTo(c, target: arrival);
         }
     }
 
@@ -3025,6 +3062,7 @@ internal sealed class NodeEngine : IDisposable
                 SendOnArrival(arrival, hsck);
             }
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
+            else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
         }
         else
         {
@@ -3047,7 +3085,7 @@ internal sealed class NodeEngine : IDisposable
         if (!c.Announced)
         {
             c.Announced = true;
-            AnnounceTo(c);
+            AnnounceTo(c, target: arrival);
         }
     }
 
@@ -3060,7 +3098,7 @@ internal sealed class NodeEngine : IDisposable
 
         lock (c.Gate)
         {
-            if (c.Crypto is not { Established: true } crypto || crypto.PeerConfirmed)
+            if (c.Crypto is not { Established: true } crypto)
             {
                 return;
             }
@@ -3076,11 +3114,12 @@ internal sealed class NodeEngine : IDisposable
 
         if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
 
-        if (_options.RelaySignalingOnly && !arrival.ViaRelay) DirectPathConfirmed(c, arrival);
+        if (arrival.ViaRelay) RelayPathConfirmed(c, arrival);
+        else if (arrival.Tcp is null) SendUdpIntroductionProbe(c, arrival);
 
         // The dialer heard our PACK — re-announce, in case the first sealed announce lost
         // the race against the PACK that delivered our half of the keys.
-        AnnounceTo(c);
+        AnnounceTo(c, target: arrival);
     }
 
     /// <summary>The crypto handshake is unrecoverably broken (stripped, substituted, or
@@ -3120,7 +3159,7 @@ internal sealed class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival);
+            DirectPathConfirmed(c, arrival, sealedEvidence: true);
         }
 
         Interlocked.Increment(ref c.ReceivedCount);
@@ -3138,6 +3177,8 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
+        if (!arrival.ViaRelay && c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)) return;
+
         if (!arrival.ViaRelay)
         {
             if (arrival.Tcp is { } tcp)
@@ -3146,7 +3187,7 @@ internal sealed class NodeEngine : IDisposable
                     tcp.ObserveChallenge(BinaryPrimitives.ReadInt64LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]));
                 SendTcpProof(c, tcp);
             }
-            DirectPathConfirmed(c, arrival);
+            DirectPathConfirmed(c, arrival, sealedEvidence: true);
             // Inbound evidence cuts both ways: a datagram this size arrived, so the path
             // carries it. Cap at the probe ceiling — this only ever replaces a probe, and
             // keeps buffer sizing honest on loopback's 64k MTU.
@@ -3180,7 +3221,7 @@ internal sealed class NodeEngine : IDisposable
         {
             if (stream.ConfirmProof(c.PeerId, echoed))
             {
-                DirectPathConfirmed(c, arrival);
+                DirectPathConfirmed(c, arrival, sealedEvidence: true);
                 if (ReferenceEquals(c.DirectTcp, stream))
                 {
                     AnnounceTo(c);
@@ -3200,7 +3241,8 @@ internal sealed class NodeEngine : IDisposable
             lock (c.Gate)
             {
                 if (c.ProbeOutstanding && c.ProbeNonce == echoed
-                    && !arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp) && SameEndPoint(arrival.Direct, c.ProbeTarget))
+                    && !arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp)
+                    && ReferenceEquals(arrival.UdpSocket, c.ProbeUdpSocket) && SameEndPoint(arrival.Direct, c.ProbeTarget))
                 {
                     c.ProbeOutstanding = false;
                     c.ProbeTarget = null;
@@ -3211,7 +3253,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (!arrival.ViaRelay && arrival.Direct is { } direct)
             {
-                DirectPathConfirmed(c, arrival);
+                DirectPathConfirmed(c, arrival, sealedEvidence: true);
             }
 
             return;
@@ -3225,7 +3267,8 @@ internal sealed class NodeEngine : IDisposable
             lock (c.Gate)
             {
                 if (c.PmtuOutstanding && c.PmtuProbeNonce == echoed
-                    && !arrival.ViaRelay && arrival.Tcp is null && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
+                    && !arrival.ViaRelay && arrival.Tcp is null && ReferenceEquals(arrival.UdpSocket, c.PmtuProbeUdpSocket)
+                    && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
                 {
                     c.PmtuOutstanding = false;
                     if (c.PmtuProbeSize > c.PmtuWire)
@@ -3244,7 +3287,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (!arrival.ViaRelay && arrival.Direct is { } pmtuDirect)
             {
-                DirectPathConfirmed(c, arrival); // a confirmed probe is path liveness too
+                DirectPathConfirmed(c, arrival, sealedEvidence: true); // a confirmed probe is path liveness too
             }
 
             return;
@@ -3252,7 +3295,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay && arrival.Direct is { } callerDirect)
         {
-            DirectPathConfirmed(c, arrival); // an answered caller ping is direct-path activity too
+            DirectPathConfirmed(c, arrival, sealedEvidence: true); // an answered caller ping is direct-path activity too
         }
 
         long rttTicks = (Environment.TickCount64 - echoed) * TimeSpan.TicksPerMillisecond;
@@ -3318,7 +3361,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay)
         {
-            DirectPathConfirmed(c, arrival);
+            DirectPathConfirmed(c, arrival, sealedEvidence: true);
         }
 
         if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
@@ -3347,7 +3390,8 @@ internal sealed class NodeEngine : IDisposable
             }
             else if (arrival.Direct is { } direct)
             {
-                SendToWire(direct, frame);
+                if (arrival.UdpSocket is { } socket) socket.SendTo(frame, direct);
+                else SendToWire(direct, frame);
             }
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
@@ -3356,7 +3400,21 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private void AnnounceTo(ConnState c, bool blast = false)
+    private void SendUdpIntroductionProbe(ConnState c, in Arrival arrival)
+    {
+        if (c.Crypto is not { Established: true }) return;
+        if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)) return;
+        Span<byte> payload = stackalloc byte[8];
+        RandomNumberGenerator.Fill(payload);
+        // A transport-control nonce uses the maintenance marker, so its pong is
+        // authenticated evidence without manufacturing an application RTT sample.
+        BinaryPrimitives.WriteInt64LittleEndian(payload, BinaryPrimitives.ReadInt64LittleEndian(payload) | ProbeMarker);
+        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        int length = BuildFrame(c, FrameType.Ping, payload, frame);
+        SendOnArrival(arrival, frame[..length]);
+    }
+
+    private void AnnounceTo(ConnState c, bool blast = false, Arrival? target = null)
     {
         if (_options.RelaySignalingOnly && (c.State == PinholeConnectionState.Closed || c.Crypto is not { Established: true })) return;
         Volatile.Write(ref c.LastCandidateAnnouncement, Environment.TickCount64);
@@ -3387,7 +3445,7 @@ internal sealed class NodeEngine : IDisposable
         {
             Span<byte> frame = stackalloc byte[cap];
             int len = BuildFrame(c, FrameType.Announce, body.AsSpan(0, bodyLen), frame);
-            AnnounceSend(c, frame[..len], blast);
+            AnnounceSend(c, frame[..len], blast, target);
             return;
         }
 
@@ -3395,7 +3453,7 @@ internal sealed class NodeEngine : IDisposable
         try
         {
             int len = BuildFrame(c, FrameType.Announce, body.AsSpan(0, bodyLen), rented.AsSpan(0, cap));
-            AnnounceSend(c, rented.AsSpan(0, len), blast);
+            AnnounceSend(c, rented.AsSpan(0, len), blast, target);
         }
         finally
         {
@@ -3403,7 +3461,7 @@ internal sealed class NodeEngine : IDisposable
         }
     }
 
-    private void AnnounceSend(ConnState c, ReadOnlySpan<byte> frame, bool blast)
+    private void AnnounceSend(ConnState c, ReadOnlySpan<byte> frame, bool blast, Arrival? sendOn)
     {
         if (blast)
         {
@@ -3450,7 +3508,7 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
-        SendOnArrival(CurrentArrival(c), frame);
+        SendOnArrival(sendOn ?? CurrentArrival(c), frame);
     }
 
     private Arrival CurrentArrival(ConnState c)
@@ -3458,7 +3516,7 @@ internal sealed class NodeEngine : IDisposable
         if (c.Path == PathKind.Direct && c.DirectRemote is { } sa)
         {
             if (c.DirectTcp is { } tcp) return new Arrival(tcp);
-            return new Arrival(sa);
+            return new Arrival(sa, c.DirectUdpSocket);
         }
 
         if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
@@ -3505,7 +3563,7 @@ internal sealed class NodeEngine : IDisposable
         TraceLine($"peer {c.PeerId:x16} path -> {next} (was {c.DirectRemoteEp}, state {c.State}/{c.Path})");
     }
 
-    private void DirectPathConfirmed(ConnState c, in Arrival arrival)
+    private void DirectPathConfirmed(ConnState c, in Arrival arrival, bool sealedEvidence = false)
     {
         SocketAddress source = arrival.Direct!;
         lock (c.Gate)
@@ -3515,7 +3573,8 @@ internal sealed class NodeEngine : IDisposable
                 return; // test hook: this direct path is dead; nothing can confirm it
             }
 
-            if (_options.RelaySignalingOnly && c.Crypto is not { PeerConfirmed: true }) return;
+            if (c.Crypto is not null && (!c.Crypto.PeerConfirmed || arrival.Tcp is null && !sealedEvidence)) return;
+            if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)) return;
 
             if (arrival.Tcp is { } tcp)
             {
@@ -3528,7 +3587,8 @@ internal sealed class NodeEngine : IDisposable
             }
 
             if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct
-                && ReferenceEquals(c.DirectTcp, arrival.Tcp) && SameEndPoint(c.DirectRemote, source))
+                && ReferenceEquals(c.DirectTcp, arrival.Tcp) && SameEndPoint(c.DirectRemote, source)
+                && ReferenceEquals(c.DirectUdpSocket, arrival.UdpSocket))
             {
                 // Fast path, taken for every ordinary datagram: the endpoint is already the
                 // connection's truth, so the frame only refreshes direct-path activity.
@@ -3546,11 +3606,12 @@ internal sealed class NodeEngine : IDisposable
             TracePath(c, adopted);
             c.DirectRemote = adopted;
             c.DirectRemoteEp = ToEndpoint(adopted);
-            bool transportChanged = !ReferenceEquals(c.DirectTcp, arrival.Tcp);
+            bool transportChanged = !ReferenceEquals(c.DirectTcp, arrival.Tcp) || !ReferenceEquals(c.DirectUdpSocket, arrival.UdpSocket);
             TcpLink? previousTcp = c.DirectTcp;
             c.DirectTcp = arrival.Tcp;
+            c.DirectUdpSocket = arrival.UdpSocket;
             if (transportChanged) previousTcp?.CloseGracefully();
-            if ((c.PendingTcp is not null || _options.RelaySignalingOnly && c.IsIncoming) && !c.IncomingQueued)
+            if (c.IsIncoming && !c.IncomingQueued)
             {
                 c.IncomingQueued = true;
                 _incoming?.Writer.TryWrite(c);
@@ -3610,15 +3671,18 @@ internal sealed class NodeEngine : IDisposable
         bool kick = false;
         lock (c.Gate)
         {
-            if (c.State == PinholeConnectionState.Closed) return;
+            if (c.State == PinholeConnectionState.Closed || c.Connected.Task.IsFaulted) return;
             c.Iroh = relay;
             c.IrohPeerKey = arrival.IrohPeerKey;
             c.IrohConfirmed = true;
-            if (!_options.RelaySignalingOnly && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+            if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
+                && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
             {
                 c.State = PinholeConnectionState.Degraded;
                 c.Path = PathKind.Relay;
                 c.PathSince = DateTimeOffset.UtcNow;
+                if (c.IsIncoming && !c.IncomingQueued)
+                { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
                 c.Connected.TrySetResult();
                 c.StateChanged?.Invoke(c.State);
                 kick = true;
@@ -3680,11 +3744,14 @@ internal sealed class NodeEngine : IDisposable
                 c.RelayReady = true;
                 Telemetry.Recovery("relay-heal");
                 if (c.State == PinholeConnectionState.Closed) return;
-                if (!_options.RelaySignalingOnly && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+                if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
+                    && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
                 {
                     c.State = PinholeConnectionState.Degraded;
                     c.Path = PathKind.Relay;
                     c.PathSince = DateTimeOffset.UtcNow;
+                    if (c.IsIncoming && !c.IncomingQueued)
+                    { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
                     c.Connected.TrySetResult();
                     c.StateChanged?.Invoke(c.State);
                     kick = true;
@@ -3848,6 +3915,7 @@ internal sealed class NodeEngine : IDisposable
 
         try
         {
+            RefreshInterfaceCandidates();
             RefreshIPv6Firewall(); // interface changes matter even if the STUN mapping stayed the same
             IReadOnlyList<IPEndPoint> stunServers = ResolvedStun();
             bool needRebind = forceRebind;
@@ -3934,6 +4002,7 @@ internal sealed class NodeEngine : IDisposable
 
         _portMap?.Rebind(_udp.LocalEndPoint.Port); // LocalPort takes _gate; we hold none here
         _tcpPortMap?.Rebind(_tcp?.ListeningPort ?? 0);
+        RefreshInterfaceCandidates(invalidate: true);
         RefreshIPv6Firewall(invalidate: true);
         await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
@@ -4080,6 +4149,7 @@ internal sealed class NodeEngine : IDisposable
 
         _portMap?.Shutdown(); // releases the router mapping in the background, bounded
         _tcpPortMap?.Shutdown();
+        _interfaceUdp?.Dispose();
         _ipv6Firewall?.Dispose();
         _shutdown.Cancel();
         foreach (ConnState c in ConnectionsSnapshot())

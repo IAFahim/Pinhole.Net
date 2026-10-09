@@ -17,7 +17,7 @@ every session is additionally encrypted and peer-authenticated (below).
 
 | Path | What carries it | When it is used |
 |---|---|---|
-| Direct UDP | One dual-mode (IPv6 + v4-mapped) socket per node | The goal — hole-punched, zero-alloc, MTU-sized datagrams |
+| Direct UDP | Primary dual-mode socket plus up to four source-bound interface sockets (local draft) | The goal — hole-punched, zero-alloc, MTU-sized datagrams |
 | Direct TCP (local draft, #43) | A bounded, version-negotiated TCP sidecar with fresh encrypted stream proof | When UDP has not opened and a candidate accepts TCP; [release gate](DIRECT_TCP.md) remains pending |
 | iroh HTTPS relay | WebSocket speaking the [iroh relay v1/v2 framing](#iroh-relay-transport) | Introduction + standing fallback; reconnects with capped exponential backoff |
 | TURN relay | RFC 5766 allocate/permission/send+data indications | Optional fallback when credentials are supplied |
@@ -58,6 +58,7 @@ one frame:
 | `Pong` | `0x54` | echoed nonce (i64 LE) | Reply to Ping, value copied verbatim |
 | `Announce` | `0x55` | count (u8) + candidate TLV stream | Sender's current reachable addresses |
 | `Bye` | `0x56` | — | Clean close |
+| `Predict` (local draft) | `0x58` | Version, kind, round IDs and bounded offers | Authenticated relay-only prediction control; [exact layout](PORT_PREDICTION.md) |
 
 ### Token authentication
 
@@ -248,7 +249,7 @@ kinds, and non-strict base64url.
 
 `natHint` is derived automatically (a manual `SetNatHint` override wins): when two
 or more configured STUN servers answer, identical observed mappings classify a cone
-NAT (endpoint-independent mapping — the reflexive candidate is punchable) and
+NAT (endpoint-independent mapping across the tested destinations; filtering is separate) and
 divergent ones a symmetric NAT (per-destination mapping — dialers go relay-first with
 a direct trickle and
 go straight to relay). A pass where fewer than two servers answer never overwrites
@@ -295,6 +296,13 @@ permissions for an existing host candidate, not translated reflexive addresses.
 Real socket/router and Kotlin release checks remain pending.
 
 ## STUN usage
+
+The [local interface-candidate draft](INTERFACE_CANDIDATES.md) additionally binds
+up to four source sockets. Each socket gathers its own host/reflexive endpoints,
+validates full STUN transaction/server/socket correlation, and can carry direct
+frames. Authenticated direct arrivals preserve their local socket for replies,
+application traffic and maintenance probes. These additions use the same candidate
+and session layouts; actual socket/platform and Kotlin checks remain pending.
 
 RFC 5389 binding request/response subset: magic cookie `0x2112A442`, XOR-MAPPED-
 ADDRESS (v4 and v6) decoded from the response. Probes ride the node's own socket;
@@ -348,3 +356,13 @@ into a synchronized retry storm. TURN allocation retries follow the same idea
 | SSDP | UDP 1900 multicast, M-SEARCH window 1 s, IGDv1+IGDv2 targets |
 | STRANGER flood bound | 1024 connections materialized by unknown PUNCs |
 | Frame receive buffer | 8192 B (fits 32 fat relay candidates of announce) |
+
+## Bounded prediction control (local draft)
+
+The optional, default-enabled prediction draft adds sealed relay-control frame
+`0x58`. Its versioned Hello/Offer/Start exchange and exact layouts are specified
+in [PORT_PREDICTION.md](PORT_PREDICTION.md). Older peers ignore the unknown frame;
+only positively negotiated peers can authorize sampling/speculative punches.
+Guessed endpoints never enter candidate TLVs or signed address publication.
+[NAT_BEHAVIOR.md](NAT_BEHAVIOR.md) describes the separate fresh-socket RFC 5780
+diagnostic API and stricter ordinary STUN reply validation.

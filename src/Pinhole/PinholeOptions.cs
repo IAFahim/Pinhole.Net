@@ -78,6 +78,24 @@ public sealed record PinholeOptions
     /// this does not prohibit UDP used by an explicitly configured TURN provider.</summary>
     public bool EnableDirectUdp { get; init; } = true;
 
+    /// <summary>Gather and check UDP candidates on up to four additional active
+    /// interface sources (default true). Each socket keeps its bound source/port
+    /// and STUN observations; authenticated direct replies select the same source
+    /// for application data. Explicit single-address binds and raw iroh transport
+    /// keep their selected socket. Source bind failures are best-effort.</summary>
+    public bool EnableInterfaceCandidates { get; init; } = true;
+
+    /// <summary>Negotiate one bounded UDP port-prediction attempt with compatible
+    /// authenticated relay-introduced peers (default true). Requires encrypted
+    /// sessions and fresh sequential measurements from the application's socket;
+    /// inconsistent or unavailable evidence contributes no attempt. Tries at most
+    /// eight nearby predicted ports, six rounds; never publishes guessed reflexives
+    /// or guarantees traversal. Set false to retain ordinary direct/relay attempts.</summary>
+    public bool EnablePortPrediction { get; init; } = true;
+
+    internal Func<IReadOnlyList<UdpInterfaceSource>>? InterfaceSourceProvider { get; init; }
+    internal UdpSocketFactory? InterfaceUdpSocketFactory { get; init; }
+
     /// <summary>Advertise IPv6 link-local candidates (default true). Access networks that
     /// isolate IPv4 between wireless and wired clients but bridge IPv6 — common on guest and
     /// enterprise WiFi — leave link-local as the only direct path, and a peer that dials the

@@ -5,7 +5,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
-		<Description>Connection library for .NET: NAT traversal over free STUN and public iroh HTTPS relays, optional TURN, connection strings, and roaming. One UDP socket, zero allocations on the direct path, no native dependencies</Description>
+		<Description>Managed connection library for .NET: NAT traversal over STUN and iroh HTTPS relays, optional TURN, authenticated connection strings, router mapping, roaming, and bounded source-bound UDP candidates. No native dependencies</Description>
 		<PackageId>Pinhole.Net</PackageId>
 		<IsPackable>true</IsPackable>
 		<IsAotCompatible>true</IsAotCompatible>

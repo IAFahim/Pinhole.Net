@@ -28,6 +28,8 @@ The defaults below include the subsequent discovery-default change tracked in
 | Configured TURN relay | Supported with operator credentials; no TURN default | TURN candidates are not supported |
 | Direct TCP transport | Local draft under [#43](https://github.com/IAFahim/Pinhole.Net/issues/43): framing, fresh stream proof, UDP preference/recovery and TCP router leases; real socket/platform checks pending | Not implemented |
 | IPv6 router firewall pinholes | Local draft under [#40](https://github.com/IAFahim/Pinhole.Net/issues/40): source-bound UPnP control, UDP/TCP leases and lifecycle diagnostics; real socket/router checks pending | Not implemented |
+| Per-interface source-bound UDP candidates | Local draft: up to four listening sources, same-source STUN, direct checks/replies/data and removal/rebind recovery | Still principally one audio socket; no equivalent source pool |
+| Initial exchange with signaling-only relays | Local draft: encrypted initial lists before direct probes, direct-only Connect/Accept/data enforcement | No equivalent connection policy yet |
 
 Core references: [options](../src/Pinhole/PinholeOptions.cs),
 [engine](../src/Pinhole/NodeEngine.cs), [node](../src/Pinhole/PinholeNode.cs),
@@ -90,21 +92,19 @@ Test reference: [PcpClientTests](../tests/Pinhole.Tests/PcpClientTests.cs).
    [the draft behavior and release gate](DIRECT_TCP.md).
    [RFC 6544](https://www.rfc-editor.org/rfc/rfc6544.html) describes TCP candidate
    types and their limitations.
-4. **Gather and check candidates per active interface.** Both implementations
-   principally use one wildcard UDP socket and the OS route choice. Advertising
-   all interface addresses is not equivalent to proving a public path through
-   each Wi-Fi, Ethernet, VPN, and cellular interface. Source-bound probes and
-   prioritized local/remote candidate checks would expand multi-interface
-   coverage. [ICE](https://www.rfc-editor.org/rfc/rfc8445.html) provides a model;
-   Pinhole is not a full ICE implementation.
-5. **Exchange both peers' current candidates before a no-relay dial.** With one
-   shared ticket, the listener has no phone public candidates until a packet
-   arrives or introduction establishes a session. The phone's announcements
-   currently follow establishment. A two-way ticket or authenticated signaling
-   exchange can give both sides targets before the first punch. Existing relay
-   introduction already solves part of this; control signaling need not carry
-   application data. The Kotlin API does not currently expose its own dialable
-   ticket or a signaling-only connection policy.
+4. **Gather and check candidates per active interface: .NET local draft.** A
+   bounded UDP pool now keeps source-specific listening ports, STUN observations,
+   direct replies and application routes. Virtual alternate-route, IPv6, removal,
+   disposal and reply-correlation checks pass. Actual socket/platform/route-change
+   validation, Kotlin parity and per-interface TCP/router ownership remain; see
+   [draft behavior](INTERFACE_CANDIDATES.md). [ICE](https://www.rfc-editor.org/rfc/rfc8445.html)
+   provides a model; Pinhole is not a full ICE implementation.
+5. **Exchange both peers' current candidates before direct-only application traffic:
+   .NET local draft.** `RelaySignalingOnly` exchanges authenticated initial lists
+   before direct probes when a relay introduction is advertised. It holds
+   Connect/Accept until direct succeeds, rejects relayed application data, and
+   keeps signaling during direct recovery. See [behavior and evidence limits](RELAY_SIGNALING.md).
+   Real iroh/TURN/platform checks and Kotlin support remain pending.
 
 These are implementation priorities, not promises that every one increases the
 success rate on every network. TCP does not solve every NAT pairing, and IPv6
@@ -112,15 +112,16 @@ still has firewalls.
 
 ## Further conditional techniques
 
-- **NAT behavior diagnostics:** the current multi-server STUN hint detects mapping
-  differences. It does not fully characterize filtering or allocation behavior.
-  [RFC 5780](https://www.rfc-editor.org/rfc/rfc5780.html) describes richer discovery
-  and requires servers that implement those tests.
-- **Bounded port prediction:** absent today. It can sometimes help NATs with
-  predictable allocation, but requires measurements and coordinated peer
-  attempts. Random allocation and multiple NAT layers limit it; see
-  [RFC 5128 section 3.5](https://www.rfc-editor.org/rfc/rfc5128.html#section-3.5).
-  It should be evaluated after the ordinary mapping, signaling, and transport gaps.
+- **NAT behavior diagnostics: local .NET draft.** A fresh diagnostic socket tests
+  cooperating alternate-address servers and reports mapping/positive filtering
+  evidence conservatively. Ordinary mapping hints still do not prove filtering;
+  see [measurement behavior and limits](NAT_BEHAVIOR.md).
+- **Bounded port prediction: local .NET draft.** Compatible authenticated peers
+  coordinate fresh application-socket observations and at most eight proposed
+  ports/six rounds. Random/inconsistent allocation and consumed destinations are
+  refused. Two modeled predictable symmetric NATs can reach encrypted direct
+  communication; this is not real carrier or Internet-wide success evidence.
+  See [protocol, defaults and release limits](PORT_PREDICTION.md).
 - **UPnP IPv6 firewall pinholes: local draft.** The separate IPv6 firewall-control
   client now requests bounded UDP/TCP leases using the actual local global IPv6
   source. Refusal, renewal, disposal and interface churn have independent fixture

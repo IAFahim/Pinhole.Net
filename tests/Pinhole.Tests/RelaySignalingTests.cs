@@ -1,4 +1,5 @@
 using System.Net;
+using System.Buffers.Binary;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -191,5 +192,121 @@ public sealed class RelaySignalingTests
         await using var incoming = await accepting.WaitAsync(Budget);
         Assert.Equal(PathKind.Direct, outgoing.Path.Kind); Assert.True(outgoing.IsEncrypted);
         Assert.False(outgoing.RelaySignalingReady); await Exchange(outgoing, incoming, 51);
+    }
+
+    [Fact]
+    public async Task ReplayedUnsealedHandshakeAtAnotherUdpSource_CannotCompleteADirectApplicationConnection()
+    {
+        using var lab = new VirtualLab(); using var relay = new InMemoryIrohRelay();
+        await using var a = await Node(lab, relay, "192.0.2.10");
+        await using var b = await Node(lab, relay, "192.0.2.20");
+        LinkRule blocked = BlockPeers(a, b); lab.Net.AddRule(blocked);
+        Task<PinholeConnection> dial = a.ConnectAsync(RelayTicket(b));
+        using var cancelAccept = new CancellationTokenSource();
+        Task<PinholeConnection> accept = b.AcceptAsync(cancelAccept.Token);
+        await Until(() => a.Connections.Count == 1 && a.Connections[0].RelaySignalingReady
+            && b.Connections.Count == 1 && b.Connections[0].RelaySignalingReady);
+        byte[] original = relay.Traffic.First(d => d.Payload[0] == 0x50 && d.Source.SequenceEqual(a.EndpointPublicKey!)).Payload;
+        using var attacker = lab.Net.CreateHost(new(IPAddress.Parse("192.0.2.66"), 60666));
+        long deliveredBefore = Interlocked.Read(ref lab.Net.Delivered);
+        attacker.SendTo(original, new IPEndPoint(IPAddress.Parse("192.0.2.20").MapToIPv6(), b.LocalPort).Serialize());
+        var ack = new byte[8192];
+        var from = new System.Net.SocketAddress(System.Net.Sockets.AddressFamily.InterNetworkV6);
+        // Receiving the reply proves that the replay was processed, rather than dropped
+        // by the virtual network. The attacker cannot produce an encrypted response.
+        int count = await Task.Run(() => attacker.ReceiveFrom(ack, from)).WaitAsync(Budget);
+        Assert.Equal(0x51, ack[0]); Assert.Equal(97, count);
+        Assert.True(Interlocked.Read(ref lab.Net.Delivered) > deliveredBefore);
+        Assert.Equal(PathKind.None, b.Connections[0].Path.Kind);
+        Assert.False(dial.IsCompleted); Assert.False(accept.IsCompleted);
+        lab.Net.RemoveRule(blocked);
+        await using var outgoing = await dial.WaitAsync(Budget);
+        await using var incoming = await accept.WaitAsync(Budget);
+        await Exchange(outgoing, incoming, 61);
+    }
+
+    [Fact]
+    public async Task ReversePuncWithASubstitutedStaticKey_CannotPoisonThePinnedDial()
+    {
+        using var lab = new VirtualLab(); using var relay = new InMemoryIrohRelay();
+        relay.DropNext(0x50, 1000);
+        await using var a = await Node(lab, relay, "192.0.2.10");
+        await using var b = await Node(lab, relay, "192.0.2.20");
+        ConnState state = a.Engine.ConnectAsync(ConnectionString.Parse(RelayTicket(b)), default);
+        var impostor = new NodeIdentity(); var ephemeral = NodeIdentity.NewEphemeral();
+        byte[] forged = new byte[77]; forged[0] = 0x50;
+        BinaryPrimitives.WriteUInt64LittleEndian(forged.AsSpan(1), b.PeerId);
+        BinaryPrimitives.WriteUInt32LittleEndian(forged.AsSpan(9), 123456);
+        ephemeral.Public.CopyTo(forged, 13); impostor.PublicKey.CopyTo(forged, 45);
+        using var attacker = lab.Net.CreateHost(new(IPAddress.Parse("192.0.2.66"), 60666));
+        attacker.SendTo(forged, new IPEndPoint(IPAddress.Parse("192.0.2.10").MapToIPv6(), a.LocalPort).Serialize());
+        await Until(() => state.Public!.FramesRejected > 0);
+        Assert.False(state.RemoteTokenKnown); Assert.False(state.Crypto!.Established);
+        Assert.False(state.Connected.Task.IsCompleted); Assert.Null(state.Crypto.PeerStaticPublic);
+        await a.Engine.CloseAsync(state);
+    }
+
+    [Fact]
+    public async Task ReplayedOrTamperedCandidateAnnouncements_CannotChangeThePeerTargets()
+    {
+        using var lab = new VirtualLab(); using var relay = new InMemoryIrohRelay();
+        await using var a = await Node(lab, relay, "192.0.2.10");
+        await using var b = await Node(lab, relay, "192.0.2.20");
+        lab.Net.AddRule(BlockPeers(a, b));
+        using var stop = new CancellationTokenSource();
+        Task<PinholeConnection> dial = a.ConnectAsync(RelayTicket(b), stop.Token);
+        await Until(() => a.Engine.Lookup(b.PeerId) is { PeerCandidatesReceived: true });
+        ConnState state = a.Engine.Lookup(b.PeerId)!;
+        PinholeCandidate[] before = state.PeerCandidates.ToArray();
+        byte[] original = relay.Traffic.First(d => d.Payload[0] == 0x55 && d.Source.SequenceEqual(b.EndpointPublicKey!)).Payload;
+        long rejected = state.Public!.FramesRejected;
+        relay.Deliver(b.EndpointPublicKey!, a.EndpointPublicKey!, original);
+        byte[] corrupted = (byte[])original.Clone(); corrupted[^1] ^= 1;
+        relay.Deliver(b.EndpointPublicKey!, a.EndpointPublicKey!, corrupted);
+        await Until(() => state.Public.FramesRejected >= rejected + 2);
+        Assert.Equal(before, state.PeerCandidates.ToArray()); Assert.False(dial.IsCompleted);
+        stop.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dial);
+    }
+
+    [Fact]
+    public async Task ASignalingOnlyStrangerWithNoDirectPath_DoesNotBlockAcceptanceOfAWorkingPeer()
+    {
+        using var lab = new VirtualLab(); using var relay = new InMemoryIrohRelay();
+        await using var stalled = await Node(lab, relay, "192.0.2.10");
+        await using var listener = await Node(lab, relay, "192.0.2.20");
+        await using var working = await Node(lab, relay, "192.0.2.30");
+        lab.Net.AddRule(BlockPeers(stalled, listener));
+        using var cancel = new CancellationTokenSource();
+        Task<PinholeConnection> blocked = stalled.ConnectAsync(RelayTicket(listener), cancel.Token);
+        await Until(() => listener.Connections.Count == 1 && listener.Connections[0].RelaySignalingReady);
+        Task<PinholeConnection> accepting = listener.AcceptAsync();
+        await using var outgoing = await working.ConnectAsync(listener.ConnectionString).WaitAsync(Budget);
+        await using var incoming = await accepting.WaitAsync(Budget);
+        Assert.Equal(working.PeerId, incoming.PeerId); await Exchange(outgoing, incoming, 71);
+        cancel.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => blocked);
+    }
+
+    [Fact]
+    public async Task AdvertisedRelayIntroduction_HoldsInitialDirectProbesUntilCurrentCandidatesArrive()
+    {
+        using var lab = new VirtualLab(); using var relay = new InMemoryIrohRelay();
+        relay.DropNext(0x55, 1000);
+        await using var a = await Node(lab, relay, "192.0.2.10");
+        await using var b = await Node(lab, relay, "192.0.2.20");
+        long initialDatagrams = Interlocked.Read(ref lab.Net.Delivered);
+        Task<PinholeConnection> accepting = b.AcceptAsync();
+        Task<PinholeConnection> dial = a.ConnectAsync(b.ConnectionString); // reachable direct tuples and a relay
+        await Until(() => a.Connections.Count == 1 && a.Connections[0].RelaySignalingReady
+            && b.Connections.Count == 1 && b.Connections[0].RelaySignalingReady);
+        Assert.False(dial.IsCompleted); Assert.False(accepting.IsCompleted);
+        Assert.False(a.Engine.Lookup(b.PeerId)!.PeerCandidatesReceived);
+        Assert.False(b.Engine.Lookup(a.PeerId)!.PeerCandidatesReceived);
+        Assert.Equal(initialDatagrams, Interlocked.Read(ref lab.Net.Delivered));
+        relay.DropNext(0x55, 0);
+        await using var outgoing = await dial.WaitAsync(Budget);
+        await using var incoming = await accepting.WaitAsync(Budget);
+        Assert.True(a.Engine.Lookup(b.PeerId)!.PeerCandidatesReceived);
+        Assert.True(b.Engine.Lookup(a.PeerId)!.PeerCandidatesReceived);
+        Assert.Equal(PathKind.Direct, outgoing.Path.Kind); await Exchange(outgoing, incoming, 81);
     }
 }

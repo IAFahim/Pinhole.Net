@@ -128,6 +128,11 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
     /// through a relay while this node requires direct application traffic.</summary>
     public long RelayedDatagramsBlocked => Interlocked.Read(ref _c.RelayedDatagramsBlocked);
 
+    /// <summary>Bounded speculative UDP punches sent to ports proposed during an
+    /// authenticated prediction round. These do not count as application datagrams
+    /// and do not establish a direct path without the normal encrypted peer proof.</summary>
+    public long PortPredictionProbesSent => Interlocked.Read(ref _c.PortPredictionProbesSent);
+
     /// <summary>The peer's long-term X25519 public key (32 bytes) once the handshake
     /// delivered it — the identity to pin (trust on first use or against a directory) if
     /// the connection string did not already vouch for it. Null on plaintext sessions.</summary>

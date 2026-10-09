@@ -47,6 +47,10 @@ public sealed class OptionsResolutionTests
         Assert.True(def.EnableDirectUdp);
         Assert.True(def.EnableIPv6FirewallPinholes);
         Assert.True(customized.EnableIPv6FirewallPinholes);
+        Assert.False(def.RelaySignalingOnly);
+        Assert.True(def.EnableInterfaceCandidates);
+        Assert.True(def.EnablePortPrediction);
+        Assert.True(customized.EnablePortPrediction);
     }
 
     [Fact]
@@ -57,6 +61,9 @@ public sealed class OptionsResolutionTests
             EnableLanDiscovery = false, PublishIrohAddress = false, PublishDirectIrohAddresses = false,
             EnableTcpTransport = false, EnableDirectUdp = false,
             EnableIPv6FirewallPinholes = false,
+            RelaySignalingOnly = true,
+            EnableInterfaceCandidates = false,
+            EnablePortPrediction = false,
         }));
         Assert.Equal(PinholeOptions.PublicIrohRelays, resolved.ResolvedIrohRelays);
         Assert.False(resolved.EnableLanDiscovery);
@@ -65,6 +72,9 @@ public sealed class OptionsResolutionTests
         Assert.False(resolved.EnableTcpTransport);
         Assert.False(resolved.EnableDirectUdp);
         Assert.False(resolved.EnableIPv6FirewallPinholes);
+        Assert.True(resolved.RelaySignalingOnly);
+        Assert.False(resolved.EnableInterfaceCandidates);
+        Assert.False(resolved.EnablePortPrediction);
     }
 
     [Fact]

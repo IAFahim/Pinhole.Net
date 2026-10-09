@@ -60,6 +60,11 @@ internal sealed class VirtualNat : IDisposable
     /// path can carry the session.</summary>
     public bool BlockAllOutboundDirect { get; set; }
 
+    // Independent allocation policy for tests of predictable versus randomized
+    // symmetric NATs; it does not inspect Pinhole frames or connection identity.
+    internal Func<int, int>? PortAllocator { get; set; }
+    private int NextPort() => PortAllocator?.Invoke(_nextPublicPort++) ?? _nextPublicPort++;
+
     public long MappingsCreated;
     public long FilterDrops;
     public long ExpiredMappings;
@@ -95,7 +100,7 @@ internal sealed class VirtualNat : IDisposable
                     && m.Socket.Address.Equals(sender.Address) && m.SoleRemote is { } r && r.Equals(dest));
                 if (mapping is null)
                 {
-                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, _nextPublicPort++)) { SoleRemote = dest };
+                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, NextPort())) { SoleRemote = dest };
                     Adopt(mapping);
                 }
             }
@@ -104,7 +109,7 @@ internal sealed class VirtualNat : IDisposable
                 mapping = _mappings.FirstOrDefault(m => !m.Dead && m.Socket.Address.Equals(sender.Address));
                 if (mapping is null)
                 {
-                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, _nextPublicPort++));
+                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, NextPort()));
                     Adopt(mapping);
                 }
             }

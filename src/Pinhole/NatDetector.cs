@@ -12,7 +12,8 @@ public enum NatType
     Unknown,
 
     /// <summary>Every server observed the same mapped endpoint: the NAT reuses one mapping
-    /// regardless of destination (endpoint-independent mapping) — hole punching works.</summary>
+    /// regardless of the tested destinations (endpoint-independent mapping).
+    /// Filtering and the other peer's network still decide direct reachability.</summary>
     Cone,
 
     /// <summary>Different servers observed different mapped endpoints: the NAT creates a
@@ -24,10 +25,31 @@ public enum NatType
 /// <summary>Classifies the local NAT by comparing what several STUN servers observe of the
 /// SAME socket. This is the cheap, honest test: it separates symmetric NATs (per-destination
 /// mappings) from endpoint-independent mappings. Finer
-/// subtyping (restricted vs port-restricted cone) needs a cooperating server answering from
-/// alternate ports, which public infrastructure does not offer.</summary>
+/// subtyping requires a cooperating alternate-address server; use <see cref="InspectAsync"/>
+/// for a separate, bounded diagnostic pass when one is available.</summary>
 public static class NatDetector
 {
+    /// <summary>Measure mapping and positive filtering evidence with a cooperating RFC 5780
+    /// STUN server. Uses a fresh diagnostic UDP socket, never the application's socket.
+    /// At most seven requests, each bounded by two seconds; unsupported servers and
+    /// unanswered alternate responses produce unknown results. Does not prove punching
+    /// success, future allocation, NAT count or another source socket's behavior.</summary>
+    public static async Task<NatBehaviorReport> InspectAsync(IPEndPoint server, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        if (!StunBindingMessage.Usable(server)) throw new ArgumentException("A unicast STUN endpoint with a port is required", nameof(server));
+        await using var node = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            Bind = new(server.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0),
+            StunServers = [], Relays = [], IrohRelayUrls = [], Listen = false, PublishIrohAddress = false,
+            Encryption = PinholeEncryption.Disabled, EnableTcpTransport = false, EnableInterfaceCandidates = false,
+            EnablePortMapping = false, EnableLanDiscovery = false, EnableNetworkWatch = false,
+            EnablePathValidation = false, EnablePmtud = false, StunRefreshInterval = TimeSpan.Zero,
+        }, ct).ConfigureAwait(false);
+        return await NatBehaviorMeasurement.InspectAsync(node.Engine.DiagnosticLocalEndpoint, server,
+            node.Engine.ProbeBindingAsync, ct).ConfigureAwait(false);
+    }
+
     /// <summary>Runs detection against the free public STUN catalog.</summary>
     [SuppressMessage("ApiDesign", "RS0026", Justification = "These existing optional cancellation-token overloads must retain their published source and reflection contracts.")]
     public static async Task<NatType> DetectAsync(CancellationToken ct = default)
@@ -62,6 +84,7 @@ public static class NatDetector
             }
             catch (Exception ex) when (ex is SocketException or TimeoutException or OperationCanceledException)
             {
+                ct.ThrowIfCancellationRequested();
                 continue; // an unresponsive server must not sink the verdict
             }
 

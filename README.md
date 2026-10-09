@@ -24,6 +24,18 @@ It adds an encrypted stream route beneath the same datagram API; real socket,
 platform, and Kotlin interop checks remain pending, so it is not yet a released
 connectivity guarantee.
 
+Relay-assisted introduction with direct application traffic is another
+[local draft](docs/RELAY_SIGNALING.md): `RelaySignalingOnly = true` exchanges
+authenticated candidates but keeps Connect/Accept pending until direct UDP/TCP
+opens. Both endpoints should enable the policy when their application requires
+direct data. The default still permits encrypted relay fallback.
+
+[Source-bound interface candidates](docs/INTERFACE_CANDIDATES.md) are a .NET local
+draft enabled by default through `EnableInterfaceCandidates`. Up to four additional
+UDP source sockets retain their own STUN observations and direct paths, allowing
+another active interface to connect when the default route fails. Actual socket,
+platform, VPN/carrier and Kotlin checks remain pending.
+
 **Non-goals, stated loudly**: no delivery guarantees, ordering, or retransmission — a half-baked ARQ is worse than none, so retransmit at the app layer if you care (the engine's internal path validation keeps the *transport* honest, never your protocol alive; the optional keepalive is a NAT heartbeat, not reliability). No signaling transport, storage, or coordination services — anything stateful about your app belongs to your app.
 
 ## Install
@@ -327,8 +339,8 @@ Console.WriteLine($"{s.DatagramsSent} sent, {s.DatagramsReceived} received, " +
 ### Know your NAT — automatically
 
 The node classifies its own NAT from its ordinary bind-time STUN probes: when two or
-more servers observe the same mapping the NAT is a cone (the reflexive candidate is
-punchable); when servers in the same address family observe different mappings it is symmetric, and the hint is
+more servers in one address family observe the same mapping the hint is cone
+(endpoint-independent mapping across those tested destinations); when servers in the same address family observe different mappings it is symmetric, and the hint is
 embedded in future connection strings so dialers go relay-first — public reflexive
 punching depends on the other peer's filtering, but direct candidates keep a
 one-second trickle. LAN and router mappings can also provide direct paths. IPv4 and IPv6
@@ -342,8 +354,13 @@ node.SetNatHint(NatHint.Cone);     // only if the app knows better than the obse
 node.SetNatHint(NatHint.Unknown);  // back to automatic
 ```
 
-`NatDetector` remains available for apps that want the standalone detection it
-performs.
+The local .NET draft adds `NatDetector.InspectAsync(server, ct)` for richer
+[RFC 5780 diagnostics](docs/NAT_BEHAVIOR.md) on a fresh diagnostic socket, and
+[negotiated bounded UDP prediction](docs/PORT_PREDICTION.md) from the actual
+application socket. `EnablePortPrediction` defaults to true, uses four fresh
+sequential STUN observations, and refuses unreliable allocation evidence. Only
+compatible authenticated peers participate. Neither mapping hints nor prediction
+guarantee direct reachability; phone parity and real network validation remain pending.
 
 ### Router port mappings — the direct-path head start
 
@@ -437,7 +454,8 @@ var local = await PinholeNode.BindAsync(new PinholeOptions
 
 ### Many peers
 
-One node, many connections sharing one UDP socket. The draft TCP sidecar owns a
+One node multiplexes connections over a primary UDP socket and the draft's bounded
+source-bound interface pool. The draft TCP sidecar owns a
 bounded stream pool. Dial every string you're given, accept in a loop:
 
 ```csharp
@@ -471,10 +489,10 @@ needed before claiming broad automatic direct connectivity.
 | Dialer side | Publisher side | Direct punch | Path used |
 |---|---|---|---|
 | Reachable IPv6 | Reachable IPv6 | Yes, when both firewalls permit it | Direct IPv6 |
-| Cone/EIM NAT | Cone/EIM NAT | Yes — simultaneous open, both sides punch at each other | Direct UDP |
+| Cone/EIM NAT | Cone/EIM NAT | Usually, when both filters permit the simultaneous probes | Direct UDP when reachable, otherwise relay |
 | Cone NAT | Symmetric NAT | Depends on filtering and explicit mappings; direct probes continue once a second | Direct UDP when reachable, otherwise relay |
 | Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
-| Symmetric NAT | Symmetric NAT | Ordinary STUN-based punching is not guaranteed; explicit mappings can help | Usually relay |
+| Symmetric NAT | Symmetric NAT | Explicit mappings or the measured prediction draft can help some allocations; random/unstable allocation may refuse direct | Direct when proved, otherwise relay |
 | UDP blocked (hotel/corp firewall) | A peer accepting reachable TCP | UDP punching cannot work; direct TCP is being added in #43 | Draft direct TCP where permitted; otherwise iroh HTTPS relay |
 | TURN credentials configured | Firewall allows only relayed UDP | — | TURN relayed address (RFC 5766) |
 | Both behind the same NAT (CGNAT hairpin) | Each other | Usually fails — hairpinning is router-dependent and rarely works on CGNAT | Relay automatically; direct is expected-not-guaranteed |
@@ -515,7 +533,7 @@ universal discovery artifact everywhere else.
 
 ## The libraries
 
-- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, automatic NAT classification, PCP/NAT-PMP/UPnP router port mapping, `NatDetector`, the raw `PeerSocket` punch engine — one UDP socket, zero allocations per datagram in either direction (perf-profiled), no native dependencies; wire format documented in [docs/PROTOCOL.md](docs/PROTOCOL.md); persistent identity and authenticated address rediscovery in [docs/REDISCOVERY.md](docs/REDISCOVERY.md)
+- `src/Pinhole` — the connection core (`Pinhole.Net` package, net8.0 + net10.0): `PinholeNode`/`PinholeConnection` session API, managed iroh relay transport, automatic NAT classification, PCP/NAT-PMP/UPnP router port mapping, `NatDetector`, and the raw `PeerSocket` punch engine. The local draft adds bounded UDP interface sources and an authenticated TCP sidecar; no native dependencies. Wire format is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md); persistent identity and authenticated address rediscovery in [docs/REDISCOVERY.md](docs/REDISCOVERY.md).
 - `src/Pinhole.Blobs` — file & directory transfer above the core (`Pinhole.Blobs` package, net8.0 + net10.0, AOT-compatible): one-ticket serving/downloading, BLAKE3 verified streaming, receiver-driven loss healing, resume sidecars, per-ticket ChaCha20-Poly1305; wire format documented in [docs/BLOBS.md](docs/BLOBS.md)
 - `src/Pinhole.Turn` — TURN relay client (RFC 5766): allocate/permission/send+data indications against any standard TURN server
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
