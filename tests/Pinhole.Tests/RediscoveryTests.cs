@@ -274,8 +274,13 @@ public sealed class RediscoveryTests
         // Both sides drop and rebind (a simultaneous roam): both publish fresh records.
         a1.Dispose();
         b1.Dispose();
-        await using PinholeNode a2 = await BindOnFreshPortAsync(Options(seedA, [Loopback(server)]), portA, _output);
-        await using PinholeNode b2 = await BindOnFreshPortAsync(Options(seedB, [Loopback(server)]), portB, _output);
+        // The stale-ticket dials below assert rediscovery healing, not dial latency: on a
+        // saturated CI runner the heal chain (dead-candidate punch → lookup → adopt →
+        // crypto handshake) stretches well past the 5 s production default the rest of
+        // this suite uses, so these two dials carry their own load-tolerant budget.
+        TimeSpan healBudget = TimeSpan.FromSeconds(15);
+        await using PinholeNode a2 = await BindOnFreshPortAsync(Options(seedA, [Loopback(server)], connectTimeout: healBudget), portA, _output);
+        await using PinholeNode b2 = await BindOnFreshPortAsync(Options(seedB, [Loopback(server)], connectTimeout: healBudget), portB, _output);
         await UntilRecordServedAsync(server, a2.PeerId);
         await UntilRecordServedAsync(server, b2.PeerId);
 
@@ -303,9 +308,20 @@ public sealed class RediscoveryTests
         // Direction two, after the first pair closed: B's stale ticket heals onto A's new
         // address. (Dialing while the first connection lives would reuse it — that is the
         // engine's idempotent-dial rule, not a new path.)
-        await using PinholeConnection atA = await b2.ConnectAsync(ticketA);
-        await using PinholeConnection acceptAtA = await a2.AcceptAsync();
-        await ExchangeAsync(atA, acceptAtA, "B dials A's stale ticket");
+        try
+        {
+            await using PinholeConnection atA = await b2.ConnectAsync(ticketA);
+            await using PinholeConnection acceptAtA = await a2.AcceptAsync();
+            await ExchangeAsync(atA, acceptAtA, "B dials A's stale ticket");
+        }
+        catch (Exception ex)
+        {
+            _output.WriteLine($"direction-two failed: {ex.Message}");
+            _output.WriteLine($"rendezvous nodes={server.NodeCount} wants={server.WantCount}");
+            _output.WriteLine($"a2 conns: {string.Join(",", a2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            throw;
+        }
     }
 
     /// <summary>The exact acceptance criterion of #29: when a ticket's candidates are all

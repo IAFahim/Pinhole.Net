@@ -197,6 +197,7 @@ public sealed class InteropTests
         File.Copy(Path.Combine(hostSrc, "InteropHost.cs"), Path.Combine(worktree, "InteropHost.cs"), true);
         File.Copy(Path.Combine(hostSrc, "InteropHost.csproj"), Path.Combine(worktree, "InteropHost.csproj"), true);
         PatchReleaseHostRecvLoop(worktree);
+        PatchReleaseHostSocket(worktree);
 
         using var build = Process.Start(new ProcessStartInfo("dotnet", $"build InteropHost.csproj -c Release")
         {
@@ -212,29 +213,83 @@ public sealed class InteropTests
         return dll;
     }
 
-    /// <summary>The release host predates a .NET 10 macOS behavior: on a dual-mode socket
-    /// the runtime may hand back a native IPv4 sockaddr and shrink the reusable
-    /// SocketAddress's Size, after which every later receive throws
-    /// ArgumentOutOfRangeException and the host process dies. The shipped engine grew an
-    /// explicit capacity restore for exactly this (NodeEngine's recv loop). This patches
-    /// the same restore into the worktree copy — a runtime-compatibility shim only: no
-    /// wire byte, timing, or behavior of the release under test changes.</summary>
+    /// <summary>The release host predates two .NET 10 macOS behaviors on dual-mode
+    /// sockets. First: the runtime may hand back a native IPv4 sockaddr and shrink the
+    /// reusable SocketAddress's Size, after which every later receive throws
+    /// ArgumentOutOfRangeException. Second: because that sockaddr carries the IPv4
+    /// family, every inline reply SendTo from the dual-mode IPv6 socket fails, so the
+    /// host hears its peer but can never answer — Linux reports v4 senders already
+    /// mapped, which is why only macOS interop dies. The shipped engine grew
+    /// NormalizeReceivedAddress for exactly this. These patches restore capacity and the
+    /// mapped form into the worktree copy — runtime-compatibility shims only: no wire
+    /// byte, timing, or behavior of the release under test changes.</summary>
     private static void PatchReleaseHostRecvLoop(string worktree)
     {
         string path = Path.Combine(worktree, "src", "Pinhole", "NodeEngine.cs");
+        PatchIfNeeded(path,
+            marker: "addressCapacity",
+            (text) =>
+            {
+                const string declaration = "var remote = new SocketAddress(AddressFamily.InterNetworkV6);";
+                const string receive = "n = _udp.ReceiveFrom(buf, remote);";
+                if (!text.Contains(declaration, StringComparison.Ordinal)
+                    || !text.Contains(receive, StringComparison.Ordinal))
+                {
+                    return text;
+                }
+                text = text.Replace(declaration,
+                    declaration + "\n        int addressCapacity = remote.Size; // interop shim: see InteropTests", StringComparison.Ordinal);
+                text = text.Replace(receive,
+                    "remote.Size = addressCapacity; // interop shim: restore capacity shrunk by a native v4 sockaddr\n                " + receive,
+                    StringComparison.Ordinal);
+                return text;
+            });
+    }
+
+    /// <summary>Ships the mapped-sockaddr normalization (see above) into the worktree's
+    /// socket wrapper, which is where every receive funnels. Idempotent and silently
+    /// absent from trees whose anchor text moved.</summary>
+    private static void PatchReleaseHostSocket(string worktree)
+    {
+        string path = Path.Combine(worktree, "src", "Pinhole", "UdpSocket.cs");
+        PatchIfNeeded(path,
+            marker: "NormalizeInteropRecv",
+            (text) =>
+            {
+                const string anchor = "public int ReceiveFrom(Span<byte> buffer, SocketAddress from) => _udp.ReceiveFrom(buffer, SocketFlags.None, from);";
+                if (!text.Contains(anchor, StringComparison.Ordinal))
+                {
+                    return text;
+                }
+                string shim = """
+                    public int ReceiveFrom(Span<byte> buffer, SocketAddress from)
+                    {
+                        // interop shim NormalizeInteropRecv: see InteropTests. BSD may report a native
+                        // IPv4 sockaddr (and shrink the buffer) on a dual-mode socket; the engine's
+                        // reply path requires the v4-mapped form, as shipped NormalizeReceivedAddress.
+                        int n = _udp.ReceiveFrom(buffer, SocketFlags.None, from);
+                        if (from.Family == System.Net.Sockets.AddressFamily.InterNetwork)
+                        {
+                            Span<byte> bytes = from.Buffer.Span;
+                            ushort port = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(bytes[2..]);
+                            uint address = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(bytes[4..]);
+                            new System.Net.IPEndPoint(System.Net.IPAddress.Any.MapToIPv6(), 0).Serialize().Buffer.Span.CopyTo(bytes);
+                            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(bytes[2..], port);
+                            System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes[20..], address);
+                        }
+                        return n;
+                    }
+                    """;
+                return text.Replace(anchor, shim, StringComparison.Ordinal);
+            });
+    }
+
+    private static void PatchIfNeeded(string path, string marker, Func<string, string> apply)
+    {
         if (!File.Exists(path)) return;
         string text = File.ReadAllText(path);
-        const string declaration = "var remote = new SocketAddress(AddressFamily.InterNetworkV6);";
-        const string receive = "n = _udp.ReceiveFrom(buf, remote);";
-        if (text.Contains("addressCapacity", StringComparison.Ordinal)) return; // already patched
-        if (!text.Contains(declaration, StringComparison.Ordinal)
-            || !text.Contains(receive, StringComparison.Ordinal)) return;
-        text = text.Replace(declaration,
-            declaration + "\n        int addressCapacity = remote.Size; // interop shim: see InteropTests", StringComparison.Ordinal);
-        text = text.Replace(receive,
-            "remote.Size = addressCapacity; // interop shim: restore capacity shrunk by a native v4 sockaddr\n                " + receive,
-            StringComparison.Ordinal);
-        File.WriteAllText(path, text);
+        if (text.Contains(marker, StringComparison.Ordinal)) return; // already patched
+        File.WriteAllText(path, apply(text));
     }
 
     // ------------------------------------------------------------------ process plumbing

@@ -3983,6 +3983,12 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (probe is not null)
                 {
+                    // The network answered, so this is a moved mapping, not a dead one —
+                    // and a moved mapping is the refresh case, whose contract is gentle:
+                    // re-advertise without disturbing paths that already work. (A stale
+                    // direct path is still caught by path validation's probe misses; the
+                    // demote-and-repunch below belongs to a real rebind, where the old
+                    // direct path is genuinely gone.)
                     lock (_gate)
                     {
                         if (_reflexive.Contains(probe))
@@ -3990,11 +3996,19 @@ internal sealed partial class NodeEngine : IDisposable
                             return; // the mapping did not move; nothing to do
                         }
 
+                        _reflexive.Clear();
                         _reflexive.Add(probe);
+                        RefreshLocalCandidatesNoLock(); // same critical section: no torn state between the two views
                     }
 
-                    RefreshLocalCandidates();
-                    ReannounceAndRepunch();
+                    foreach (ConnState c in ConnectionsSnapshot())
+                    {
+                        if (c.State != PinholeConnectionState.Closed)
+                        {
+                            AnnounceTo(c); // gentle: the peer keeps its working path and only learns our new candidates
+                        }
+                    }
+
                     return;
                 }
 
