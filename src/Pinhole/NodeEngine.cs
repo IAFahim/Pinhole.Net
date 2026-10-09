@@ -161,6 +161,7 @@ internal sealed partial class NodeEngine : IDisposable
     // caller pings, whose timestamps are TickCount64 readings.
     internal const int PmtuOverhead = HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead;
     internal const int PmtuBaseWire = MaxPayload + PmtuOverhead;
+    private const long LookupRetryMs = 1000; // lookup retries must subdivide the shortest ConnectTimeout
     private const int PmtuCeilingV4 = 1472; // Ethernet IPv4: 1500 - 20 - 8
     private const int PmtuCeilingV6 = 1452; // Ethernet IPv6: 1500 - 40 - 8
     private const int PmtuStepBytes = 128;
@@ -1697,12 +1698,14 @@ internal sealed partial class NodeEngine : IDisposable
                     candidates = c.PeerCandidates.ToArray();
 
                     // A stuck punch whose ticket pins an endpoint key asks the lookup
-                    // providers where the peer is NOW, on a slow cadence: unsuccessful
-                    // recovery is one of the events that must refresh reachability. This is
+                    // providers where the peer is NOW. The cadence must subdivide a
+                    // connection deadline: at one probe per deadline a single lost UDP
+                    // reply (or a slow provider under load) starves the dial — the retry
+                    // would land after ConnectTimeout has already condemned it. This is
                     // also the only retry that keeps firing once the session has fallen to
                     // Punching (NotifyPathSuspect no longer runs there).
                     if (c.PinnedEndpointKey is { } pinned && _lookup.Count > 0
-                        && Environment.TickCount64 - c.LastLookupTicks > 5000)
+                        && Environment.TickCount64 - c.LastLookupTicks > LookupRetryMs)
                     {
                         c.LastLookupTicks = Environment.TickCount64;
                         _ = ResolveViaLookupAsync(c, pinned, stop.Token);

@@ -39,10 +39,16 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash .github/scripts/prepare-macos-loopback.sh
+      - name: Run interop suite (its release-host build must not storm the parallel suite)
+        run: >
+          dotnet test tests/Pinhole.Tests
+          -c Release --filter "FullyQualifiedName~InteropTests"
+          --logger trx --logger "console;verbosity=detailed"
+          --blame-hang --blame-hang-timeout 5m --blame-hang-dump-type mini
       - name: Run test suite
         run: >
           dotnet test tests/Pinhole.Tests
-          -c Release --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests"
+          -c Release --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
       - name: Upload test results (hang diagnostics)

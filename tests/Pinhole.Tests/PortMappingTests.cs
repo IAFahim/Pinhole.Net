@@ -350,13 +350,26 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
 
     public FakeUpnpIgd()
     {
-        using var port = new TcpListener(IPAddress.Loopback, 0);
-        port.Start();
-        int httpPort = ((IPEndPoint)port.LocalEndpoint).Port;
-        port.Stop();
-        _base = new Uri($"http://127.0.0.1:{httpPort}/");
-        _http.Prefixes.Add(_base.AbsoluteUri);
-        _http.Start();
+        // The port-0 probe and the listener bind are two steps: another concurrent test can
+        // claim the probed port in between, so a collision retries with a fresh one.
+        for (int attempt = 0; ; attempt++)
+        {
+            using var port = new TcpListener(IPAddress.Loopback, 0);
+            port.Start();
+            int httpPort = ((IPEndPoint)port.LocalEndpoint).Port;
+            port.Stop();
+            _base = new Uri($"http://127.0.0.1:{httpPort}/");
+            _http.Prefixes.Add(_base.AbsoluteUri);
+            try
+            {
+                _http.Start();
+                break;
+            }
+            catch (HttpListenerException) when (attempt < 10)
+            {
+                _http.Prefixes.Remove(_base.AbsoluteUri);
+            }
+        }
         _ssdp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         SsdpEndpoint = (IPEndPoint)_ssdp.Client.LocalEndPoint!;
         _ssdpLoop = Task.Run(SsdpLoopAsync);

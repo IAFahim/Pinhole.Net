@@ -295,12 +295,25 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
 
     public FakeIrohRelay()
     {
-        using var port = new TcpListener(IPAddress.Loopback, 0);
-        port.Start();
-        Url = new Uri($"http://127.0.0.1:{((IPEndPoint)port.LocalEndpoint).Port}/");
-        port.Stop();
-        _listener.Prefixes.Add(Url.AbsoluteUri);
-        _listener.Start();
+        // Same two-step port dance as FakeUpnpIgd: a concurrent test can claim the probed
+        // port between probe and bind, so a collision retries with a fresh one.
+        for (int attempt = 0; ; attempt++)
+        {
+            using var port = new TcpListener(IPAddress.Loopback, 0);
+            port.Start();
+            Url = new Uri($"http://127.0.0.1:{((IPEndPoint)port.LocalEndpoint).Port}/");
+            port.Stop();
+            _listener.Prefixes.Add(Url.AbsoluteUri);
+            try
+            {
+                _listener.Start();
+                break;
+            }
+            catch (HttpListenerException) when (attempt < 10)
+            {
+                _listener.Prefixes.Remove(Url.AbsoluteUri);
+            }
+        }
         _accept = Accept();
     }
 

@@ -88,8 +88,9 @@ public sealed class InteropTests
                 new BlobServeOptions { NodeOptions = OfflineLoopback() });
 
             proc = StartHost(host, $"download \"{server.Ticket}\" \"{Path.Combine(dir, "out")}\"");
-            _ = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget); // drain the pipe
+            string stderr = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget); // drain the pipe
             await proc.WaitForExitAsync().WaitAsync(Budget);
+            _output.WriteLine("old host exit " + proc.ExitCode + ", stderr:\n" + stderr);
 
             Assert.Equal(0, proc.ExitCode);
             byte[] actual = await File.ReadAllBytesAsync(
@@ -131,6 +132,7 @@ public sealed class InteropTests
             proc = StartHost(host, $"download \"{server.Ticket}\" \"{Path.Combine(dir, "out")}\"");
             string stderr = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget);
             await proc.WaitForExitAsync().WaitAsync(Budget);
+            _output.WriteLine("old host exit " + proc.ExitCode + ", stderr:\n" + stderr);
 
             Assert.NotEqual(0, proc.ExitCode);
             Assert.Contains("FormatException", stderr);
