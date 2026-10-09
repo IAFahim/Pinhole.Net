@@ -28,6 +28,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # InteropTests build a prior release in-process; a shallow clone cannot
+          # reach that commit and the suite silently skips them.
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
