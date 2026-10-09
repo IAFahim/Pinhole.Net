@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Globalization;
 using System.Xml.Linq;
 using System.Xml;
 
@@ -9,7 +10,7 @@ namespace Pinhole;
 /// <summary>UPnP Internet Gateway Device client: SSDP discovery, device-description parsing,
 /// and the SOAP actions a pinhole needs (AddAnyPortMapping with AddPortMapping fallback,
 /// GetExternalIPAddress, DeletePortMapping). The same technique iroh's portmapper uses —
-/// asking the router for an explicit UDP mapping turns many hard home NATs into easy ones
+/// asking the router for an explicit UDP/TCP mapping turns many hard home NATs into easy ones
 /// before hole punching even starts. Every failure is silent: a router that does not speak
 /// UPnP simply contributes no mapping.</summary>
 internal sealed class UpnpIgdClient : IDisposable
@@ -19,21 +20,28 @@ internal sealed class UpnpIgdClient : IDisposable
     private static readonly TimeSpan SsdpWindow = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan HttpTimeout = TimeSpan.FromSeconds(1500 / 1000.0 + 500);
 
-    private readonly HttpClient _http = new(new SocketsHttpHandler
+    private static HttpClient CreateHttpClient() => new(new SocketsHttpHandler
     {
         ConnectTimeout = TimeSpan.FromSeconds(1.5),
         UseProxy = false,
+        AllowAutoRedirect = false,
     });
+    private readonly HttpClient _http = CreateHttpClient();
 
-    /// <summary>Asks the network's IGD for a UDP mapping to <paramref name="internalPort"/>
+    /// <summary>Asks the network's IGD for a mapping to <paramref name="internalPort"/>
     /// and returns the lease, or null when no gateway answered or none accepted the request.
     /// <paramref name="ssdpUnicast"/> overrides multicast discovery (test seam).</summary>
     public async Task<UpnpMapping?> TryMapAsync(int internalPort, TimeSpan lease,
-        IPEndPoint? ssdpUnicast, CancellationToken ct)
+        IPEndPoint? ssdpUnicast, CancellationToken ct, ProtocolType protocol = ProtocolType.Udp)
     {
+        if (internalPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(internalPort));
+        if (protocol is not (ProtocolType.Udp or ProtocolType.Tcp)) throw new ArgumentOutOfRangeException(nameof(protocol));
+        if (lease <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(lease));
+        lease = TimeSpan.FromSeconds(Math.Clamp((long)lease.TotalSeconds, 1, 604800));
         foreach (Uri location in await DiscoverAsync(ssdpUnicast, ct).ConfigureAwait(false))
         {
-            UpnpMapping? mapping = await TryMapDeviceAsync(location, internalPort, lease, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            UpnpMapping? mapping = await TryMapDeviceAsync(location, internalPort, lease, ct, protocol).ConfigureAwait(false);
             if (mapping is not null)
             {
                 return mapping;
@@ -64,9 +72,11 @@ internal sealed class UpnpIgdClient : IDisposable
         var buf = new byte[2048];
         long deadline = Environment.TickCount64 + (long)window.TotalMilliseconds;
         var seen = new HashSet<Uri>();
-        while (Environment.TickCount64 < deadline)
+        while (Environment.TickCount64 < deadline && locations.Count < 8)
         {
+            ct.ThrowIfCancellationRequested();
             int n;
+            EndPoint source = new IPEndPoint(IPAddress.Any, 0);
             try
             {
                 if (!udp.Poll((int)Math.Max(1, deadline - Environment.TickCount64) * 1000, SelectMode.SelectRead))
@@ -74,7 +84,7 @@ internal sealed class UpnpIgdClient : IDisposable
                     break;
                 }
 
-                n = udp.Receive(buf);
+                n = udp.ReceiveFrom(buf, ref source);
             }
             catch (SocketException)
             {
@@ -82,14 +92,43 @@ internal sealed class UpnpIgdClient : IDisposable
             }
 
             string? location = ParseLocationHeader(buf.AsSpan(0, n));
-            if (location is not null && Uri.TryCreate(location, UriKind.Absolute, out Uri? uri) && seen.Add(uri))
+            if (source is not IPEndPoint responder || unicast is not null && !responder.Equals(unicast)) continue;
+            if (location is not null && Uri.TryCreate(location, UriKind.Absolute, out Uri? uri)
+                && await PinLocationAsync(uri, responder.Address, ct).ConfigureAwait(false) is { } pinned && seen.Add(pinned))
             {
-                locations.Add(uri);
+                locations.Add(pinned);
             }
         }
 
         return locations;
     }
+
+    private static async Task<Uri?> PinLocationAsync(Uri uri, IPAddress responder, CancellationToken ct)
+    {
+        if (!IsRouterAddress(responder) || !IsHttpUrl(uri)) return null;
+        try
+        {
+            IPAddress[] addresses = IPAddress.TryParse(uri.Host, out IPAddress? literal) ? [literal]
+                : await Dns.GetHostAddressesAsync(uri.DnsSafeHost, ct).ConfigureAwait(false);
+            if (!addresses.Contains(responder)) return null;
+            return new UriBuilder(uri) { Host = responder.ToString() }.Uri;
+        }
+        catch (SocketException) { return null; }
+    }
+
+    internal static bool IsRouterAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address)) return true; // explicit local fixtures
+        if (address.AddressFamily == AddressFamily.InterNetworkV6) return address.IsIPv6LinkLocal || (address.GetAddressBytes()[0] & 0xfe) == 0xfc;
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] == 10 || bytes[0] == 172 && bytes[1] is >= 16 and <= 31
+            || bytes[0] == 192 && bytes[1] == 168 || bytes[0] == 169 && bytes[1] == 254
+            || bytes[0] == 100 && bytes[1] is >= 64 and <= 127;
+    }
+
+    internal static bool IsHttpUrl(Uri uri) => uri.IsAbsoluteUri && uri.Scheme is "http" or "https"
+        && string.IsNullOrEmpty(uri.UserInfo) && string.IsNullOrEmpty(uri.Fragment);
 
     private static string BuildMSearch(string searchTarget, bool multicast) =>
         "M-SEARCH * HTTP/1.1\r\n" +
@@ -101,6 +140,8 @@ internal sealed class UpnpIgdClient : IDisposable
     private static string? ParseLocationHeader(ReadOnlySpan<byte> response)
     {
         string text = Encoding.ASCII.GetString(response);
+        if (!text.StartsWith("HTTP/1.1 200 ", StringComparison.OrdinalIgnoreCase)
+            && !text.StartsWith("HTTP/1.0 200 ", StringComparison.OrdinalIgnoreCase)) return null;
         foreach (string line in text.Split('\n'))
         {
             int colon = line.IndexOf(':');
@@ -113,7 +154,7 @@ internal sealed class UpnpIgdClient : IDisposable
         return null;
     }
 
-    private async Task<UpnpMapping?> TryMapDeviceAsync(Uri location, int internalPort, TimeSpan lease, CancellationToken ct)
+    private async Task<UpnpMapping?> TryMapDeviceAsync(Uri location, int internalPort, TimeSpan lease, CancellationToken ct, ProtocolType protocol)
     {
         XDocument? description = await TryGetXmlAsync(location, ct).ConfigureAwait(false);
         if (description is null)
@@ -130,32 +171,40 @@ internal sealed class UpnpIgdClient : IDisposable
             }
 
             IPAddress localIp = LocalAddressTowards(controlUrl.Host);
-            (int externalPort, bool anyPort)? added =
-                await TryAddAnyPortAsync(controlUrl, serviceType, internalPort, localIp, lease, ct).ConfigureAwait(false)
-                ?? await TryAddPortAsync(controlUrl, serviceType, internalPort, localIp, lease, ct).ConfigureAwait(false);
+            (int externalPort, int wireLease)? added =
+                await TryAddAnyPortAsync(controlUrl, serviceType, internalPort, localIp, lease, ct, protocol).ConfigureAwait(false)
+                ?? await TryAddPortAsync(controlUrl, serviceType, internalPort, localIp, lease, ct, protocol).ConfigureAwait(false);
             if (added is not { } result)
             {
                 continue;
             }
 
-            return new UpnpMapping(_http, controlUrl, serviceType, new IPEndPoint(externalIp, result.externalPort),
-                internalPort, localIp, result.anyPort, lease);
+            // The lease owns its HTTP client. Disposing discovery cannot break later
+            // renewals/releases, which used to share this short-lived client's handle.
+            return new UpnpMapping(CreateHttpClient(), controlUrl, serviceType, new IPEndPoint(externalIp, result.externalPort),
+                internalPort, localIp, result.wireLease, lease, protocol);
         }
 
         return null;
     }
 
-    private static List<(string ServiceType, Uri ControlUrl)> FindConnectionServices(XDocument description, Uri baseUrl)
+    internal static List<(string ServiceType, Uri ControlUrl)> FindConnectionServices(XDocument description, Uri baseUrl)
     {
         // Namespace-agnostic walk: device trees vary more than the spec admits, and a
         // strict namespace match silently loses routers that ship creative XML.
-        var found = new List<(string ServiceType, Uri ControlUrl)>();
         string[] preference =
         [
             "urn:schemas-upnp-org:service:WANIPConnection:2",
             "urn:schemas-upnp-org:service:WANIPConnection:1",
             "urn:schemas-upnp-org:service:WANPPPConnection:1",
         ];
+
+        return FindServices(description, baseUrl, preference);
+    }
+
+    internal static List<(string ServiceType, Uri ControlUrl)> FindServices(XDocument description, Uri baseUrl, string[] preference)
+    {
+        var found = new List<(string ServiceType, Uri ControlUrl)>();
 
         foreach (XElement service in description.Descendants().Where(e => e.Name.LocalName == "service"))
         {
@@ -166,9 +215,11 @@ internal sealed class UpnpIgdClient : IDisposable
                 continue;
             }
 
-            if (Uri.TryCreate(baseUrl, control, out Uri? resolved))
+            if (Uri.TryCreate(baseUrl, control, out Uri? resolved) && IsHttpUrl(resolved)
+                && resolved.Host.Equals(baseUrl.Host, StringComparison.OrdinalIgnoreCase))
             {
                 found.Add((type, resolved));
+                if (found.Count >= 8) break;
             }
         }
 
@@ -181,14 +232,13 @@ internal sealed class UpnpIgdClient : IDisposable
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(HttpTimeout);
-            using HttpResponseMessage response = await _http.GetAsync(url, timeout.Token).ConfigureAwait(false);
+            using HttpResponseMessage response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
                 return null;
             }
 
-            using Stream stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-            return XDocument.Load(stream);
+            return await ReadXmlAsync(response.Content, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HttpRequestException or XmlException or OperationCanceledException or IOException or SocketException)
         {
@@ -203,6 +253,7 @@ internal sealed class UpnpIgdClient : IDisposable
             XDocument? body = await SoapCallAsync(controlUrl, serviceType, "GetExternalIPAddress", "", ct).ConfigureAwait(false);
             string? ip = body?.Descendants().FirstOrDefault(e => e.Name.LocalName == "NewExternalIPAddress")?.Value.Trim();
             return IPAddress.TryParse(ip, out IPAddress? parsed) && parsed.AddressFamily == AddressFamily.InterNetwork
+                && parsed.GetAddressBytes()[0] is > 0 and < 224
                 ? parsed
                 : null;
         }
@@ -212,15 +263,15 @@ internal sealed class UpnpIgdClient : IDisposable
         }
     }
 
-    private async Task<(int Port, bool AnyPort)?> TryAddAnyPortAsync(Uri controlUrl, string serviceType,
-        int internalPort, IPAddress localIp, TimeSpan lease, CancellationToken ct)
+    private async Task<(int Port, int WireLease)?> TryAddAnyPortAsync(Uri controlUrl, string serviceType,
+        int internalPort, IPAddress localIp, TimeSpan lease, CancellationToken ct, ProtocolType protocol)
     {
         try
         {
             string args =
                 Arg("NewRemoteHost", "") +
                 Arg("NewExternalPort", "0") +
-                Arg("NewProtocol", "UDP") +
+                Arg("NewProtocol", ProtocolName(protocol)) +
                 Arg("NewInternalPort", internalPort.ToString()) +
                 Arg("NewInternalClient", localIp.ToString()) +
                 Arg("NewEnabled", "1") +
@@ -228,7 +279,7 @@ internal sealed class UpnpIgdClient : IDisposable
                 Arg("NewLeaseDuration", ((int)lease.TotalSeconds).ToString());
             XDocument? body = await SoapCallAsync(controlUrl, serviceType, "AddAnyPortMapping", args, ct).ConfigureAwait(false);
             string? reserved = body?.Descendants().FirstOrDefault(e => e.Name.LocalName == "NewReservedPort")?.Value.Trim();
-            return int.TryParse(reserved, out int port) && port > 0 ? (port, true) : null;
+            return int.TryParse(reserved, out int port) && port is > 0 and <= 65535 ? (port, (int)lease.TotalSeconds) : null;
         }
         catch (UpnpFaultException)
         {
@@ -236,8 +287,8 @@ internal sealed class UpnpIgdClient : IDisposable
         }
     }
 
-    private async Task<(int Port, bool AnyPort)?> TryAddPortAsync(Uri controlUrl, string serviceType,
-        int internalPort, IPAddress localIp, TimeSpan lease, CancellationToken ct)
+    private async Task<(int Port, int WireLease)?> TryAddPortAsync(Uri controlUrl, string serviceType,
+        int internalPort, IPAddress localIp, TimeSpan lease, CancellationToken ct, ProtocolType protocol)
     {
         // IGDv1 has no "pick a port" action: try our own port first (the best case — the
         // reflexive candidate then matches the mapped one), then a couple past it. A 725
@@ -245,10 +296,12 @@ internal sealed class UpnpIgdClient : IDisposable
         for (int attempt = 0; attempt < 3; attempt++)
         {
             int external = internalPort + attempt;
+            if (external > 65535) break;
+            int wireLease = (int)lease.TotalSeconds;
             string args =
                 Arg("NewRemoteHost", "") +
                 Arg("NewExternalPort", external.ToString()) +
-                Arg("NewProtocol", "UDP") +
+                Arg("NewProtocol", ProtocolName(protocol)) +
                 Arg("NewInternalPort", internalPort.ToString()) +
                 Arg("NewInternalClient", localIp.ToString()) +
                 Arg("NewEnabled", "1") +
@@ -258,6 +311,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
             if (fault == 725)
             {
+                wireLease = 0;
                 args = args.Replace(Arg("NewLeaseDuration", ((int)lease.TotalSeconds).ToString()),
                     Arg("NewLeaseDuration", "0"));
                 (body, fault) = await SoapCallWithFaultAsync(controlUrl, serviceType, "AddPortMapping", args, ct).ConfigureAwait(false);
@@ -265,7 +319,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
             if (fault == 0)
             {
-                return (external, false);
+                return (external, wireLease);
             }
 
             if (fault != 718)
@@ -283,7 +337,7 @@ internal sealed class UpnpIgdClient : IDisposable
         try
         {
             XDocument? body = await SoapCallAsync(controlUrl, serviceType, action, args, ct).ConfigureAwait(false);
-            return (body, 0);
+            return (body, body is null ? -1 : 0);
         }
         catch (UpnpFaultException fault)
         {
@@ -292,6 +346,7 @@ internal sealed class UpnpIgdClient : IDisposable
     }
 
     private static string Arg(string name, string value) => $"<{name}>{value}</{name}>";
+    private static string ProtocolName(ProtocolType protocol) => protocol == ProtocolType.Tcp ? "TCP" : "UDP";
 
     internal static async Task<XDocument?> SoapCallAsync(HttpClient http, Uri controlUrl, string serviceType,
         string action, string args, CancellationToken ct)
@@ -308,12 +363,11 @@ internal sealed class UpnpIgdClient : IDisposable
             using HttpRequestMessage request = new(HttpMethod.Post, controlUrl);
             request.Content = content;
             request.Headers.TryAddWithoutValidation("SOAPACTION", $"\"{serviceType}#{action}\"");
-            using HttpResponseMessage response = await http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+            using HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             XDocument? body = null;
             if (response.Content is not null)
             {
-                using Stream stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-                try { body = XDocument.Load(stream); }
+                try { body = await ReadXmlAsync(response.Content, timeout.Token).ConfigureAwait(false); }
                 catch (XmlException) { body = null; }
             }
 
@@ -336,6 +390,27 @@ internal sealed class UpnpIgdClient : IDisposable
 
     private Task<XDocument?> SoapCallAsync(Uri controlUrl, string serviceType, string action, string args, CancellationToken ct) =>
         SoapCallAsync(_http, controlUrl, serviceType, action, args, ct);
+
+    internal static async Task<XDocument> ReadXmlAsync(HttpContent content, CancellationToken ct)
+    {
+        const int limit = 65536;
+        if (content.Headers.ContentLength > limit) throw new IOException("UPnP XML exceeds the response limit");
+        using Stream stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var bytes = new MemoryStream();
+        byte[] scratch = new byte[4096];
+        int count;
+        while ((count = await stream.ReadAsync(scratch, ct).ConfigureAwait(false)) != 0)
+        {
+            if (bytes.Length + count > limit) throw new IOException("UPnP XML exceeds the response limit");
+            bytes.Write(scratch, 0, count);
+        }
+        bytes.Position = 0;
+        using XmlReader reader = XmlReader.Create(bytes, new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = limit,
+        });
+        return XDocument.Load(reader);
+    }
 
     private static IPAddress LocalAddressTowards(string host)
     {
@@ -367,42 +442,36 @@ internal sealed class UpnpIgdClient : IDisposable
 
     /// <summary>A live router mapping and the SOAP handles to keep it that way.</summary>
     internal sealed class UpnpMapping(HttpClient http, Uri controlUrl, string serviceType, IPEndPoint external,
-        int internalPort, IPAddress internalClient, bool anyPort, TimeSpan lease) : IPortMapLease
+        int internalPort, IPAddress internalClient, int wireLease, TimeSpan lease, ProtocolType protocol) : IPortMapLease
     {
         public IPEndPoint External { get; } = external;
         public TimeSpan Lifetime => lease;
 
         public async Task<bool> RenewAsync(CancellationToken ct)
         {
-            // Re-adding with the same values refreshes the lease (and AddAnyPortMapping
-            // returns the same reserved port).
+            // Renew the exact granted port. AddAny with external=0 could allocate a
+            // different entry, leave the first one behind, and publish a stale address.
             try
             {
                 string args =
                     Arg("NewRemoteHost", "") +
-                    (anyPort
-                        ? Arg("NewExternalPort", "0")
-                        : Arg("NewExternalPort", External.Port.ToString())) +
-                    Arg("NewProtocol", "UDP") +
+                    Arg("NewExternalPort", External.Port.ToString(CultureInfo.InvariantCulture)) +
+                    Arg("NewProtocol", ProtocolName(protocol)) +
                     Arg("NewInternalPort", internalPort.ToString()) +
                     Arg("NewInternalClient", internalClient.ToString()) +
                     Arg("NewEnabled", "1") +
                     Arg("NewPortMappingDescription", "pinhole") +
-                    Arg("NewLeaseDuration", ((int)lease.TotalSeconds).ToString());
+                    Arg("NewLeaseDuration", wireLease.ToString(CultureInfo.InvariantCulture));
                 XDocument? body = await SoapCallAsync(http, controlUrl, serviceType,
-                    anyPort ? "AddAnyPortMapping" : "AddPortMapping", args, ct).ConfigureAwait(false);
+                    "AddPortMapping", args, ct).ConfigureAwait(false);
                 if (body is null)
                 {
                     return false;
                 }
 
-                if (anyPort)
-                {
-                    string? reserved = body.Descendants().FirstOrDefault(e => e.Name.LocalName == "NewReservedPort")?.Value.Trim();
-                    return int.TryParse(reserved, out int port) && port == External.Port;
-                }
-
-                return true;
+                body = await SoapCallAsync(http, controlUrl, serviceType, "GetExternalIPAddress", "", ct).ConfigureAwait(false);
+                string? address = body?.Descendants().FirstOrDefault(e => e.Name.LocalName == "NewExternalIPAddress")?.Value.Trim();
+                return IPAddress.TryParse(address, out IPAddress? renewed) && renewed.Equals(External.Address);
             }
             catch (UpnpFaultException)
             {
@@ -415,17 +484,15 @@ internal sealed class UpnpIgdClient : IDisposable
             string args =
                 Arg("NewRemoteHost", "") +
                 Arg("NewExternalPort", External.Port.ToString()) +
-                Arg("NewProtocol", "UDP");
+                Arg("NewProtocol", ProtocolName(protocol));
             await SoapCallAsync(http, controlUrl, serviceType, "DeletePortMapping", args, ct).ConfigureAwait(false);
         }
 
-        public void Dispose()
-        {
-        }
+        public void Dispose() => http.Dispose();
     }
 
     /// <summary>A UPnP SOAP fault carrying its errorCode (718 conflict, 725 leases, ...).</summary>
-    private sealed class UpnpFaultException(int code) : Exception
+    internal sealed class UpnpFaultException(int code) : Exception
     {
         public int Code { get; } = code;
 

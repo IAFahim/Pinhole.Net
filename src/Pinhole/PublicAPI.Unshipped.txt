@@ -1,4 +1,12 @@
 #nullable enable
+Pinhole.PinholeOptions.RelaySignalingOnly.get -> bool
+Pinhole.PinholeOptions.RelaySignalingOnly.init -> void
+Pinhole.PinholeConnection.RelaySignalingReady.get -> bool
+Pinhole.PinholeConnection.RelayedDatagramsBlocked.get -> long
+Pinhole.PinholeOptions.EnableIPv6FirewallPinholes.get -> bool
+Pinhole.PinholeOptions.EnableIPv6FirewallPinholes.init -> void
+Pinhole.PinholeNode.IPv6FirewallEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.PinholeNode.TcpIPv6FirewallEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
 Pinhole.IrohAddress
 Pinhole.IrohAddress.DirectAddresses.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
 Pinhole.IrohAddress.EndpointId.get -> string!
@@ -128,6 +136,9 @@ Pinhole.NatType.Cone = 1 -> Pinhole.NatType
 Pinhole.NatType.Symmetric = 2 -> Pinhole.NatType
 Pinhole.NatType.Unknown = 0 -> Pinhole.NatType
 Pinhole.PathKind
+Pinhole.DirectTransport
+Pinhole.DirectTransport.Tcp = 1 -> Pinhole.DirectTransport
+Pinhole.DirectTransport.Udp = 0 -> Pinhole.DirectTransport
 Pinhole.PathKind.Direct = 1 -> Pinhole.PathKind
 Pinhole.PathKind.None = 0 -> Pinhole.PathKind
 Pinhole.PathKind.Relay = 2 -> Pinhole.PathKind
@@ -222,6 +233,8 @@ Pinhole.PinholeNode.DisposeAsync() -> System.Threading.Tasks.ValueTask
 Pinhole.PinholeNode.EndpointPublicKey.get -> byte[]?
 Pinhole.PinholeNode.HasRelay.get -> bool
 Pinhole.PinholeNode.LocalPort.get -> int
+Pinhole.PinholeNode.TcpListeningPort.get -> int?
+Pinhole.PinholeNode.TcpPortMappedEndpoint.get -> System.Net.IPEndPoint?
 Pinhole.PinholeNode.NatHint.get -> Pinhole.NatHint
 Pinhole.PinholeNode.PeerId.get -> ulong
 Pinhole.PinholeNode.PortMappedEndpoint.get -> System.Net.IPEndPoint?
@@ -241,6 +254,10 @@ Pinhole.PinholeOptions.ConnectTimeout.init -> void
 Pinhole.PinholeOptions.EnableLanDiscovery.get -> bool
 Pinhole.PinholeOptions.EnableLanDiscovery.init -> void
 Pinhole.PinholeOptions.EnableNetworkWatch.get -> bool
+Pinhole.PinholeOptions.EnableDirectUdp.get -> bool
+Pinhole.PinholeOptions.EnableDirectUdp.init -> void
+Pinhole.PinholeOptions.EnableTcpTransport.get -> bool
+Pinhole.PinholeOptions.EnableTcpTransport.init -> void
 Pinhole.PinholeOptions.EnableNetworkWatch.init -> void
 Pinhole.PinholeOptions.EnablePathValidation.get -> bool
 Pinhole.PinholeOptions.EnablePathValidation.init -> void
@@ -293,6 +310,8 @@ Pinhole.PinholePath.Remote.get -> System.Net.IPEndPoint?
 Pinhole.PinholePath.Remote.init -> void
 Pinhole.PinholePath.Since.get -> System.DateTimeOffset
 Pinhole.PinholePath.Since.init -> void
+Pinhole.PinholePath.Transport.get -> Pinhole.DirectTransport?
+Pinhole.PinholePath.Transport.init -> void
 Pinhole.PinholeStats
 Pinhole.PinholeStats.BytesReceived.get -> long
 Pinhole.PinholeStats.BytesReceived.init -> void

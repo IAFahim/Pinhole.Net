@@ -18,10 +18,12 @@ every session is additionally encrypted and peer-authenticated (below).
 | Path | What carries it | When it is used |
 |---|---|---|
 | Direct UDP | One dual-mode (IPv6 + v4-mapped) socket per node | The goal — hole-punched, zero-alloc, MTU-sized datagrams |
+| Direct TCP (local draft, #43) | A bounded, version-negotiated TCP sidecar with fresh encrypted stream proof | When UDP has not opened and a candidate accepts TCP; [release gate](DIRECT_TCP.md) remains pending |
 | iroh HTTPS relay | WebSocket speaking the [iroh relay v1/v2 framing](#iroh-relay-transport) | Introduction + standing fallback; reconnects with capped exponential backoff |
 | TURN relay | RFC 5766 allocate/permission/send+data indications | Optional fallback when credentials are supplied |
 
-All three carry the same frame format below; only the encapsulation differs.
+All transports carry the same frame format below; only the encapsulation differs.
+TCP uses the [length envelope and per-stream challenge](DIRECT_TCP.md#framing-and-fresh-stream-authentication).
 
 ## Frame format
 
@@ -256,7 +258,8 @@ an earlier, better-informed classification.
 
 The same strategy iroh's portmapper uses, spoken from pure C#. At bind (and after
 every rebind) the node asks the network's gateway for an explicit UDP mapping to its
-socket, in order: **PCP** (RFC 6887), **NAT-PMP** (RFC 6886) — both UDP to the
+socket and, in the TCP draft, a separate TCP lease for its listening sidecar, in
+order: **PCP** (RFC 6887), **NAT-PMP** (RFC 6886) — both UDP to the
 default gateway on port 5351, discovered from the OS routing table — then **UPnP
 IGD** (SSDP M-SEARCH multicast to 239.255.255.250:1900, device-description XML, and
 SOAP `AddAnyPortMapping` with `AddPortMapping` fallback, IGDv1/v2, on the control
@@ -275,9 +278,21 @@ IPv6 gateways. NAT-PMP remains IPv4-only.
 Requests carry a per-mapping random nonce. Renewals and deletion reuse it and suggest
 the previously assigned external endpoint so a restarted gateway can restore the
 mapping. The UDP socket is connected to the gateway, excluding replies from other
-sources. A successful response must echo the nonce, UDP protocol, and internal port,
+sources. A successful response must echo the nonce, requested protocol (UDP 17 or
+TCP 6), and internal port,
 and report a valid external IPv4 or IPv6 endpoint. A renewal that changes either
 external IP or port invalidates the old advertised mapping and triggers rediscovery.
+NAT-PMP's requested protocol is opcode 1 (UDP) or 2 (TCP); its replies must match
+the gateway and internal port. Lease invalidation/expiry and bounded UPnP renewal
+are described in the [TCP draft's lease section](DIRECT_TCP.md#resource-and-lease-bounds).
+
+The local [IPv6 firewall-control draft](IPV6_FIREWALL.md) uses the separate
+`WANIPv6FirewallControl:1` service, IPv6 SSDP on the selected LAN interface and
+HTTP bound to the requested global `InternalClient`. After `GetFirewallStatus`
+allows it, `AddPinhole` requests a protocol/port-specific lease and returns the
+16-bit `UniqueID` used by `UpdatePinhole` and `DeletePinhole`. These are filter
+permissions for an existing host candidate, not translated reflexive addresses.
+Real socket/router and Kotlin release checks remain pending.
 
 ## STUN usage
 

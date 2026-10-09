@@ -38,11 +38,22 @@ public enum PathKind : byte
     Relay = 2,
 }
 
+/// <summary>The transport carrying an authenticated direct path.</summary>
+public enum DirectTransport : byte
+{
+    /// <summary>Peer datagrams over UDP.</summary>
+    Udp = 0,
+    /// <summary>Peer datagrams framed over a direct TCP stream.</summary>
+    Tcp = 1,
+}
+
 /// <summary>Snapshot of the current path.</summary>
 public sealed record PinholePath(PathKind Kind, IPEndPoint? Remote, DateTimeOffset Since)
 {
     /// <summary>The HTTPS relay URL when the path uses an iroh relay.</summary>
     public Uri? RelayUrl { get; init; }
+    /// <summary>UDP or TCP for a direct path; null for a relay or no path.</summary>
+    public DirectTransport? Transport { get; init; } = Kind == PathKind.Direct ? Pinhole.DirectTransport.Udp : null;
     /// <summary>The "no path" sentinel: null remote, timestamp at the Unix epoch.</summary>
     public static readonly PinholePath None = new(PathKind.None, null, DateTimeOffset.UnixEpoch);
 }
@@ -100,6 +111,22 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
             }
         }
     }
+
+    /// <summary>Whether an authenticated relay leg is available for control traffic.
+    /// In signaling-only mode this can become true before Connect/Accept complete;
+    /// it never asserts that an application path is usable.</summary>
+    public bool RelaySignalingReady
+    {
+        get
+        {
+            lock (_c.Gate) return _c.Crypto is { PeerConfirmed: true }
+                && (_c.Iroh is { IsAlive: true } && _c.IrohConfirmed || _c.RelayRemote is not null && _c.RelayReady);
+        }
+    }
+
+    /// <summary>Authenticated application datagrams rejected because they arrived
+    /// through a relay while this node requires direct application traffic.</summary>
+    public long RelayedDatagramsBlocked => Interlocked.Read(ref _c.RelayedDatagramsBlocked);
 
     /// <summary>The peer's long-term X25519 public key (32 bytes) once the handshake
     /// delivered it — the identity to pin (trust on first use or against a directory) if
@@ -267,7 +294,8 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
             {
                 return _c.Path switch
                 {
-                    PathKind.Direct when _c.DirectRemoteEp is { } ep => new PinholePath(PathKind.Direct, ep, _c.PathSince),
+                    PathKind.Direct when _c.DirectRemoteEp is { } ep => new PinholePath(PathKind.Direct, ep, _c.PathSince)
+                    { Transport = _c.DirectTcp is null ? DirectTransport.Udp : DirectTransport.Tcp },
                     PathKind.Relay when _c.Iroh is { IsAlive: true } relay && _c.IrohConfirmed => new PinholePath(PathKind.Relay, null, _c.PathSince) { RelayUrl = relay.Url },
                     PathKind.Relay when _c.RelayRemote is { } ep => new PinholePath(PathKind.Relay, ep, _c.PathSince),
                     _ => PinholePath.None,

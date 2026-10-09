@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 
 namespace Pinhole;
 
@@ -45,6 +46,14 @@ public sealed record PinholeOptions
 
     internal HttpMessageHandler? IrohDiscoveryHandler { get; init; }
     internal Func<ILanChannel>? LanChannelFactory { get; init; }
+    internal Func<Uri, CancellationToken, Task<WebSocket>>? IrohWebSocketFactory { get; init; }
+
+    /// <summary>Use relays only for authenticated handshakes, candidate exchange,
+    /// path probes and close (default false). Connect/Accept wait for a direct
+    /// application path; application datagrams are never sent or delivered through
+    /// a relay. Requires <see cref="PinholeEncryption.Required"/>. A relay introduction
+    /// can improve punching but cannot guarantee a permitted direct route.</summary>
+    public bool RelaySignalingOnly { get; init; }
 
     /// <summary>Accept connections dialed by unknown peers (default true). When false, only
     /// peers this node dials itself can establish a connection. Strangers are bounded: a
@@ -58,6 +67,17 @@ public sealed record PinholeOptions
     /// <see cref="PinholeNode.RoamNowAsync(System.Threading.CancellationToken)"/> yourself.</summary>
     public bool EnableNetworkWatch { get; init; } = true;
 
+    /// <summary>Try an encrypted direct TCP sidecar when UDP has not opened (default
+    /// true). It normally listens on the UDP port's numeric value, negotiates framing
+    /// and uses the same pinned session keys. Healthy UDP is preferred. A failed TCP
+    /// bind or dial never prevents UDP/relay use. Plaintext nodes do not enable TCP.</summary>
+    public bool EnableTcpTransport { get; init; } = true;
+
+    /// <summary>Try direct UDP session routes (default true). Set false to use direct
+    /// TCP and configured relays. The UDP socket remains bound for discovery/STUN;
+    /// this does not prohibit UDP used by an explicitly configured TURN provider.</summary>
+    public bool EnableDirectUdp { get; init; } = true;
+
     /// <summary>Advertise IPv6 link-local candidates (default true). Access networks that
     /// isolate IPv4 between wireless and wired clients but bridge IPv6 — common on guest and
     /// enterprise WiFi — leave link-local as the only direct path, and a peer that dials the
@@ -67,7 +87,7 @@ public sealed record PinholeOptions
     /// excluded. Set false to omit these LAN-only fallback candidates.</summary>
     public bool AdvertiseLinkLocal { get; init; } = true;
 
-    /// <summary>Ask the network's router for an explicit UDP port mapping (PCP, then
+    /// <summary>Ask the network's router for explicit UDP and enabled TCP port mappings (PCP, then
     /// NAT-PMP, then UPnP — the same strategy iroh's portmapper uses; default true). A
     /// granted mapping is advertised as a reflexive candidate, which makes many hard home
     /// NATs directly punchable and works even where hole punching alone would fail.
@@ -75,6 +95,13 @@ public sealed record PinholeOptions
     /// simply contribute no mapping, and nothing about the bind ever waits on it. Disable
     /// on networks where router control traffic is unwelcome.</summary>
     public bool EnablePortMapping { get; init; } = true;
+
+    /// <summary>Also request UPnP IPv6 firewall pinholes for this node's global IPv6
+    /// endpoints (default true; requires <see cref="EnablePortMapping"/>). Uses at
+    /// most two Wi-Fi/Ethernet source addresses and only the actual UDP/TCP listening
+    /// ports. Refusal or unsupported gateways contribute no lease. This does not
+    /// change the host firewall or prove end-to-end reachability.</summary>
+    public bool EnableIPv6FirewallPinholes { get; init; } = true;
 
     /// <summary>How long <see cref="PinholeNode.ConnectAsync(string, CancellationToken)"/>
     /// keeps trying the chain (punch, then relay) before failing. Default 15 s.</summary>
@@ -264,6 +291,8 @@ public sealed record PinholeOptions
         IrohAddress.ValidateRelay(options.IrohDiscoveryUrl);
         if (options.PublishIrohAddress && options.Encryption == PinholeEncryption.Disabled)
             throw new ArgumentException("Pinhole iroh discovery requires an encrypted session with a static key", nameof(options));
+        if (options.RelaySignalingOnly && options.Encryption != PinholeEncryption.Required)
+            throw new ArgumentException("RelaySignalingOnly requires authenticated encrypted sessions", nameof(options));
         if (options.IdentityKeySeed is { Length: not NodeIdentity.KeyLength })
             throw new ArgumentOutOfRangeException(nameof(options), $"IdentityKeySeed must be {NodeIdentity.KeyLength} bytes");
         if (options.LookupProviders is { } providers && providers.Any(p => p is null))

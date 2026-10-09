@@ -128,6 +128,11 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// <summary>The bound UDP port.</summary>
     public int LocalPort => _engine.LocalPort;
 
+    /// <summary>The TCP sidecar's listening port, normally <see cref="LocalPort"/>.
+    /// Null when TCP is disabled, unavailable, or the listening bind failed. Outbound
+    /// TCP attempts may still work. This does not establish firewall reachability.</summary>
+    public int? TcpListeningPort => _engine.TcpListeningPort;
+
     /// <summary>This node's long-term X25519 public key (32 bytes), embedded in every
     /// connection string this node publishes — peers pin the handshake's answering key
     /// against it, which is what makes sessions man-in-the-middle proof. Null when
@@ -239,6 +244,19 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     /// NAT-PMP, or PCP), or null. It is already advertised as a reflexive candidate in
     /// <see cref="ConnectionString"/>; this property exists for diagnostics.</summary>
     public IPEndPoint? PortMappedEndpoint => _engine.MappedEndpointSnapshot();
+
+    /// <summary>The router-granted TCP endpoint, or null when no TCP lease is live.
+    /// Included in candidates; a granted lease does not grant host firewall permission.</summary>
+    public IPEndPoint? TcpPortMappedEndpoint => _engine.MappedEndpointSnapshot(tcp: true);
+
+    /// <summary>Global IPv6 UDP endpoints with a live router firewall-pinhole lease.
+    /// These are already host candidates; no address translation occurs. A grant
+    /// does not prove peer reachability or grant permission in the host firewall.</summary>
+    public IReadOnlyList<IPEndPoint> IPv6FirewallEndpoints => _engine.IPv6FirewallSnapshot();
+
+    /// <summary>Global IPv6 TCP endpoints with a live router firewall-pinhole lease.
+    /// Empty when TCP listening or IPv6 pinholes are unavailable or disabled.</summary>
+    public IReadOnlyList<IPEndPoint> TcpIPv6FirewallEndpoints => _engine.IPv6FirewallSnapshot(tcp: true);
 
     /// <summary>The NAT classification embedded in future connection strings: a manual
     /// <see cref="SetNatHint"/> override when one is set, otherwise the classification the
@@ -353,7 +371,9 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             await _engine.CloseAsync(c).ConfigureAwait(false);
             Telemetry.AttemptOutcome(Telemetry.OutcomeDialTimeout);
             string message = PeerHasRelay(cs)
-                ? "Connection timed out. Keep both apps running and use your friend's current connection string. The peer may be offline, or a relay path could not be established."
+                ? _options.RelaySignalingOnly
+                    ? "Direct connection timed out. Relays are permitted only for signaling, so application traffic needs a direct UDP or TCP path. Keep both apps running and check their host firewalls and current candidates."
+                    : "Connection timed out. Keep both apps running and use your friend's current connection string. The peer may be offline, or a relay path could not be established."
                 : "Direct connection timed out and your friend's connection string has no relay fallback. Share a fresh string after their relay connects, or try connecting from both PCs at the same time.";
             throw new TimeoutException(message, ex);
         }

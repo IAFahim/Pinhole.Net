@@ -43,6 +43,10 @@ public sealed class OptionsResolutionTests
         Assert.True(customized.PublishIrohAddress);
         Assert.True(def.PublishDirectIrohAddresses);
         Assert.True(customized.PublishDirectIrohAddresses);
+        Assert.True(def.EnableTcpTransport);
+        Assert.True(def.EnableDirectUdp);
+        Assert.True(def.EnableIPv6FirewallPinholes);
+        Assert.True(customized.EnableIPv6FirewallPinholes);
     }
 
     [Fact]
@@ -51,11 +55,16 @@ public sealed class OptionsResolutionTests
         PinholeOptions resolved = await PinholeOptions.ResolveAsync(Partial(new PinholeOptions
         {
             EnableLanDiscovery = false, PublishIrohAddress = false, PublishDirectIrohAddresses = false,
+            EnableTcpTransport = false, EnableDirectUdp = false,
+            EnableIPv6FirewallPinholes = false,
         }));
         Assert.Equal(PinholeOptions.PublicIrohRelays, resolved.ResolvedIrohRelays);
         Assert.False(resolved.EnableLanDiscovery);
         Assert.False(resolved.PublishIrohAddress);
         Assert.False(resolved.PublishDirectIrohAddresses);
+        Assert.False(resolved.EnableTcpTransport);
+        Assert.False(resolved.EnableDirectUdp);
+        Assert.False(resolved.EnableIPv6FirewallPinholes);
     }
 
     [Fact]

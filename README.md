@@ -19,6 +19,11 @@ One job: **get a connection between two machines, then keep it open until the ap
 
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
+Direct TCP support is a [local draft under issue #43](docs/DIRECT_TCP.md).
+It adds an encrypted stream route beneath the same datagram API; real socket,
+platform, and Kotlin interop checks remain pending, so it is not yet a released
+connectivity guarantee.
+
 **Non-goals, stated loudly**: no delivery guarantees, ordering, or retransmission — a half-baked ARQ is worse than none, so retransmit at the app layer if you care (the engine's internal path validation keeps the *transport* honest, never your protocol alive; the optional keepalive is a NAT heartbeat, not reliability). No signaling transport, storage, or coordination services — anything stateful about your app belongs to your app.
 
 ## Install
@@ -342,7 +347,8 @@ performs.
 
 ### Router port mappings — the direct-path head start
 
-At bind the node also asks the network's router for an explicit UDP mapping, trying
+At bind the node also asks the network's router for an explicit UDP mapping (and
+a separate TCP mapping when the draft TCP sidecar is enabled), trying
 PCP, then NAT-PMP, then UPnP (IGDv1/v2, `AddAnyPortMapping` with a `AddPortMapping`
 fallback) — the same strategy iroh's portmapper uses, implemented from the protocols
 in pure C#. A granted mapping is advertised as a reflexive candidate, which turns
@@ -356,6 +362,14 @@ Console.WriteLine(node.PortMappedEndpoint);  // e.g. 203.0.113.7:55555, or null
 // Disable on networks where router control traffic is unwelcome:
 var node = await PinholeNode.BindAsync(new PinholeOptions { EnablePortMapping = false });
 ```
+
+IPv6 router firewall pinholes are also a [local draft](docs/IPV6_FIREWALL.md).
+They request temporary UDP/TCP filter leases for this node's global IPv6 listening
+endpoints, with source-bound router control and bounded renewal/release. The draft
+defaults to enabled alongside router mapping; `EnableIPv6FirewallPinholes = false`
+disables it independently. `IPv6FirewallEndpoints` and `TcpIPv6FirewallEndpoints`
+report current grants. A grant does not prove that a peer or the host firewall
+allows the connection; real socket/router and Kotlin checks remain pending.
 
 ### Configuration
 
@@ -423,7 +437,8 @@ var local = await PinholeNode.BindAsync(new PinholeOptions
 
 ### Many peers
 
-One node, many connections, one socket. Dial every string you're given, accept in a loop:
+One node, many connections sharing one UDP socket. The draft TCP sidecar owns a
+bounded stream pool. Dial every string you're given, accept in a loop:
 
 ```csharp
 // Dial a lobby full of peers:
@@ -460,13 +475,14 @@ needed before claiming broad automatic direct connectivity.
 | Cone NAT | Symmetric NAT | Depends on filtering and explicit mappings; direct probes continue once a second | Direct UDP when reachable, otherwise relay |
 | Symmetric NAT | Cone NAT | Often — a symmetric NAT's *outbound* mapping still lands on their stable cone address | Direct UDP, else relay |
 | Symmetric NAT | Symmetric NAT | Ordinary STUN-based punching is not guaranteed; explicit mappings can help | Usually relay |
-| UDP blocked (hotel/corp firewall) | Anything | Impossible | iroh HTTPS relay — WebSocket over 443, looks like HTTPS browsing |
+| UDP blocked (hotel/corp firewall) | A peer accepting reachable TCP | UDP punching cannot work; direct TCP is being added in #43 | Draft direct TCP where permitted; otherwise iroh HTTPS relay |
 | TURN credentials configured | Firewall allows only relayed UDP | — | TURN relayed address (RFC 5766) |
 | Both behind the same NAT (CGNAT hairpin) | Each other | Usually fails — hairpinning is router-dependent and rarely works on CGNAT | Relay automatically; direct is expected-not-guaranteed |
 | Path dies mid-session | Any | Re-punched in the background | Survives on the relay until the punch lands |
 
 A host firewall can block an otherwise reachable direct path. For a server with a restricted
-inbound firewall, bind an application-owned UDP port and permit it in that firewall. The
+inbound firewall, bind an application-owned port and permit UDP (plus TCP when
+using the sidecar) in that firewall. The
 library does not change host firewall rules. To verify direct connectivity without data
 relay fallback, set `IrohRelayUrls = []` and `Relays = []` on the node, share a fresh ticket,
 and check `connection.Path.Kind == PathKind.Direct`. This also disables iroh introductions;

@@ -44,6 +44,16 @@ internal sealed class ConnState
     public DateTimeOffset PathSince = DateTimeOffset.UtcNow;
     public SocketAddress? DirectRemote;      // where direct frames go (last-wins by peer ID)
     public IPEndPoint? DirectRemoteEp;       // display form of DirectRemote
+    public TcpLink? DirectTcp;               // null on UDP; authenticated stream on TCP
+    public TcpLink? PendingTcp;              // incoming TCP stranger, not accepted before proof
+    public bool IncomingQueued;
+    public bool IsIncoming;
+    public bool PeerCandidatesReceived;
+    public long LastCandidateAnnouncement;
+    public long RelayedDatagramsBlocked;
+    public int TcpDialing;
+    public long LastTcpAttempt;
+    public TcpLink? ProbeTcp;
     public IPEndPoint? RelayRemote;          // peer's relayed address
     public volatile bool RelayReady;         // permission for RelayRemote exists on our allocation
     public readonly List<PinholeCandidate> PeerCandidates = new(); // guarded by engine gate
@@ -170,8 +180,13 @@ internal sealed class NodeEngine : IDisposable
     private HashSet<IPEndPoint> _lastRelayedAddresses = new();       // relay-change detector, guarded by _gate
     private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
     private IPEndPoint? _mappedEndpoint;                              // router-granted mapping (UPnP/PMP/PCP), guarded by _gate
+    private IPEndPoint? _mappedTcpEndpoint;
     private NatHint _observedNatHint;                                 // derived from multi-server STUN observations, guarded by _gate
     private PortMappingService? _portMap;
+    private PortMappingService? _tcpPortMap;
+    private IPv6FirewallService? _ipv6Firewall;
+    private int _ipv6NetworkChanged;
+    private long _nextIPv6FirewallRefresh;
     private readonly ConcurrentDictionary<ulong, TaskCompletionSource<IPEndPoint>> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
     // Address-lookup providers (built-in rendezvous + application-supplied). Empty unless
@@ -197,6 +212,7 @@ internal sealed class NodeEngine : IDisposable
     // caught ObjectDisposedException — the same send-failure handling a dead path already
     // triggers, and rebinds are rare.
     private volatile IUdpSocket _udp = null!;
+    private TcpTransport? _tcp;
     private long _recovering; // single-flight guard for recovery
     private volatile bool _disposed;
     private int _networkWatchHooked;
@@ -288,6 +304,9 @@ internal sealed class NodeEngine : IDisposable
             _udp = CreateSocket(_options.Bind);
         }
 
+        if (_options.EnableTcpTransport && _identity is not null && _rawReceive is null && _options.UdpSocketFactory is null)
+            _tcp = new TcpTransport(new IPEndPoint(_options.Bind?.Address ?? IPAddress.IPv6Any, LocalPort), OnTcpFrame, OnTcpClosed);
+
         StartRecvLoop();
 
         try
@@ -319,6 +338,16 @@ internal sealed class NodeEngine : IDisposable
         {
             _portMap = new PortMappingService(_options, OnPortMappingChanged);
             _portMap.Ensure(LocalPort);
+            if (_tcp is not null)
+            {
+                _tcpPortMap = new PortMappingService(_options, OnTcpPortMappingChanged, ProtocolType.Tcp);
+                if (_tcp.ListeningPort is { } tcpPort) _tcpPortMap.Ensure(tcpPort);
+            }
+            if (_options.EnableIPv6FirewallPinholes && _options.UdpSocketFactory is null && _rawReceive is null)
+            {
+                _ipv6Firewall = new IPv6FirewallService(_options, OnIPv6FirewallChanged);
+                RefreshIPv6Firewall();
+            }
         }
 
         if (_options.EnablePathValidation || _options.StunRefreshInterval > TimeSpan.Zero || _portMap is not null || _relays.Count > 0)
@@ -345,6 +374,8 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
+        Volatile.Write(ref _ipv6NetworkChanged, 1);
+
         // Interface churn fires several events per roam; collapse them into one recovery pass.
         _ = Task.Run(async () =>
         {
@@ -366,10 +397,16 @@ internal sealed class NodeEngine : IDisposable
 
     public IReadOnlyList<PinholeCandidate> LocalCandidatesSnapshot()
     {
+        PinholeCandidate[] snapshot;
+        bool changed;
         lock (_gate)
         {
-            return _localCandidates.Take(ConnectionString.MaxCandidates).ToArray();
+            changed = SynchronizeMappedLeasesNoLock();
+            if (changed) RefreshLocalCandidatesNoLock();
+            snapshot = _localCandidates.Take(ConnectionString.MaxCandidates).ToArray();
         }
+        if (changed) PublishAddressRecordSoon();
+        return snapshot;
     }
 
     public IReadOnlyList<IPEndPoint> ReflexiveSnapshot()
@@ -382,12 +419,30 @@ internal sealed class NodeEngine : IDisposable
 
     /// <summary>The router-granted external endpoint (UPnP/NAT-PMP/PCP), or null. This is
     /// already included in the advertised candidates; exposed for diagnostics and tests.</summary>
-    public IPEndPoint? MappedEndpointSnapshot()
+    public IPEndPoint? MappedEndpointSnapshot(bool tcp = false)
     {
-        lock (_gate)
-        {
-            return _mappedEndpoint;
-        }
+        return (tcp ? _tcpPortMap : _portMap)?.Current;
+    }
+
+    internal int? TcpListeningPort => _tcp?.ListeningPort;
+
+    internal IReadOnlyList<IPEndPoint> IPv6FirewallSnapshot(bool tcp = false) =>
+        _ipv6Firewall?.Snapshot(tcp ? ProtocolType.Tcp : ProtocolType.Udp) ?? [];
+
+    private void RefreshIPv6Firewall(bool invalidate = false)
+    {
+        if (_disposed || _ipv6Firewall is null) return;
+        bool changed = Interlocked.Exchange(ref _ipv6NetworkChanged, 0) != 0;
+        _ipv6Firewall.Refresh(IPv6FirewallService.Gather(_options.Bind), _options.EnableDirectUdp ? LocalPort : 0,
+            _tcp?.ListeningPort, invalidate || changed);
+        _nextIPv6FirewallRefresh = Environment.TickCount64 + 30_000;
+    }
+
+    private void OnIPv6FirewallChanged()
+    {
+        if (_disposed) return;
+        PublishAddressRecordSoon();
+        ReannounceAndRepunch(); // a new permission may make an already advertised host reachable
     }
 
     /// <summary>NAT classification derived from multi-server STUN observations: servers
@@ -406,27 +461,28 @@ internal sealed class NodeEngine : IDisposable
 
     /// <summary>Port-mapping callback: swap the mapped candidate and gently re-announce to
     /// every peer — the working paths keep working and only learn the new candidate.</summary>
-    private void OnPortMappingChanged(IPEndPoint? mapped)
+    private void OnPortMappingChanged(IPEndPoint? mapped) => OnPortMappingChanged(mapped, tcp: false);
+    private void OnTcpPortMappingChanged(IPEndPoint? mapped) => OnPortMappingChanged(mapped, tcp: true);
+
+    private void OnPortMappingChanged(IPEndPoint? mapped, bool tcp)
     {
+        if (_disposed) return;
         lock (_gate)
         {
-            if (Equals(_mappedEndpoint, mapped))
-            {
-                return;
-            }
-
-            _mappedEndpoint = mapped;
+            // Publication is serialized outside the lease lock. Re-read the desired
+            // state after taking the node lock so a delayed notification cannot restore
+            // an expired or invalidated endpoint.
+            mapped = (tcp ? _tcpPortMap : _portMap)?.Current;
+            if (tcp) _mappedTcpEndpoint = mapped; else _mappedEndpoint = mapped;
             RefreshLocalCandidatesNoLock();
         }
 
-        if (mapped is not null)
+        PublishAddressRecordSoon();
+        foreach (ConnState c in ConnectionsSnapshot())
         {
-            foreach (ConnState c in ConnectionsSnapshot())
+            if (c.State != PinholeConnectionState.Closed)
             {
-                if (c.State != PinholeConnectionState.Closed)
-                {
-                    AnnounceTo(c);
-                }
+                AnnounceTo(c); // withdrawal is just as important as an added candidate
             }
         }
     }
@@ -437,6 +493,8 @@ internal sealed class NodeEngine : IDisposable
         {
             RefreshLocalCandidatesNoLock();
         }
+
+        RefreshIPv6Firewall();
 
         // Every path that changes reachability funnels through here — bind, rebind, STUN
         // mapping moves, router port-mapping changes — so this is the one hook that
@@ -450,6 +508,7 @@ internal sealed class NodeEngine : IDisposable
     /// connection string still carries the old mapping.</summary>
     private void RefreshLocalCandidatesNoLock()
     {
+        SynchronizeMappedLeasesNoLock();
         int port = LocalPort;
         _localCandidates.Clear();
         _localCandidates.Add(new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, port)));
@@ -472,6 +531,11 @@ internal sealed class NodeEngine : IDisposable
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, mapped));
         }
 
+        // Keep the existing candidate-origin schema. New peers negotiate a framed TCP
+        // sidecar at host/reflexive tuples; old peers can still try UDP and then fallback.
+        if (_mappedTcpEndpoint is { } tcpMapped && !_localCandidates.Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(tcpMapped)))
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, tcpMapped));
+
         foreach (TurnClient client in AliveRelayClientsNoLock())
         {
             if (client.RelayedAddress is { } relayed)
@@ -491,6 +555,15 @@ internal sealed class NodeEngine : IDisposable
                 _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
                     new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _endpointIdentity.PublicKey));
         }
+    }
+
+    private bool SynchronizeMappedLeasesNoLock()
+    {
+        IPEndPoint? udp = _portMap?.Current, tcp = _tcpPortMap?.Current;
+        bool changed = !Equals(_mappedEndpoint, udp) || !Equals(_mappedTcpEndpoint, tcp);
+        _mappedEndpoint = udp;
+        _mappedTcpEndpoint = tcp;
+        return changed;
     }
 
     private static List<IPEndPoint> HostEndpoints(int port, bool advertiseLinkLocal)
@@ -771,7 +844,7 @@ internal sealed class NodeEngine : IDisposable
         {
             if (_irohRelays.TryGetValue(url, out relay!)) return relay;
             if (_irohRelays.Count >= ConnectionString.MaxCandidates) return null;
-            relay = new IrohRelay(url, _endpointIdentity);
+            relay = new IrohRelay(url, _endpointIdentity, _options.IrohWebSocketFactory);
             relay.Received += HandleIrohData;
             relay.Changed += IrohChanged;
             _irohRelays.Add(url, relay);
@@ -1476,11 +1549,9 @@ internal sealed class NodeEngine : IDisposable
 
     private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival, bool cryptoHandshake)
     {
-        // Stranger flood bound, checked BEFORE the insert: with the single receive thread
-        // as the only writer, the table then never crosses the bound at all, and no
-        // observer can catch the overshoot window an insert-then-remove would leave. The
-        // post-insert check below stays for the rare case of a concurrent dial landing
-        // between this read and the insert.
+        // Check before allocating stranger state and again after insertion. Outgoing
+        // dials and TCP receive workers can race for the remaining slots; the insertion
+        // that loses that race gives way instead of leaving excess stranger state.
         if (_conns.Count >= _maxConns)
         {
             return null;
@@ -1492,6 +1563,7 @@ internal sealed class NodeEngine : IDisposable
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             RemoteToken = token,
             RemoteTokenKnown = true,
+            IsIncoming = true,
             Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
         };
         c.Buffer = CreateBuffer();
@@ -1516,10 +1588,15 @@ internal sealed class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            DirectPathConfirmed(c, arrival);
         }
 
-        _incoming?.Writer.TryWrite(c);
+        if (arrival.Tcp is null && !_options.RelaySignalingOnly)
+        {
+            c.IncomingQueued = true;
+            _incoming?.Writer.TryWrite(c);
+        }
+        else if (arrival.Tcp is not null) c.PendingTcp = arrival.Tcp;
         return c;
     }
 
@@ -1540,6 +1617,8 @@ internal sealed class NodeEngine : IDisposable
         }
 
         Transition(c, PinholeConnectionState.Closed);
+        c.DirectTcp?.CloseGracefully();
+        _tcp?.ClosePeer(c.PeerId, c.DirectTcp);
         c.Dead.Cancel();
         await Task.CompletedTask.ConfigureAwait(false);
     }
@@ -1566,12 +1645,14 @@ internal sealed class NodeEngine : IDisposable
         {
             while (!stop.IsCancellationRequested && Volatile.Read(ref c.PunchGeneration) == gen)
             {
-                if (c.State is PinholeConnectionState.Open or PinholeConnectionState.Closed)
+                if (c.State == PinholeConnectionState.Closed
+                    || c.State == PinholeConnectionState.Open && c.DirectTcp is null)
                 {
                     return;
                 }
 
-                if (c.State == PinholeConnectionState.Degraded && ++upgradeAttempts > MaxUpgradeAttempts)
+                if ((c.State == PinholeConnectionState.Degraded || c.State == PinholeConnectionState.Open)
+                    && ++upgradeAttempts > MaxUpgradeAttempts)
                 {
                     return; // stop poking; direct can still open passively from the peer's frames
                 }
@@ -1627,6 +1708,11 @@ internal sealed class NodeEngine : IDisposable
                     }
                 }
 
+                if (_options.RelaySignalingOnly && c.Crypto is { Established: true }
+                    && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
+                    && Environment.TickCount64 - Volatile.Read(ref c.LastCandidateAnnouncement) >= 1000)
+                    AnnounceTo(c); // retry control exchange without resetting the initial dial budget
+
                 // A symmetric hint is scheduling advice, not a ban: relay candidates carry
                 // the session — per-destination mappings make public reflexives hopeless —
                 // while direct candidates keep a one-second trickle. LAN peers (no NAT in
@@ -1681,10 +1767,15 @@ internal sealed class NodeEngine : IDisposable
                     }
                 }
 
+                if (_tcp is not null && c.Crypto is not null && c.DirectTcp is null
+                    && Environment.TickCount64 - c.LastKickTicks >= 1200)
+                    _ = TryTcpPathsAsync(c, candidates, stop.Token);
+
                 TimeSpan pace = c.State switch
                 {
                     PinholeConnectionState.Dead => DeadBeaconPace,
                     PinholeConnectionState.Degraded => UpgradePace,
+                    PinholeConnectionState.Open => UpgradePace,
                     _ => PunchPace,
                 };
                 await Task.Delay(pace, stop.Token).ConfigureAwait(false);
@@ -1760,6 +1851,9 @@ internal sealed class NodeEngine : IDisposable
             }
 
             _portMap?.Tick(Environment.TickCount64);
+            _tcpPortMap?.Tick(Environment.TickCount64);
+            if (_ipv6Firewall is not null && Environment.TickCount64 >= _nextIPv6FirewallRefresh)
+                RefreshIPv6Firewall();
 
             if (validate || pmtud || keepalive)
             {
@@ -2002,6 +2096,7 @@ internal sealed class NodeEngine : IDisposable
     {
         c.ProbeOutstanding = false;
         c.ProbeTarget = null;
+        c.ProbeTcp = null;
         c.UnansweredProbes = 0;
     }
 
@@ -2026,6 +2121,7 @@ internal sealed class NodeEngine : IDisposable
             c.ProbeOutstanding = true;
             c.ProbeNonce = nonce;
             c.ProbeTarget = target;
+            c.ProbeTcp = c.DirectTcp;
             c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
         }
 
@@ -2035,7 +2131,7 @@ internal sealed class NodeEngine : IDisposable
         int len = BuildFrame(c, FrameType.Ping, nonceBytes, frame);
         try
         {
-            SendToWire(target, frame[..len]);
+            SendDirect(c, target, frame[..len]);
             Interlocked.Increment(ref c.PathProbesSent);
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
@@ -2081,7 +2177,7 @@ internal sealed class NodeEngine : IDisposable
         int size;
         lock (c.Gate)
         {
-            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null)
+            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null || c.DirectTcp is not null)
             {
                 if (c.PmtuWire != 0 || c.PmtuOutstanding)
                 {
@@ -2308,9 +2404,12 @@ internal sealed class NodeEngine : IDisposable
     {
         if (c.Path == PathKind.Direct && c.DirectRemote is { } direct)
         {
-            SendToWire(direct, frame);
+            SendDirect(c, direct, frame);
             return;
         }
+
+        if (_options.RelaySignalingOnly && frame[0] == (byte)FrameType.Data)
+            throw new InvalidOperationException("direct application path is unavailable; relays are signaling-only");
 
         if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
         {
@@ -2329,6 +2428,7 @@ internal sealed class NodeEngine : IDisposable
 
     private void SendToWire(IPEndPoint ep, ReadOnlySpan<byte> frame)
     {
+        if (!_options.EnableDirectUdp) throw new SocketException((int)SocketError.NetworkUnreachable);
         // Volatile read, no lock: this runs once per sent frame, and the rebind that swaps
         // the socket is rare enough to pay for itself with a caught send error.
         if (ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0)
@@ -2345,7 +2445,91 @@ internal sealed class NodeEngine : IDisposable
 
     private void SendToWire(SocketAddress sa, ReadOnlySpan<byte> frame)
     {
+        if (!_options.EnableDirectUdp) throw new SocketException((int)SocketError.NetworkUnreachable);
         _udp.SendTo(frame, sa);
+    }
+
+    private void SendDirect(ConnState c, SocketAddress target, ReadOnlySpan<byte> frame)
+    {
+        if (c.DirectTcp is { } tcp && SameEndPoint(target, c.DirectRemote))
+        {
+            if (!tcp.Send(frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
+        }
+        else SendToWire(target, frame);
+    }
+
+    internal void OnTcpFrame(TcpLink tcp, ReadOnlyMemory<byte> frame)
+    {
+        if (_disposed || frame.Length < HeaderSize + CryptoWire.TokenLength) return;
+        ulong id = BinaryPrimitives.ReadUInt64LittleEndian(frame.Span[1..]);
+        if (!tcp.BindPeer(id)) { tcp.Dispose(); return; }
+        if (Lookup(id) is { Crypto: null }) { tcp.Dispose(); return; }
+        if (tcp.AuthenticatedPeer != id && (FrameType)frame.Span[0] is not
+            (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Ping or FrameType.Pong)) return;
+        // The TCP sidecar offers only authenticated sessions, even when the UDP node
+        // permits legacy plaintext. Never create a TCP stranger from a legacy probe.
+        if (frame.Span[0] == (byte)FrameType.Punc && frame.Length != HeaderSize + CryptoWire.PuncCryptoBody) { tcp.Dispose(); return; }
+        Dispatch(frame.Span, new Arrival(tcp));
+    }
+
+    internal void OnTcpClosed(TcpLink tcp)
+    {
+        ConnState? c = Lookup(tcp.BoundPeer);
+        if (c is null) return;
+        bool suspect = false;
+        lock (c.Gate)
+        {
+            if (ReferenceEquals(c.PendingTcp, tcp) && !c.IncomingQueued)
+            {
+                _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
+                Transition(c, PinholeConnectionState.Closed);
+                c.Dead.Cancel();
+            }
+            else if (ReferenceEquals(c.DirectTcp, tcp) && c.State != PinholeConnectionState.Closed)
+            {
+                c.DirectTcp = null;
+                c.DirectRemote = null;
+                suspect = true;
+            }
+        }
+        if (suspect) NotifyPathSuspect(c);
+    }
+
+    private async Task TryTcpPathsAsync(ConnState c, PinholeCandidate[] candidates, CancellationToken stop)
+    {
+        long lastAttempt = Volatile.Read(ref c.LastTcpAttempt);
+        if (_tcp is not { } transport || c.Crypto is null || c.Dead.IsCancellationRequested
+            || lastAttempt != 0 && Environment.TickCount64 - lastAttempt < 5_000
+            || Interlocked.CompareExchange(ref c.TcpDialing, 1, 0) != 0) return;
+        try
+        {
+            Volatile.Write(ref c.LastTcpAttempt, Environment.TickCount64);
+            IReadOnlyList<int> scopes = LinkLocalSendScopes();
+            IPEndPoint[] targets = candidates.Where(candidate => candidate.Kind is CandidateKind.Direct or CandidateKind.Reflexive)
+                .SelectMany(candidate => ScopeLinkLocal(candidate.Address, scopes)).Distinct().Take(8).ToArray();
+            await Task.WhenAll(targets.Select(async target =>
+            {
+                TcpLink? link = await transport.ConnectAsync(target, stop).ConfigureAwait(false);
+                if (link is null || !link.BindPeer(c.PeerId)) return;
+                if (c.State == PinholeConnectionState.Closed || c.Dead.IsCancellationRequested) { link.Dispose(); return; }
+                if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct && c.DirectTcp is null) return;
+                link.Send(c.PuncFrame);
+                if (c.Crypto is { Established: true, PeerConfirmed: true })
+                    SendTcpProof(c, link);
+            })).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException or IOException) { }
+        finally { Volatile.Write(ref c.TcpDialing, 0); }
+    }
+
+    private void SendTcpProof(ConnState c, TcpLink tcp)
+    {
+        if (c.Crypto is not { Established: true } || !tcp.BeginProof(out long challenge)) return;
+        Span<byte> payload = stackalloc byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(payload, challenge);
+        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        int length = BuildFrame(c, FrameType.Ping, payload, frame);
+        if (!tcp.Send(frame[..length])) tcp.Dispose();
     }
 
     /// <summary>Sends to the peer's relayed address through our allocation on the SAME
@@ -2471,7 +2655,7 @@ internal sealed class NodeEngine : IDisposable
                     }
                 }
             }
-            else if (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
+            else if (_options.EnableDirectUdp && buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
             {
                 try
                 {
@@ -2503,6 +2687,14 @@ internal sealed class NodeEngine : IDisposable
         public readonly IPEndPoint? Relay;
         public readonly IrohRelay? Iroh;
         public readonly byte[]? IrohPeerKey;
+        public readonly TcpLink? Tcp;
+
+        public Arrival(TcpLink tcp)
+        {
+            ViaRelay = false;
+            Tcp = tcp;
+            Direct = ToWire(tcp.Remote);
+        }
 
         public Arrival(SocketAddress direct)
         {
@@ -2652,6 +2844,7 @@ internal sealed class NodeEngine : IDisposable
                 // tear down the re-dial winner registered under the same peer ID.
                 _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
                 Transition(c, PinholeConnectionState.Closed);
+                _tcp?.ClosePeer(c.PeerId, c.DirectTcp);
                 c.Dead.Cancel();
                 break;
         }
@@ -2727,6 +2920,7 @@ internal sealed class NodeEngine : IDisposable
             crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
             SendOnArrival(arrival, pack);
+            if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
         }
         else
         {
@@ -2743,7 +2937,7 @@ internal sealed class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            DirectPathConfirmed(c, arrival);
         }
 
         if (!c.Announced)
@@ -2830,6 +3024,7 @@ internal sealed class NodeEngine : IDisposable
                 crypto.MyConfirm().CopyTo(hsck[(HeaderSize + CryptoWire.TokenLength)..]);
                 SendOnArrival(arrival, hsck);
             }
+            if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
         }
         else
         {
@@ -2846,7 +3041,7 @@ internal sealed class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            DirectPathConfirmed(c, arrival);
         }
 
         if (!c.Announced)
@@ -2879,6 +3074,10 @@ internal sealed class NodeEngine : IDisposable
             crypto.MarkPeerConfirmed();
         }
 
+        if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
+
+        if (_options.RelaySignalingOnly && !arrival.ViaRelay) DirectPathConfirmed(c, arrival);
+
         // The dialer heard our PACK — re-announce, in case the first sealed announce lost
         // the race against the PACK that delivered our half of the keys.
         AnnounceTo(c);
@@ -2907,6 +3106,12 @@ internal sealed class NodeEngine : IDisposable
             return;
         }
 
+        if (_options.RelaySignalingOnly && arrival.ViaRelay)
+        {
+            Interlocked.Increment(ref c.RelayedDatagramsBlocked);
+            return; // authenticated application data on a forbidden transport is still forbidden
+        }
+
         // Any valid frame from the peer is proof of a live path, and its source address is
         // the newest truth about where the peer lives (last-wins by peer ID — roaming).
         if (arrival.ViaRelay)
@@ -2915,7 +3120,7 @@ internal sealed class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            DirectPathConfirmed(c, arrival);
         }
 
         Interlocked.Increment(ref c.ReceivedCount);
@@ -2935,13 +3140,19 @@ internal sealed class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay)
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            if (arrival.Tcp is { } tcp)
+            {
+                if (tcp.AuthenticatedPeer == 0 && frame.Length >= HeaderSize + CryptoWire.TokenLength + 8)
+                    tcp.ObserveChallenge(BinaryPrimitives.ReadInt64LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]));
+                SendTcpProof(c, tcp);
+            }
+            DirectPathConfirmed(c, arrival);
             // Inbound evidence cuts both ways: a datagram this size arrived, so the path
             // carries it. Cap at the probe ceiling — this only ever replaces a probe, and
             // keeps buffer sizing honest on loopback's 64k MTU.
             // The decrypted handler view excludes the AES-GCM counter/tag. MTU evidence
             // must use the received wire size and never lower the guaranteed payload floor.
-            if (_options.EnablePmtud && wireLength >= PmtuBaseWire)
+            if (arrival.Tcp is null && _options.EnablePmtud && wireLength >= PmtuBaseWire)
             {
                 lock (c.Gate)
                 {
@@ -2965,6 +3176,20 @@ internal sealed class NodeEngine : IDisposable
         }
 
         long echoed = BitConverter.ToInt64(frame[(HeaderSize + 4)..]);
+        if (arrival.Tcp is { } stream && stream.AuthenticatedPeer != c.PeerId)
+        {
+            if (stream.ConfirmProof(c.PeerId, echoed))
+            {
+                DirectPathConfirmed(c, arrival);
+                if (ReferenceEquals(c.DirectTcp, stream))
+                {
+                    AnnounceTo(c);
+                    KickPunch(c); // bounded UDP upgrade attempts while TCP carries the data
+                }
+                else stream.CloseGracefully();
+            }
+            return; // transport challenges are not application pings or RTT samples
+        }
         if (echoed < 0)
         {
             // Maintenance probe reply: it certifies the direct path only when it matches
@@ -2975,7 +3200,7 @@ internal sealed class NodeEngine : IDisposable
             lock (c.Gate)
             {
                 if (c.ProbeOutstanding && c.ProbeNonce == echoed
-                    && !arrival.ViaRelay && SameEndPoint(arrival.Direct, c.ProbeTarget))
+                    && !arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp) && SameEndPoint(arrival.Direct, c.ProbeTarget))
                 {
                     c.ProbeOutstanding = false;
                     c.ProbeTarget = null;
@@ -2986,7 +3211,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (!arrival.ViaRelay && arrival.Direct is { } direct)
             {
-                DirectPathConfirmed(c, direct);
+                DirectPathConfirmed(c, arrival);
             }
 
             return;
@@ -3000,7 +3225,7 @@ internal sealed class NodeEngine : IDisposable
             lock (c.Gate)
             {
                 if (c.PmtuOutstanding && c.PmtuProbeNonce == echoed
-                    && !arrival.ViaRelay && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
+                    && !arrival.ViaRelay && arrival.Tcp is null && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
                 {
                     c.PmtuOutstanding = false;
                     if (c.PmtuProbeSize > c.PmtuWire)
@@ -3019,7 +3244,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (!arrival.ViaRelay && arrival.Direct is { } pmtuDirect)
             {
-                DirectPathConfirmed(c, pmtuDirect); // a confirmed probe is path liveness too
+                DirectPathConfirmed(c, arrival); // a confirmed probe is path liveness too
             }
 
             return;
@@ -3027,7 +3252,7 @@ internal sealed class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay && arrival.Direct is { } callerDirect)
         {
-            DirectPathConfirmed(c, callerDirect); // an answered caller ping is direct-path activity too
+            DirectPathConfirmed(c, arrival); // an answered caller ping is direct-path activity too
         }
 
         long rttTicks = (Environment.TickCount64 - echoed) * TimeSpan.TicksPerMillisecond;
@@ -3049,6 +3274,7 @@ internal sealed class NodeEngine : IDisposable
         byte[] body = frame[(HeaderSize + 4)..].ToArray();
         List<PinholeCandidate> fresh = new();
         bool hasNewDirect;
+        bool firstCandidates;
         try
         {
             var reader = new CandidateCodec.Reader(body, 0);
@@ -3069,6 +3295,11 @@ internal sealed class NodeEngine : IDisposable
                 c.PeerCandidates.Clear();
                 c.PeerCandidates.AddRange(fresh);
             }
+            lock (c.Gate)
+            {
+                firstCandidates = !c.PeerCandidatesReceived;
+                c.PeerCandidatesReceived = true;
+            }
         }
         catch (FormatException)
         {
@@ -3087,11 +3318,12 @@ internal sealed class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay)
         {
-            DirectPathConfirmed(c, arrival.Direct!);
+            DirectPathConfirmed(c, arrival);
         }
 
         if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
-            || c.State == PinholeConnectionState.Degraded && hasNewDirect)
+            && (!_options.RelaySignalingOnly || firstCandidates || hasNewDirect)
+            || (c.State == PinholeConnectionState.Degraded || c.State == PinholeConnectionState.Open && c.DirectTcp is not null) && hasNewDirect)
         {
             KickPunch(c); // the peer just told us where it now lives
         }
@@ -3101,7 +3333,11 @@ internal sealed class NodeEngine : IDisposable
     {
         try
         {
-            if (arrival.Iroh is { } iro && arrival.IrohPeerKey is { } key)
+            if (arrival.Tcp is { } tcp)
+            {
+                if (!tcp.Send(frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
+            }
+            else if (arrival.Iroh is { } iro && arrival.IrohPeerKey is { } key)
             {
                 iro.Send(key, frame);
             }
@@ -3122,6 +3358,8 @@ internal sealed class NodeEngine : IDisposable
 
     private void AnnounceTo(ConnState c, bool blast = false)
     {
+        if (_options.RelaySignalingOnly && (c.State == PinholeConnectionState.Closed || c.Crypto is not { Established: true })) return;
+        Volatile.Write(ref c.LastCandidateAnnouncement, Environment.TickCount64);
         IReadOnlyList<PinholeCandidate> candidates = LocalCandidatesSnapshot();
         var payload = new MemoryStream(32 + candidates.Count * 32);
         payload.WriteByte((byte)candidates.Count);
@@ -3219,6 +3457,7 @@ internal sealed class NodeEngine : IDisposable
     {
         if (c.Path == PathKind.Direct && c.DirectRemote is { } sa)
         {
+            if (c.DirectTcp is { } tcp) return new Arrival(tcp);
             return new Arrival(sa);
         }
 
@@ -3266,8 +3505,9 @@ internal sealed class NodeEngine : IDisposable
         TraceLine($"peer {c.PeerId:x16} path -> {next} (was {c.DirectRemoteEp}, state {c.State}/{c.Path})");
     }
 
-    private void DirectPathConfirmed(ConnState c, SocketAddress source)
+    private void DirectPathConfirmed(ConnState c, in Arrival arrival)
     {
+        SocketAddress source = arrival.Direct!;
         lock (c.Gate)
         {
             if (c.State == PinholeConnectionState.Closed || c.BlackholeDirect)
@@ -3275,8 +3515,20 @@ internal sealed class NodeEngine : IDisposable
                 return; // test hook: this direct path is dead; nothing can confirm it
             }
 
+            if (_options.RelaySignalingOnly && c.Crypto is not { PeerConfirmed: true }) return;
+
+            if (arrival.Tcp is { } tcp)
+            {
+                if (c.Crypto is not { PeerConfirmed: true } || tcp.AuthenticatedPeer != c.PeerId || !tcp.IsReady) return;
+                if (c.Path == PathKind.Direct && c.DirectTcp is null && c.DirectRemote is not null
+                    && Environment.TickCount64 - c.LastDirectRxTicks < _options.PathValidationIdle.TotalMilliseconds) return;
+                if (c.Path == PathKind.Direct && c.DirectTcp is { IsReady: true } current && !ReferenceEquals(current, tcp)
+                    && Environment.TickCount64 - c.LastDirectRxTicks < _options.PathValidationIdle.TotalMilliseconds
+                    && !tcp.PreferredTo(current, preferInitiator: _peerId < c.PeerId)) return;
+            }
+
             if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct
-                && SameEndPoint(c.DirectRemote, source))
+                && ReferenceEquals(c.DirectTcp, arrival.Tcp) && SameEndPoint(c.DirectRemote, source))
             {
                 // Fast path, taken for every ordinary datagram: the endpoint is already the
                 // connection's truth, so the frame only refreshes direct-path activity.
@@ -3294,6 +3546,15 @@ internal sealed class NodeEngine : IDisposable
             TracePath(c, adopted);
             c.DirectRemote = adopted;
             c.DirectRemoteEp = ToEndpoint(adopted);
+            bool transportChanged = !ReferenceEquals(c.DirectTcp, arrival.Tcp);
+            TcpLink? previousTcp = c.DirectTcp;
+            c.DirectTcp = arrival.Tcp;
+            if (transportChanged) previousTcp?.CloseGracefully();
+            if ((c.PendingTcp is not null || _options.RelaySignalingOnly && c.IsIncoming) && !c.IncomingQueued)
+            {
+                c.IncomingQueued = true;
+                _incoming?.Writer.TryWrite(c);
+            }
             Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
             // Migration: the endpoint changed (roam, family switch), so the confirmed MTU
             // belongs to the OLD path. Forget it and re-climb — a v6 path's plateau and a
@@ -3329,6 +3590,12 @@ internal sealed class NodeEngine : IDisposable
                 ResetPathProbesNoLock(c);
                 c.StateChanged?.Invoke(c.State);
             }
+            else if (transportChanged)
+            {
+                c.PathSince = DateTimeOffset.UtcNow;
+                ResetPathProbesNoLock(c);
+                c.StateChanged?.Invoke(c.State);
+            }
         }
     }
 
@@ -3347,7 +3614,7 @@ internal sealed class NodeEngine : IDisposable
             c.Iroh = relay;
             c.IrohPeerKey = arrival.IrohPeerKey;
             c.IrohConfirmed = true;
-            if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+            if (!_options.RelaySignalingOnly && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
             {
                 c.State = PinholeConnectionState.Degraded;
                 c.Path = PathKind.Relay;
@@ -3412,7 +3679,8 @@ internal sealed class NodeEngine : IDisposable
 
                 c.RelayReady = true;
                 Telemetry.Recovery("relay-heal");
-                if (c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+                if (c.State == PinholeConnectionState.Closed) return;
+                if (!_options.RelaySignalingOnly && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
                 {
                     c.State = PinholeConnectionState.Degraded;
                     c.Path = PathKind.Relay;
@@ -3427,6 +3695,7 @@ internal sealed class NodeEngine : IDisposable
             {
                 KickPunch(c); // relay is confirmed usable; direct upgrade probing continues
             }
+            else if (_options.RelaySignalingOnly) AnnounceTo(c);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {
@@ -3501,7 +3770,7 @@ internal sealed class NodeEngine : IDisposable
 
             if (c.State == PinholeConnectionState.Open)
             {
-                if ((c.Iroh is { IsAlive: true } && c.IrohConfirmed) || (c.RelayRemote is not null && c.RelayReady))
+                if (!_options.RelaySignalingOnly && ((c.Iroh is { IsAlive: true } && c.IrohConfirmed) || (c.RelayRemote is not null && c.RelayReady)))
                 {
                     c.State = PinholeConnectionState.Degraded;
                     c.Path = PathKind.Relay;
@@ -3579,6 +3848,7 @@ internal sealed class NodeEngine : IDisposable
 
         try
         {
+            RefreshIPv6Firewall(); // interface changes matter even if the STUN mapping stayed the same
             IReadOnlyList<IPEndPoint> stunServers = ResolvedStun();
             bool needRebind = forceRebind;
 
@@ -3639,6 +3909,7 @@ internal sealed class NodeEngine : IDisposable
 
         StartRecvLoop();
         old.Dispose();
+        _tcp?.Rebind(new IPEndPoint(_options.Bind?.Address ?? IPAddress.IPv6Any, LocalPort));
 
         List<TurnClient> oldClients;
         lock (_gate)
@@ -3652,6 +3923,7 @@ internal sealed class NodeEngine : IDisposable
 
             _reflexive.Clear();
             _mappedEndpoint = null; // the mapping points at the old port; rediscovery targets the new one
+            _mappedTcpEndpoint = null;
         }
 
         foreach (TurnClient client in oldClients)
@@ -3660,9 +3932,11 @@ internal sealed class NodeEngine : IDisposable
             _ = client.DisposeAsync();
         }
 
+        _portMap?.Rebind(_udp.LocalEndPoint.Port); // LocalPort takes _gate; we hold none here
+        _tcpPortMap?.Rebind(_tcp?.ListeningPort ?? 0);
+        RefreshIPv6Firewall(invalidate: true);
         await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
-        _portMap?.Rebind(_udp.LocalEndPoint.Port); // LocalPort takes _gate; we hold none here
         ReannounceAndRepunch();
     }
 
@@ -3805,6 +4079,8 @@ internal sealed class NodeEngine : IDisposable
         }
 
         _portMap?.Shutdown(); // releases the router mapping in the background, bounded
+        _tcpPortMap?.Shutdown();
+        _ipv6Firewall?.Dispose();
         _shutdown.Cancel();
         foreach (ConnState c in ConnectionsSnapshot())
         {
@@ -3815,6 +4091,7 @@ internal sealed class NodeEngine : IDisposable
         lock (_gate)
         {
             _udp.Dispose();
+            _tcp?.Dispose();
             foreach (IrohRelay relay in _irohRelays.Values) relay.Dispose();
             foreach (RelaySlot slot in _relays)
             {

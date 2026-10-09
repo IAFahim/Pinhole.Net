@@ -65,7 +65,8 @@ internal sealed class IrohRelay : IDisposable
         FullMode = BoundedChannelFullMode.Wait,
     });
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private ClientWebSocket? _socket;
+    private WebSocket? _socket;
+    private readonly Func<Uri, CancellationToken, Task<WebSocket>>? _connect;
     private Task? _loop;
     private int _alive;
 
@@ -88,7 +89,7 @@ internal sealed class IrohRelay : IDisposable
         return TimeSpan.FromMilliseconds(baseMs * (1 + jitter));
     }
 
-    public IrohRelay(Uri url, RelayIdentity identity)
+    public IrohRelay(Uri url, RelayIdentity identity, Func<Uri, CancellationToken, Task<WebSocket>>? connect = null)
     {
         if (!url.IsAbsoluteUri || url.Scheme is not ("https" or "http")
             || (url.Scheme == "http" && !url.IsLoopback)
@@ -96,6 +97,7 @@ internal sealed class IrohRelay : IDisposable
             throw new ArgumentException("relay URL must use HTTPS (HTTP is allowed on loopback)", nameof(url));
         Url = url;
         _identity = identity;
+        _connect = connect;
     }
 
     public Task StartAsync(CancellationToken ct = default)
@@ -123,22 +125,17 @@ internal sealed class IrohRelay : IDisposable
         int failures = 0;
         while (!_stop.IsCancellationRequested)
         {
-            using var socket = new ClientWebSocket();
+            WebSocket? socket = null;
             using var connection = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
-            _socket = socket;
             try
             {
-                socket.Options.AddSubProtocol("iroh-relay-v2");
-                socket.Options.AddSubProtocol("iroh-relay-v1");
-                socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
-#if NET9_0_OR_GREATER // KeepAliveTimeout ships with .NET 9; older runtimes use the stack default
-                socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(15);
-#endif
                 var url = new UriBuilder(Url) { Scheme = Url.Scheme == "https" ? "wss" : "ws", Path = "/relay" };
                 using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(connection.Token))
                 {
                     deadline.CancelAfter(TimeSpan.FromSeconds(10));
-                    await socket.ConnectAsync(url.Uri, deadline.Token).ConfigureAwait(false);
+                    socket = await (_connect is null ? ConnectWebSocketAsync(url.Uri, deadline.Token)
+                        : _connect(url.Uri, deadline.Token)).ConfigureAwait(false);
+                    _socket = socket;
                     if (socket.SubProtocol is not ("iroh-relay-v1" or "iroh-relay-v2"))
                         throw new InvalidDataException("relay did not negotiate an iroh protocol");
                     byte[] challenge = await ReadAsync(socket, deadline.Token).ConfigureAwait(false);
@@ -172,7 +169,8 @@ internal sealed class IrohRelay : IDisposable
             finally
             {
                 connection.Cancel();
-                socket.Abort();
+                socket?.Abort();
+                socket?.Dispose();
                 Volatile.Write(ref _alive, 0);
                 while (_outgoing.Reader.TryRead(out _)) { }
                 Changed?.Invoke(this);
@@ -185,13 +183,30 @@ internal sealed class IrohRelay : IDisposable
         _ready.TrySetCanceled(_stop.Token);
     }
 
-    private async Task SendAsync(ClientWebSocket socket, CancellationToken ct)
+    private static async Task<WebSocket> ConnectWebSocketAsync(Uri uri, CancellationToken ct)
+    {
+        var socket = new ClientWebSocket();
+        try
+        {
+            socket.Options.AddSubProtocol("iroh-relay-v2");
+            socket.Options.AddSubProtocol("iroh-relay-v1");
+            socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+#if NET9_0_OR_GREATER
+            socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(15);
+#endif
+            await socket.ConnectAsync(uri, ct).ConfigureAwait(false);
+            return socket;
+        }
+        catch { socket.Dispose(); throw; }
+    }
+
+    private async Task SendAsync(WebSocket socket, CancellationToken ct)
     {
         await foreach (byte[] frame in _outgoing.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             await socket.SendAsync(frame, WebSocketMessageType.Binary, true, ct).ConfigureAwait(false);
     }
 
-    private async Task ReceiveAsync(ClientWebSocket socket, CancellationToken ct)
+    private async Task ReceiveAsync(WebSocket socket, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -224,7 +239,7 @@ internal sealed class IrohRelay : IDisposable
         }
     }
 
-    private static async Task<byte[]> ReadAsync(ClientWebSocket socket, CancellationToken ct)
+    private static async Task<byte[]> ReadAsync(WebSocket socket, CancellationToken ct)
     {
         byte[] buffer = new byte[4096];
         int used = 0;

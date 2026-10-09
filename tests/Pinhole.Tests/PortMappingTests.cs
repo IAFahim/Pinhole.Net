@@ -25,6 +25,7 @@ public sealed class PortMappingTests
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePathValidation = false,
+        EnableTcpTransport = false, // this suite's existing lease assertions concern UDP
         EnablePortMapping = enabled,
         SsdpUnicastOverride = ssdp,
         GatewayOverride = gateways ?? [],
@@ -207,6 +208,7 @@ public sealed class FakeGateway : IDisposable
     public bool RefusePmp { get; set; }
 
     public ushort ExternalPort { get; set; } = 44444;
+    public ushort ExternalTcpPort { get; set; } = 44445;
 
     public IPAddress PcpExternalAddress { get; set; } = IPAddress.Parse("203.0.113.66");
 
@@ -264,13 +266,13 @@ public sealed class FakeGateway : IDisposable
             return;
         }
 
-        if (d[1] == 1 && d.Length == 12)
+        if (d[1] is 1 or 2 && d.Length == 12)
         {
             int internalPort = BinaryPrimitives.ReadUInt16BigEndian(d.AsSpan(4));
             int suggested = BinaryPrimitives.ReadUInt16BigEndian(d.AsSpan(6));
             uint lifetime = BinaryPrimitives.ReadUInt32BigEndian(d.AsSpan(8));
             byte[] reply = new byte[16];
-            reply[1] = 129;
+            reply[1] = (byte)(128 + d[1]);
             if (RefusePmp)
             {
                 BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2), 3);
@@ -278,11 +280,12 @@ public sealed class FakeGateway : IDisposable
             else
             {
                 BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(8), (ushort)internalPort);
-                BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(10), (ushort)(suggested != 0 ? suggested : ExternalPort));
+                BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(10), lifetime == 0 ? (ushort)0
+                    : (ushort)(suggested != 0 ? suggested : d[1] == 2 ? ExternalTcpPort : ExternalPort));
                 BinaryPrimitives.WriteUInt32BigEndian(reply.AsSpan(12), lifetime);
                 Actions.Enqueue(lifetime == 0
-                    ? $"pmp-delete int={internalPort} ext={suggested}"
-                    : $"pmp-map int={internalPort} ext={suggested} life={lifetime}");
+                    ? $"pmp-delete int={internalPort} ext={suggested} proto={(d[1] == 2 ? "TCP" : "UDP")}"
+                    : $"pmp-map int={internalPort} ext={suggested} life={lifetime} proto={(d[1] == 2 ? "TCP" : "UDP")}");
             }
 
             await _udp.SendAsync(reply, from).ConfigureAwait(false);
@@ -294,7 +297,7 @@ public sealed class FakeGateway : IDisposable
         // RFC 6887 sections 7.1 and 11.1: a 24-byte common header, then
         // a 36-byte MAP body. Refuse requests whose claimed client differs
         // from the source address, as a real PCP server must do.
-        if (d[1] != 1 || d[36] != 17
+        if (d[1] != 1 || d[36] is not (6 or 17)
             || !d.AsSpan(8, 16).SequenceEqual(from.Address.MapToIPv6().GetAddressBytes()))
         {
             return;
@@ -316,15 +319,16 @@ public sealed class FakeGateway : IDisposable
             return;
         }
         nonce.CopyTo(reply, 24);
-        reply[36] = 17; // UDP
+        reply[36] = d[36]; // TCP=6 or UDP=17
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(40), (ushort)internalPort);
         if (!RefusePcp)
         {
-            BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(42), ExternalPort);
+            ushort external = d[36] == 6 ? ExternalTcpPort : ExternalPort;
+            BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(42), external);
             PcpExternalAddress.MapToIPv6().GetAddressBytes().CopyTo(reply, 44);
             Actions.Enqueue(lifetime == 0
-                ? $"pcp-delete int={internalPort}"
-                : $"pcp-map int={internalPort} ext={ExternalPort} life={lifetime}");
+                ? $"pcp-delete int={internalPort} proto={(d[36] == 6 ? "TCP" : "UDP")}"
+                : $"pcp-map int={internalPort} ext={external} life={lifetime} proto={(d[36] == 6 ? "TCP" : "UDP")}");
         }
 
         await _udp.SendAsync(reply, from).ConfigureAwait(false);
@@ -364,6 +368,7 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
     public IPAddress ExternalIp { get; } = IPAddress.Parse("203.0.113.40");
 
     public int ExternalPort { get; } = 55555;
+    public int ExternalTcpPort { get; } = 55556;
 
     /// <summary>Reject AddAnyPortMapping like an IGDv1 device, forcing the fallback.</summary>
     public bool RejectAddAnyPort { get; set; }
@@ -451,19 +456,20 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
                 case "AddAnyPortMapping":
                 {
                     int internalPort = int.Parse(XmlArg(body, "NewInternalPort"));
-                    Actions.Enqueue($"AddAnyPortMapping internal={internalPort} lease={XmlArg(body, "NewLeaseDuration")}");
-                    body = Response($"<NewReservedPort>{ExternalPort}</NewReservedPort>");
+                    string protocol = XmlArg(body, "NewProtocol");
+                    Actions.Enqueue($"AddAnyPortMapping internal={internalPort} lease={XmlArg(body, "NewLeaseDuration")} proto={protocol}");
+                    body = Response($"<NewReservedPort>{(protocol == "TCP" ? ExternalTcpPort : ExternalPort)}</NewReservedPort>");
                     break;
                 }
                 case "AddPortMapping":
                 {
                     int external = int.Parse(XmlArg(body, "NewExternalPort"));
-                    Actions.Enqueue($"AddPortMapping external={external} lease={XmlArg(body, "NewLeaseDuration")}");
+                    Actions.Enqueue($"AddPortMapping external={external} lease={XmlArg(body, "NewLeaseDuration")} proto={XmlArg(body, "NewProtocol")}");
                     body = Response("");
                     break;
                 }
                 case "DeletePortMapping":
-                    Actions.Enqueue($"DeletePortMapping external={XmlArg(body, "NewExternalPort")}");
+                    Actions.Enqueue($"DeletePortMapping external={XmlArg(body, "NewExternalPort")} proto={XmlArg(body, "NewProtocol")}");
                     body = Response("");
                     break;
                 default:

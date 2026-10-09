@@ -26,7 +26,8 @@ The defaults below include the subsequent discovery-default change tracked in
 | LAN discovery without ticket exchange | IPv4/IPv6 mDNS on active multicast interfaces, enabled by default; explicit opt-out available | Android NSD browsing enabled in the foreground; nearby receiver selection creates an encrypted-key ticket |
 | Stable identity and signed address lookup | Native publishing and direct-address publishing enabled by default; persist a seed for restart identity | Resolves signed native IDs/tickets; no equivalent general listener/publisher API |
 | Configured TURN relay | Supported with operator credentials; no TURN default | TURN candidates are not supported |
-| Direct TCP transport | Not implemented | Not implemented |
+| Direct TCP transport | Local draft under [#43](https://github.com/IAFahim/Pinhole.Net/issues/43): framing, fresh stream proof, UDP preference/recovery and TCP router leases; real socket/platform checks pending | Not implemented |
+| IPv6 router firewall pinholes | Local draft under [#40](https://github.com/IAFahim/Pinhole.Net/issues/40): source-bound UPnP control, UDP/TCP leases and lifecycle diagnostics; real socket/router checks pending | Not implemented |
 
 Core references: [options](../src/Pinhole/PinholeOptions.cs),
 [engine](../src/Pinhole/NodeEngine.cs), [node](../src/Pinhole/PinholeNode.cs),
@@ -80,11 +81,13 @@ Test reference: [PcpClientTests](../tests/Pinhole.Tests/PcpClientTests.cs).
    carrier may expose none of these services; refusal or silence contributes no
    mapping and never prevents session establishment. See
    [OpusVoice #2](https://github.com/IAFahim/OpusVoice/issues/2).
-3. **Add direct TCP candidates and reverse initiation.** Try TCP as an additional
+3. **Direct TCP candidates and reverse initiation: local draft in progress.** Try TCP as an additional
    authenticated route where UDP is blocked but a peer can accept TCP. More
    advanced simultaneous-open can be considered after platform testing. This
    requires transport framing, capability negotiation, TCP router mappings, and
-   tests on both implementations; it is not an existing flag that can be enabled.
+   tests on both implementations. The .NET draft exposes flags and path diagnostics,
+   but has not passed real socket/platform checks or shipped; see
+   [the draft behavior and release gate](DIRECT_TCP.md).
    [RFC 6544](https://www.rfc-editor.org/rfc/rfc6544.html) describes TCP candidate
    types and their limitations.
 4. **Gather and check candidates per active interface.** Both implementations
@@ -118,9 +121,12 @@ still has firewalls.
   attempts. Random allocation and multiple NAT layers limit it; see
   [RFC 5128 section 3.5](https://www.rfc-editor.org/rfc/rfc5128.html#section-3.5).
   It should be evaluated after the ordinary mapping, signaling, and transport gaps.
-- **UPnP IPv6 firewall pinholes:** the current UPnP client implements IPv4
-  WANIP/WANPPP port mapping, not the separate IPv6 firewall-control service. The
-  corrected PCP client supplies an IPv6 option only where a gateway supports PCP.
+- **UPnP IPv6 firewall pinholes: local draft.** The separate IPv6 firewall-control
+  client now requests bounded UDP/TCP leases using the actual local global IPv6
+  source. Refusal, renewal, disposal and interface churn have independent fixture
+  coverage. Real socket/router validation, Kotlin support and release checks remain;
+  see [draft behavior and evidence limits](IPV6_FIREWALL.md). The corrected PCP
+  client supplies another IPv6 option only where a gateway supports PCP.
 - **Additional relay transports/providers:** useful for connection availability,
   but they must be measured and reported as relayed, not direct.
 

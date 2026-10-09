@@ -28,6 +28,7 @@ public sealed class PathValidationTests
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
+        EnableTcpTransport = false, // these scenarios isolate UDP loss and restoration
         EnablePathValidation = validation,
         PathValidationIdle = idle ?? Idle,
         PathValidationProbeInterval = Interval,
