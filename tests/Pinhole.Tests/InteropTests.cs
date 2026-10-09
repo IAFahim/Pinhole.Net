@@ -86,6 +86,7 @@ public sealed class InteropTests
 
             await using BlobServer server = await BlobServer.ServeAsync(src,
                 new BlobServeOptions { NodeOptions = OfflineLoopback() });
+            _output.WriteLine("current provider ticket: " + server.Ticket);
 
             proc = StartHost(host, $"download \"{server.Ticket}\" \"{Path.Combine(dir, "out")}\"");
             string stderr = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget); // drain the pipe
@@ -195,6 +196,7 @@ public sealed class InteropTests
         string hostSrc = Path.Combine(root, "tests", "Pinhole.Tests", "Interop");
         File.Copy(Path.Combine(hostSrc, "InteropHost.cs"), Path.Combine(worktree, "InteropHost.cs"), true);
         File.Copy(Path.Combine(hostSrc, "InteropHost.csproj"), Path.Combine(worktree, "InteropHost.csproj"), true);
+        PatchReleaseHostRecvLoop(worktree);
 
         using var build = Process.Start(new ProcessStartInfo("dotnet", $"build InteropHost.csproj -c Release")
         {
@@ -208,6 +210,31 @@ public sealed class InteropTests
         }
         File.WriteAllText(marker, ReleaseName);
         return dll;
+    }
+
+    /// <summary>The release host predates a .NET 10 macOS behavior: on a dual-mode socket
+    /// the runtime may hand back a native IPv4 sockaddr and shrink the reusable
+    /// SocketAddress's Size, after which every later receive throws
+    /// ArgumentOutOfRangeException and the host process dies. The shipped engine grew an
+    /// explicit capacity restore for exactly this (NodeEngine's recv loop). This patches
+    /// the same restore into the worktree copy — a runtime-compatibility shim only: no
+    /// wire byte, timing, or behavior of the release under test changes.</summary>
+    private static void PatchReleaseHostRecvLoop(string worktree)
+    {
+        string path = Path.Combine(worktree, "src", "Pinhole", "NodeEngine.cs");
+        if (!File.Exists(path)) return;
+        string text = File.ReadAllText(path);
+        const string declaration = "var remote = new SocketAddress(AddressFamily.InterNetworkV6);";
+        const string receive = "n = _udp.ReceiveFrom(buf, remote);";
+        if (text.Contains("addressCapacity", StringComparison.Ordinal)) return; // already patched
+        if (!text.Contains(declaration, StringComparison.Ordinal)
+            || !text.Contains(receive, StringComparison.Ordinal)) return;
+        text = text.Replace(declaration,
+            declaration + "\n        int addressCapacity = remote.Size; // interop shim: see InteropTests", StringComparison.Ordinal);
+        text = text.Replace(receive,
+            "remote.Size = addressCapacity; // interop shim: restore capacity shrunk by a native v4 sockaddr\n                " + receive,
+            StringComparison.Ordinal);
+        File.WriteAllText(path, text);
     }
 
     // ------------------------------------------------------------------ process plumbing

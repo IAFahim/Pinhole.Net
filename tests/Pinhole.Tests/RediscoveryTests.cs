@@ -280,10 +280,24 @@ public sealed class RediscoveryTests
         await UntilRecordServedAsync(server, b2.PeerId);
 
         // Direction one: A's stale ticket heals onto B's new address.
-        await using (PinholeConnection atB = await a2.ConnectAsync(ticketB))
-        await using (PinholeConnection acceptAtB = await b2.AcceptAsync())
+        try
         {
-            await ExchangeAsync(atB, acceptAtB, "A dials B's stale ticket");
+            await using (PinholeConnection atB = await a2.ConnectAsync(ticketB))
+            await using (PinholeConnection acceptAtB = await b2.AcceptAsync())
+            {
+                await ExchangeAsync(atB, acceptAtB, "A dials B's stale ticket");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Parallel-suite flake forensics: the stale-ticket dial has several stages
+            // (punch dead candidates, lookup the fresh record, adopt, punch, handshake)
+            // and the failing stage is only visible with both sides' state attached.
+            _output.WriteLine($"direction-one failed: {ex.Message}");
+            _output.WriteLine($"rendezvous nodes={server.NodeCount} wants={server.WantCount}");
+            _output.WriteLine($"a2 conns: {string.Join(",", a2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            throw;
         }
 
         // Direction two, after the first pair closed: B's stale ticket heals onto A's new
