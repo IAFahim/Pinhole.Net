@@ -42,6 +42,7 @@ public sealed class InteropTests
         string host = EnsureReleaseHost();
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
+        EnableEngineTrace(dir);
         Process? proc = null;
         try
         {
@@ -62,6 +63,7 @@ public sealed class InteropTests
         }
         finally
         {
+            DumpEngineTrace(_output);
             KillQuietly(proc);
             Directory.Delete(dir, true);
         }
@@ -77,6 +79,7 @@ public sealed class InteropTests
         string host = EnsureReleaseHost();
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
+        EnableEngineTrace(dir);
         Process? proc = null;
         try
         {
@@ -140,6 +143,7 @@ public sealed class InteropTests
         }
         finally
         {
+            DumpEngineTrace(_output);
             KillQuietly(proc);
             Directory.Delete(dir, true);
         }
@@ -198,6 +202,7 @@ public sealed class InteropTests
         File.Copy(Path.Combine(hostSrc, "InteropHost.csproj"), Path.Combine(worktree, "InteropHost.csproj"), true);
         PatchReleaseHostRecvLoop(worktree);
         PatchReleaseHostSocket(worktree);
+        PatchReleaseHostDispatchDiagnostics(worktree);
 
         using var build = Process.Start(new ProcessStartInfo("dotnet", $"build InteropHost.csproj -c Release")
         {
@@ -284,6 +289,38 @@ public sealed class InteropTests
             });
     }
 
+    /// <summary>The release's receive loop swallows every dispatch exception silently — a
+    /// macOS-only reply failure would leave no trace at all. The shim prints the swallowed
+    /// exception to stderr and still swallows it: identical behavior, one observable.</summary>
+    private static void PatchReleaseHostDispatchDiagnostics(string worktree)
+    {
+        string path = Path.Combine(worktree, "src", "Pinhole", "NodeEngine.cs");
+        PatchIfNeeded(path,
+            marker: "interop dispatch swallowed",
+            (text) =>
+            {
+                const string indent = "                ";
+                const string block = indent + "try\n" + indent + "{\n"
+                    + indent + "    Dispatch(buf.AsSpan(0, n), new Arrival(remote));\n"
+                    + indent + "}\n"
+                    + indent + "catch (Exception)\n"
+                    + indent + "{\n"
+                    + indent + "    // A malformed frame or a throwing user handler must not deafen the socket.\n"
+                    + indent + "}";
+                const string replaced = indent + "try\n" + indent + "{\n"
+                    + indent + "    Dispatch(buf.AsSpan(0, n), new Arrival(remote));\n"
+                    + indent + "}\n"
+                    + indent + "catch (Exception dispatchEx) // interop shim: see InteropTests\n"
+                    + indent + "{\n"
+                    + indent + "    Console.Error.WriteLine(\"interop dispatch swallowed: \" + dispatchEx.GetType().Name + \": \" + dispatchEx.Message);\n"
+                    + indent + "    // A malformed frame or a throwing user handler must not deafen the socket.\n"
+                    + indent + "}";
+                return text.Contains(block, StringComparison.Ordinal)
+                    ? text.Replace(block, replaced, StringComparison.Ordinal)
+                    : text;
+            });
+    }
+
     private static void PatchIfNeeded(string path, string marker, Func<string, string> apply)
     {
         if (!File.Exists(path)) return;
@@ -293,6 +330,33 @@ public sealed class InteropTests
     }
 
     // ------------------------------------------------------------------ process plumbing
+
+    /// <summary>The interop step runs these tests in a process of their own, so setting the
+    /// engine's trace file here scopes tracing to exactly the connection under test and
+    /// lands before the engine's static trace switch is first read. Without it a
+    /// macOS-only silent stall has no observable side at all.</summary>
+    private static string? _tracePath;
+
+    private static void EnableEngineTrace(string dir)
+    {
+        _tracePath = Path.Combine(dir, "engine-trace.log");
+        Environment.SetEnvironmentVariable("PINHOLE_TRACE", "1");
+        Environment.SetEnvironmentVariable("PINHOLE_TRACE_FILE", _tracePath);
+    }
+
+    private static void DumpEngineTrace(ITestOutputHelper output)
+    {
+        try
+        {
+            if (_tracePath is not null && File.Exists(_tracePath))
+            {
+                output.WriteLine("current-side engine trace:\n" + File.ReadAllText(_tracePath));
+            }
+        }
+        catch (IOException)
+        {
+        }
+    }
 
     private Process StartHost(string dll, string args)
     {

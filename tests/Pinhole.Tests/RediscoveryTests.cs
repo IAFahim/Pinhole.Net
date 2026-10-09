@@ -295,13 +295,14 @@ public sealed class RediscoveryTests
         }
         catch (Exception ex)
         {
-            // Parallel-suite flake forensics: the stale-ticket dial has several stages
-            // (punch dead candidates, lookup the fresh record, adopt, punch, handshake)
-            // and the failing stage is only visible with both sides' state attached.
+            // Parallel-suite forensics: the handshake-flight counters name the dead stage
+            // (punches sent vs answered vs processed) without needing tracing enabled.
             _output.WriteLine($"direction-one failed: {ex.Message}");
             _output.WriteLine($"rendezvous nodes={server.NodeCount} wants={server.WantCount}");
             _output.WriteLine($"a2 conns: {string.Join(",", a2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
             _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            _output.WriteLine($"handshake a2-side: {a2.Engine.HandshakeSummary(b2.PeerId)}");
+            _output.WriteLine($"handshake b2-side: {b2.Engine.HandshakeSummary(a2.PeerId)}");
             throw;
         }
 
@@ -320,6 +321,8 @@ public sealed class RediscoveryTests
             _output.WriteLine($"rendezvous nodes={server.NodeCount} wants={server.WantCount}");
             _output.WriteLine($"a2 conns: {string.Join(",", a2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
             _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
+            _output.WriteLine($"handshake a2-side: {a2.Engine.HandshakeSummary(b2.PeerId)}");
+            _output.WriteLine($"handshake b2-side: {b2.Engine.HandshakeSummary(a2.PeerId)}");
             throw;
         }
     }

@@ -122,6 +122,10 @@ internal sealed class ConnState
     public Action<PinholeConnectionState>? StateChanged;
 
     public long Sent, ReceivedCount, SendFailed, BytesSent, BytesReceived, PingsSent, PongsReceived;
+    // Handshake-stage counters (Interlocked): a stuck dial's forensics can name the dead
+    // flight — "punches left but no answer" vs "answers left but never landed" — without
+    // tracing enabled on any platform.
+    public long PuncsSent, PuncsReceived, PacksSent, PacksReceived, HscksReceived, HandshakeRejects;
     public long LastRttTicks = long.MinValue; // Interlocked
     public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
@@ -1768,6 +1772,7 @@ internal sealed partial class NodeEngine : IDisposable
                         {
                             if (TraceEnabled) TraceLine($"punch direct {c.PeerId:x16} -> {candidate.Address}");
                             SendToWire(candidate.Address, c.PuncFrame);
+                            Interlocked.Increment(ref c.PuncsSent);
                         }
                     }
                     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
@@ -2802,6 +2807,11 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
+            if (TraceEnabled)
+            {
+                TraceLine($"stranger punc from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} " +
+                          $"via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
+            }
             c = CreateIncoming(
                 BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]),
                 BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]),
@@ -2903,12 +2913,14 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
+        Interlocked.Increment(ref c.PuncsReceived);
         bool cryptoPunc = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
 
         if (cryptoPunc && c.PinnedStaticKey is { } pinned
             && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
         {
+            Interlocked.Increment(ref c.HandshakeRejects);
             c.Crypto?.CountRejected();
             return; // an initial/reverse PUNC must honor the same pin as its PACK
         }
@@ -2923,6 +2935,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             else if (c.RemoteToken != token)
             {
+                Interlocked.Increment(ref c.HandshakeRejects);
                 return; // stale frames from an older connection to the same peer ID
             }
 
@@ -2933,6 +2946,7 @@ internal sealed partial class NodeEngine : IDisposable
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
                 if (!c.Crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]))
                 {
+                    Interlocked.Increment(ref c.HandshakeRejects);
                     c.Crypto.CountRejected();
                     return;
                 }
@@ -2941,6 +2955,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // A plaintext PUNC on a connection that offered crypto, or a crypto PUNC on a
                 // plaintext one: neither is a state any honest peer produces.
+                Interlocked.Increment(ref c.HandshakeRejects);
                 c.Crypto?.CountRejected();
                 return;
             }
@@ -2971,6 +2986,11 @@ internal sealed partial class NodeEngine : IDisposable
             BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
             SendOnArrival(arrival, pack);
         }
+        Interlocked.Increment(ref c.PacksSent);
+        if (TraceEnabled)
+        {
+            TraceLine($"answered punc for {c.PeerId:x16} (established={crypto is { Established: true }})");
+        }
 
         if (arrival.ViaRelay)
         {
@@ -2994,6 +3014,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (frame.Length < HeaderSize + CryptoWire.PackLegacyBody
             || BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
         {
+            Interlocked.Increment(ref c.HandshakeRejects);
             if (TraceEnabled)
             {
                 TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]):x8})");
@@ -3011,6 +3032,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             // We dialed with a key the string vouches for; a plaintext PACK means someone
             // stripped the handshake. Fail the connection — never fall back to plaintext.
+            Interlocked.Increment(ref c.HandshakeRejects);
             c.Crypto.CountRejected();
             HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
             return;
@@ -3025,10 +3047,16 @@ internal sealed partial class NodeEngine : IDisposable
                 return; // we never offered crypto; a crypto PACK is bogus
             }
 
+            Interlocked.Increment(ref c.PacksReceived);
+            if (TraceEnabled)
+            {
+                TraceLine($"crypto pack from {c.PeerId:x16} via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
+            }
             if (c.PinnedStaticKey is { } pinned && !body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
             {
                 // The answering key is not the key the string vouches for: a machine in the
                 // middle, or a stale string. Either way the session is dead on arrival.
+                Interlocked.Increment(ref c.HandshakeRejects);
                 crypto.CountRejected();
                 HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
                 return;
@@ -3043,6 +3071,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
                 {
+                    Interlocked.Increment(ref c.HandshakeRejects);
                     crypto.CountRejected();
                     if (TraceEnabled)
                     {
@@ -3053,6 +3082,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
                 {
+                    Interlocked.Increment(ref c.HandshakeRejects);
                     crypto.CountRejected();
                     HandshakeFailed(c, "handshake confirmation failed: the answering peer does not hold the advertised key");
                     return;
@@ -3078,6 +3108,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         else
         {
+            Interlocked.Increment(ref c.PacksReceived);
             lock (c.Gate)
             {
                 c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + 4)..]);
@@ -3113,6 +3144,7 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
+        Interlocked.Increment(ref c.HscksReceived);
         lock (c.Gate)
         {
             if (c.Crypto is not { Established: true } crypto)
@@ -4194,6 +4226,15 @@ internal sealed partial class NodeEngine : IDisposable
             KickPunch(c);
         }
     }
+
+    /// <summary>One line naming where a connection's handshake stands — the per-flight
+    /// counts that let stuck-dial forensics say WHICH flight died without tracing.</summary>
+    internal string HandshakeSummary(ulong peerId) =>
+        Lookup(peerId) is { } c
+            ? $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
+              + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
+              + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}"
+            : "no conn";
 
     // ------------------------------------------------------------------ dispose
 

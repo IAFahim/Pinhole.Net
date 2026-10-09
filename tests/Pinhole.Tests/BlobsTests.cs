@@ -34,6 +34,29 @@ public sealed class BlobsTests
         return dir;
     }
 
+    /// <summary>Teardown delete that tolerates Windows' close-then-release handle lag: a
+    /// transfer torn down mid-flight may still hold an output file open for a beat after
+    /// the last await returns, and one refused delete would fail an otherwise-passing test.</summary>
+    private static void DeleteDir(string dir)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                System.IO.Directory.Delete(dir, recursive: true);
+                return;
+            }
+            catch (IOException) when (attempt < 10)
+            {
+                Thread.Sleep(50);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 10)
+            {
+                Thread.Sleep(50);
+            }
+        }
+    }
+
     private static byte[] RandomBytes(long size)
     {
         var data = new byte[size];
@@ -69,7 +92,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -98,7 +121,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -126,7 +149,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -154,7 +177,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -204,7 +227,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -255,7 +278,7 @@ public sealed class BlobsTests
                 try { await download.WaitAsync(TestBudget.Teardown); }
                 catch (OperationCanceledException) { }
             }
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -311,7 +334,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -359,7 +382,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -473,7 +496,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -562,7 +585,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -595,7 +618,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -639,7 +662,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -687,7 +710,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -777,7 +800,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 
@@ -981,7 +1004,7 @@ public sealed class BlobsTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            DeleteDir(dir);
         }
     }
 }
