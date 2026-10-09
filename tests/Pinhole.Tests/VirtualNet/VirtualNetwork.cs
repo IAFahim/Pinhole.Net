@@ -56,17 +56,30 @@ internal sealed class VirtualNetwork : IDisposable
     }
 
     /// <summary>Attaches a socket directly to the internet at <paramref name="address"/> —
-    /// the endpoint peers dial is the endpoint the engine bound.</summary>
+    /// the endpoint peers dial is the endpoint the engine bound. A port-0 bind is assigned
+    /// an ephemeral port, exactly as an OS socket would be: the engine's candidate
+    /// machinery (local port, STUN-observed reflexives) is meaningless at port 0, and a
+    /// real stack never leaves a bound socket there.</summary>
     public VirtualUdpSocket CreateHost(IPEndPoint address)
     {
-        var socket = new VirtualUdpSocket(this, address, nat: null);
         lock (_gate)
         {
-            _internet[address] = socket;
-        }
+            if (address.Port == 0)
+            {
+                do
+                {
+                    address = new IPEndPoint(address.Address, Interlocked.Increment(ref _nextEphemeralPort));
+                }
+                while (_internet.ContainsKey(address));
+            }
 
-        return socket;
+            var socket = new VirtualUdpSocket(this, address, nat: null);
+            _internet[address] = socket;
+            return socket;
+        }
     }
+
+    private int _nextEphemeralPort = 50000;
 
     /// <summary>Attaches a socket on <paramref name="nat"/>'s private side.</summary>
     public VirtualUdpSocket CreateBehindNat(VirtualNat nat) => nat.Attach();

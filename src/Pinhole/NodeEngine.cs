@@ -1763,6 +1763,7 @@ internal sealed partial class NodeEngine : IDisposable
                         }
                         else
                         {
+                            if (TraceEnabled) TraceLine($"punch direct {c.PeerId:x16} -> {candidate.Address}");
                             SendToWire(candidate.Address, c.PuncFrame);
                         }
                     }
@@ -2136,10 +2137,10 @@ internal sealed partial class NodeEngine : IDisposable
             c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
         }
 
-        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        Span<byte> frame = stackalloc byte[PmtuBaseWire];
         Span<byte> nonceBytes = stackalloc byte[8];
         BitConverter.TryWriteBytes(nonceBytes, nonce);
-        int len = BuildFrame(c, FrameType.Ping, nonceBytes, frame);
+        int len = BuildFloorPing(c, nonceBytes, frame);
         try
         {
             SendDirect(c, target, frame[..len]);
@@ -2395,10 +2396,10 @@ internal sealed partial class NodeEngine : IDisposable
             return false;
         }
 
-        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
+        Span<byte> frame = stackalloc byte[PmtuBaseWire];
         Span<byte> timestamp = stackalloc byte[8];
         BitConverter.TryWriteBytes(timestamp, Environment.TickCount64);
-        int len = BuildFrame(c, FrameType.Ping, timestamp, frame);
+        int len = BuildFloorPing(c, timestamp, frame);
         try
         {
             RouteFrame(c, frame[..len]);
@@ -2990,6 +2991,10 @@ internal sealed partial class NodeEngine : IDisposable
         if (frame.Length < HeaderSize + CryptoWire.PackLegacyBody
             || BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
         {
+            if (TraceEnabled)
+            {
+                TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]):x8})");
+            }
             return; // not an echo of our handshake token
         }
 
@@ -3036,6 +3041,10 @@ internal sealed partial class NodeEngine : IDisposable
                 if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
                 {
                     crypto.CountRejected();
+                    if (TraceEnabled)
+                    {
+                        TraceLine($"pack key agreement failed from {c.PeerId:x16}");
+                    }
                     return;
                 }
 
@@ -3079,7 +3088,12 @@ internal sealed partial class NodeEngine : IDisposable
         }
         else
         {
-            DirectPathConfirmed(c, arrival);
+            // A crypto PACK that verified its confirm MAC is authenticated evidence: the
+            // answering peer proved possession of the key inside this very frame. The
+            // sealed-evidence gate exists to stop UNauthenticated frames from promoting a
+            // path, not to demand a sealed envelope from a peer still holding the
+            // handshake's plaintext flights.
+            DirectPathConfirmed(c, arrival, sealedEvidence: cryptoPack && c.Crypto is not null);
         }
 
         if (!c.Announced)
@@ -3409,9 +3423,22 @@ internal sealed partial class NodeEngine : IDisposable
         // A transport-control nonce uses the maintenance marker, so its pong is
         // authenticated evidence without manufacturing an application RTT sample.
         BinaryPrimitives.WriteInt64LittleEndian(payload, BinaryPrimitives.ReadInt64LittleEndian(payload) | ProbeMarker);
-        Span<byte> frame = stackalloc byte[HeaderSize + CryptoWire.TokenLength + 8 + CryptoWire.SealedOverhead];
-        int length = BuildFrame(c, FrameType.Ping, payload, frame);
+        Span<byte> frame = stackalloc byte[PmtuBaseWire];
+        int length = BuildFloorPing(c, payload, frame);
         SendOnArrival(arrival, frame[..length]);
+    }
+
+    /// <summary>Builds a Ping padded to the guaranteed wire floor. Peers size their
+    /// path MTU from inbound Ping frames; a sub-floor Ping would shrink a legacy
+    /// peer's payload budget below zero (its ceiling arithmetic has no floor once a
+    /// Ping has been seen). The leading bytes carry the nonce/timestamp; the padding
+    /// behind them stays zero — the same shape <see cref="SendPmtuProbe"/> uses.</summary>
+    private int BuildFloorPing(ConnState c, ReadOnlySpan<byte> leading, Span<byte> frame)
+    {
+        Span<byte> body = stackalloc byte[PmtuBaseWire - PmtuOverhead];
+        leading.CopyTo(body);
+        body[leading.Length..].Clear();
+        return BuildFrame(c, FrameType.Ping, body, frame);
     }
 
     private void AnnounceTo(ConnState c, bool blast = false, Arrival? target = null)
@@ -3707,7 +3734,17 @@ internal sealed partial class NodeEngine : IDisposable
             // ready. Arrivals still count as relay traffic (the dispatch stamp) whatever leg
             // they rode; the leg only changes when it actually fails and path validation
             // suspects it.
-            if (c.RelayReady || Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) != 0)
+            if (c.RelayReady)
+            {
+                // The permit already exists (dial-time warm-up counts), but promotion needs
+                // PeerConfirmed — which may only have arrived NOW, with this relayed frame.
+                // Re-run the promotion check; a pre-warmed leg must not wedge a Punching
+                // connection that completed its handshake after the permit landed.
+                PromoteRelayLegNoLock(c);
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) != 0)
             {
                 return;
             }
@@ -3720,6 +3757,27 @@ internal sealed partial class NodeEngine : IDisposable
         _ = PermitRelayAsync(c, peerRelayed);
     }
 
+    /// <summary>Relay-leg promotion, under the connection gate. The leg is proven usable
+    /// (permitted) and the peer cryptographically confirmed; a Punching or Dead session
+    /// becomes Degraded and hands its awaiter the connection. Callers re-run this whenever
+    /// either fact arrives second — the permit may pre-date the handshake, or the
+    /// handshake the permit.</summary>
+    private void PromoteRelayLegNoLock(ConnState c)
+    {
+        if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
+            && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+        {
+            c.State = PinholeConnectionState.Degraded;
+            c.Path = PathKind.Relay;
+            c.PathSince = DateTimeOffset.UtcNow;
+            if (c.IsIncoming && !c.IncomingQueued)
+            { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
+            c.Connected.TrySetResult();
+            c.StateChanged?.Invoke(c.State);
+            KickPunch(c); // relay is confirmed usable; direct upgrade probing continues
+        }
+    }
+
     private async Task PermitRelayAsync(ConnState c, IPEndPoint peer)
     {
         try
@@ -3729,11 +3787,14 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (!await TryPermitAsync(client, peer.Address, CancellationToken.None).ConfigureAwait(false))
                 {
+                    if (TraceEnabled)
+                    {
+                        TraceLine($"permit failed for {c.PeerId:x16} toward {peer} (clients {AliveRelayClients().Count})");
+                    }
                     return; // the slot was retired; the reconnect's fresh permit finishes this
                 }
             }
 
-            bool kick = false;
             lock (c.Gate)
             {
                 if (c.RelayRemote is { } current && !current.Address.Equals(peer.Address))
@@ -3744,25 +3805,10 @@ internal sealed partial class NodeEngine : IDisposable
                 c.RelayReady = true;
                 Telemetry.Recovery("relay-heal");
                 if (c.State == PinholeConnectionState.Closed) return;
-                if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
-                    && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
-                {
-                    c.State = PinholeConnectionState.Degraded;
-                    c.Path = PathKind.Relay;
-                    c.PathSince = DateTimeOffset.UtcNow;
-                    if (c.IsIncoming && !c.IncomingQueued)
-                    { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
-                    c.Connected.TrySetResult();
-                    c.StateChanged?.Invoke(c.State);
-                    kick = true;
-                }
+                PromoteRelayLegNoLock(c); // no-op unless the handshake has confirmed the peer
             }
 
-            if (kick)
-            {
-                KickPunch(c); // relay is confirmed usable; direct upgrade probing continues
-            }
-            else if (_options.RelaySignalingOnly) AnnounceTo(c);
+            if (_options.RelaySignalingOnly) AnnounceTo(c);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {

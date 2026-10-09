@@ -83,6 +83,11 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
 
                 Assert.Equal(0, budget.UsedBytes); // every reservation returned, immediately
                 Assert.Equal(socketsAtRest, lab.Net.LiveSockets); // downloader node released its socket
+                // Finalizer-aware collection: an object released by a finalizer needs a
+                // second collection to vanish from GetTotalMemory, and macOS teardown
+                // otherwise surfaces one cycle late as a false sawtooth.
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
                 GC.Collect();
                 heapSamples.Add(GC.GetTotalMemory(forceFullCollection: true));
                 output.WriteLine($"cycle {i}: heap {heapSamples[^1]} bytes");
@@ -103,14 +108,25 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 }
             }
 
-            // Median per-cycle heap growth after warmup. Collection isolation excludes
-            // allocations from other tests; the per-layer counters above stay exact.
-            var deltas = heapSamples.Zip(heapSamples.Skip(1), (a, b) => b - a).OrderBy(d => d).ToList();
-            long medianDelta = deltas[deltas.Count / 2];
+            // Per-cycle heap growth as an end-to-end slope. A median of consecutive
+            // sample deltas is the wrong estimator here: delayed teardown (or GC segment
+            // churn) can alternate the plateau ~1 MiB between cycles, and the median then
+            // reports the oscillation amplitude, not growth — the macOS matrix showed a
+            // flat 7.4 -> 8.2 MiB envelope failing a "975 KiB/cycle" gate. The slope plus
+            // a hard total cap catch any real monotone leak of >= 512 KiB/cycle (8 cycles
+            // would grow the heap by >= 4 MiB) while staying deaf to oscillation.
+            // Collection isolation excludes allocations from other tests; the per-layer
+            // counters above stay exact.
+            long totalGrowth = heapSamples[^1] - heapSamples[0];
+            long perCycle = totalGrowth / (cycles - 1);
             output.WriteLine($"after {cycles} cancel/resume cycles: heap {heapAtRest / 1048576.0:F1} -> " +
-                             $"{heapSamples[^1] / 1048576.0:F1} MiB (median cycle delta {medianDelta / 1024.0:F0} KiB), " +
+                             $"{heapSamples[^1] / 1048576.0:F1} MiB (slope {perCycle / 1024.0:F0} KiB/cycle, total {totalGrowth / 1024.0:F0} KiB), " +
                              $"sockets {socketsAtRest}, budget used {budget.UsedBytes}");
-            Assert.True(medianDelta < 512 * 1024, $"heap grows ~{medianDelta / 1024.0:F0} KiB per cancelled cycle");
+            Assert.True(perCycle < 512 * 1024, $"heap grows ~{perCycle / 1024.0:F0} KiB per cancelled cycle");
+            // Secondary drift guard: 2 MiB is 2x the largest teardown/GC oscillation the
+            // macOS matrix has shown, and still half of what a threshold-level leak
+            // (512 KiB x 8) would produce.
+            Assert.True(totalGrowth < 2 * 1024 * 1024, $"heap grew {totalGrowth / 1024.0:F0} KiB over {cycles} cancelled cycles");
 
             // The stacked checkpoints resume: one clean pass finishes byte-exact.
             BlobDownloadResult done = await BlobClient.DownloadAsync(server.Ticket, outDir,

@@ -765,6 +765,10 @@ public class CryptoTests
         // and only under them.
         (byte type, byte[] body)? frame = await oracle.ReceiveSealedAsync(TimeSpan.FromSeconds(5), wantType: 0x53);
         Assert.NotNull(frame);
-        Assert.Equal(8, frame!.Value.body.Length); // the ping's timestamp
+        // Caller pings carry the 8-byte timestamp first and are padded to the guaranteed
+        // wire floor behind it: peers size their path MTU from inbound Ping frames, and a
+        // sub-floor ping would shrink a legacy peer's payload budget below zero.
+        Assert.True(frame!.Value.body.Length >= 8, $"ping body lost its timestamp: {frame.Value.body.Length} bytes");
+        Assert.InRange(frame.Value.body.Length, 8, 1300);
     }
 }
