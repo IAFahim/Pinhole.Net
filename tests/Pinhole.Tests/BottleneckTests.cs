@@ -43,8 +43,9 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             AddBottleneck(lab, queuePackets: 256);
 
             var transfer = new TransferProgress();
+            var stats = new BlobTransferStats();
             var sw = Stopwatch.StartNew();
-            BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer).WaitAsync(FlowBudget);
+            BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer, stats).WaitAsync(FlowBudget);
             sw.Stop();
             Assert.Equal(bytes, result.Bytes);
 
@@ -52,7 +53,10 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             double kibPerSecond = transfer.Bytes / transfer.Elapsed.TotalSeconds / 1024;
             output.WriteLine($"deep queue: {result.Bytes} B in {sw.Elapsed.TotalSeconds:F2}s total; " +
                              $"{transfer.Bytes} B in {transfer.Elapsed.TotalSeconds:F2}s receiving = {kibPerSecond:F0} KiB/s " +
-                             $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()}");
+                             $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()} | " +
+                             $"requests={stats.RequestsSent}, retransmits={stats.Retransmits}, loss-windows={stats.LossEvents}, " +
+                             $"resumes={stats.ConservativeResumes}, duplicate-bytes={stats.DuplicateBytes}, " +
+                             $"rtt-ms={stats.SmoothedRtt?.TotalMilliseconds:F1}, window={stats.WindowBytes}");
             Assert.True(kibPerSecond <= LinkBits / 8 / 1024 * 1.05,
                 $"measured {kibPerSecond:F0} KiB/s exceeds the 16 Mbit/s link — the shaper is not shaping");
             Assert.True(kibPerSecond >= LinkBits / 8 / 1024 * 0.25,
@@ -203,14 +207,15 @@ public sealed class BottleneckTests(ITestOutputHelper output)
     }
 
     private static Task<BlobDownloadResult> DownloadAsync(VirtualLab lab, BlobServer server, string dir,
-        IProgress<BlobProgress>? progress = null) =>
-        DownloadAtAsync(lab, server, dir, "198.51.100.20", 32020, "out", progress);
+        IProgress<BlobProgress>? progress = null, BlobTransferStats? stats = null) =>
+        DownloadAtAsync(lab, server, dir, "198.51.100.20", 32020, "out", progress, stats);
 
     private static Task<BlobDownloadResult> DownloadAtAsync(VirtualLab lab, BlobServer server, string dir,
-        string address, int port, string name, IProgress<BlobProgress>? progress = null) =>
+        string address, int port, string name, IProgress<BlobProgress>? progress = null, BlobTransferStats? stats = null) =>
         BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, name + "-out"), progress,
             options: new BlobDownloadOptions
             {
+                Stats = stats,
                 NodeOptions = lab.BaseOptions(o => o with
                 {
                     UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse(address), port)),
