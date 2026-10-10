@@ -21,12 +21,30 @@ public sealed class TcpSocketHardeningTests
         ConnectTimeout = TimeSpan.FromSeconds(5),
     };
 
+    /// <summary>The sidecar reuses the UDP socket's numeric port; on Windows that TCP
+    /// port can sit in an excluded range (Hyper-V reserves blocks), which legitimately
+    /// leaves TcpListeningPort null. These cases need the sidecar, so retry on a fresh
+    /// ephemeral port rather than treating the miss as a transport defect.</summary>
+    private static async Task<PinholeNode> BindWithSidecarAsync(IPAddress address, IPEndPoint? bind = null)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            PinholeNode node = await PinholeNode.BindAsync(bind is null ? Options(address) : Options(address) with { Bind = bind });
+            if (node.TcpListeningPort is not null || attempt >= 3)
+            {
+                return node;
+            }
+            await node.DisposeAsync();
+        }
+    }
+
     [Theory]
     [InlineData(8193)]   // one past TcpTransport.MaxFrame
     [InlineData(65535)]  // the largest u16 header a stranger can write
     public async Task OversizedFrameHeader_ClosesTheStreamWithoutASession(int declaredLength)
     {
-        await using var node = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
+        await using var node = await BindWithSidecarAsync(IPAddress.Loopback);
+        Assert.NotNull(node.TcpListeningPort);
         using var socket = new TcpClient();
         await socket.ConnectAsync(IPAddress.Loopback, node.TcpListeningPort!.Value).WaitAsync(Timeout);
         NetworkStream stream = socket.GetStream();
@@ -48,7 +66,7 @@ public sealed class TcpSocketHardeningTests
         // Key substitution: the ticket names the real listener candidate but pins a
         // key the listener cannot prove. The dial must die inside its budget — never
         // downgrade to plaintext, never surface an unauthenticated connection.
-        await using var listener = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
+        await using var listener = await BindWithSidecarAsync(IPAddress.Loopback);
         await using var dialer = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
         ConnectionString substituted = new(
             listener.PeerId,
@@ -80,10 +98,22 @@ public sealed class TcpSocketHardeningTests
             probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             port = ((IPEndPoint)probe.LocalEndPoint!).Port;
         }
+        // A UDP-ephemeral port can sit in a Windows-excluded TCP range; this case needs
+        // the sidecar on this exact port, so probe TCP first and bow out if the runner
+        // cannot provide it (the Linux/macOS matrix still covers the full path).
+        try
+        {
+            using var tcpProbe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            tcpProbe.Bind(new IPEndPoint(IPAddress.Loopback, port));
+        }
+        catch (SocketException)
+        {
+            return;
+        }
         var bind = new IPEndPoint(IPAddress.Loopback, port);
 
         PinholeConnection firstIncoming, firstOutgoing;
-        await using (var listener = await PinholeNode.BindAsync(Options(IPAddress.Loopback) with { Bind = bind }))
+        await using (var listener = await BindWithSidecarAsync(IPAddress.Loopback, bind))
         {
             Assert.Equal(port, listener.TcpListeningPort);
             await using var dialer = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
@@ -105,7 +135,7 @@ public sealed class TcpSocketHardeningTests
         await TestPoll.UntilAsync(Timeout, () => firstIncoming.State != PinholeConnectionState.Open);
         Assert.NotEqual(PinholeConnectionState.Open, firstOutgoing.State);
 
-        await using var reborn = await PinholeNode.BindAsync(Options(IPAddress.Loopback) with { Bind = bind });
+        await using var reborn = await BindWithSidecarAsync(IPAddress.Loopback, bind);
         Assert.Equal(port, reborn.TcpListeningPort);
         await using var redialer = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
         var rebornTicket = new ConnectionString(reborn.PeerId,

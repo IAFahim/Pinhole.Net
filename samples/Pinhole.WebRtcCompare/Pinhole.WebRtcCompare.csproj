@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- M1 feasibility prototype for #45: bounded, noninteractive, loopback-only.
+       Pinned candidate: SIPSorcery 10.0.17 == upstream HEAD 3ef46acfa05cbfb74debea457f64f445a9908786.
+       Not part of the shipped SDK; excluded from the solution build by design so the
+       candidate's dependency graph never leaks into Pinhole.Net packages. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SIPSorcery" Version="10.0.17" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pinhole\Pinhole.csproj" />
+  </ItemGroup>
+
+</Project>
