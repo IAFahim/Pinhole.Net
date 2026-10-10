@@ -68,6 +68,15 @@ Keepalive and PMTU discovery preserve and tune an existing path. They do not cre
 an otherwise blocked route. QUIC runs over UDP and would not, by itself, provide
 the missing TCP route.
 
+The owner's 2026-10-11 correction prioritizes the official System.Net.Quic C# API.
+The [QUIC assessment](issues/quic-feasibility.md) and
+[isolated probe](../samples/Pinhole.QuicProbe/README.md) distinguish ordinary C#
+usage from its native MsQuic deployment dependency. With libmsquic present, the
+probe's C#↔C# and C#↔Rust (Quinn) authenticated echoes and incorrect-pin
+rejection pass on .NET 8/10; NAT/relay integration and mobile suitability
+remain unverified. This does not change the working transport or deprecate
+direct TCP.
+
 ## Defect corrected during the audit: PCP
 
 The previous PCP implementation sent a 44-byte request instead of the RFC 6887

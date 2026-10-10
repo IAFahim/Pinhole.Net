@@ -1,0 +1,72 @@
+name: QUIC feasibility
+
+# Separate from shipping CI: exercises the official API and an independent Rust peer.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/quic.yml'
+      - 'samples/Pinhole.QuicProbe/**'
+  pull_request:
+    paths:
+      - '.github/workflows/quic.yml'
+      - 'samples/Pinhole.QuicProbe/**'
+
+permissions:
+  contents: read
+
+jobs:
+  interop:
+    name: quic-${{ matrix.os }}-${{ matrix.framework }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        framework: [net8.0, net10.0]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux QUIC prerequisite
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          sudo apt-get update
+          sudo apt-get install -y libmsquic
+          dpkg-query -W libmsquic
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustc +1.98.1 --version
+      - name: Build independent peer with locked dependencies
+        run: cargo +1.98.1 build --release --locked --manifest-path samples/Pinhole.QuicProbe/rust-peer/Cargo.toml
+      - name: Build official C# API probe
+        run: dotnet build samples/Pinhole.QuicProbe -c Release -f ${{ matrix.framework }}
+      - name: Verify authenticated traffic and incorrect certificate rejection
+        env:
+          QUIC_FRAMEWORK: ${{ matrix.framework }}
+          QUIC_PLATFORM: ${{ runner.os }}
+        run: |
+          QUIC_PEER="samples/Pinhole.QuicProbe/rust-peer/target/release/pinhole-quic-peer"
+          if [ "$QUIC_PLATFORM" = "Windows" ]; then QUIC_PEER="${QUIC_PEER}.exe"; fi
+          python samples/Pinhole.QuicProbe/verify.py --framework "$QUIC_FRAMEWORK" --rust-server "$QUIC_PEER" --output artifacts/quic/evidence.json
+      - name: Upload QUIC evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-${{ matrix.os }}-${{ matrix.framework }}
+          path: artifacts/quic/
+          retention-days: 14

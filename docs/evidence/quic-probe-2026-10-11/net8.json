@@ -1,0 +1,81 @@
+{
+  "status": "PASS",
+  "framework": "net8.0",
+  "assemblySha256": "902721da19dcbf994e3f5dda688c6399be09ffee26304b00947611751485c9da",
+  "rustPeerSha256": "e7c4c66ace3628f36e5fdd4b025043d3bf2ec02f3547b7bee9989b133b7cef33",
+  "cargoLockSha256": "448c01ad6deb36bb576d7e89b6cff34457ae20297d81a9f5e52823239cd8dc3a",
+  "cases": [
+    {
+      "case": "csharp_loopback",
+      "verified": true,
+      "exitCode": 0,
+      "stderr": "",
+      "report": {
+        "Status": "PASS",
+        "Reason": "Both peers authenticated; all payloads matched; both stream halves reached EOF.",
+        "Framework": ".NET 8.0.31",
+        "Os": "Omarchy",
+        "Transport": "System.Net.Quic / native MsQuic",
+        "Scope": "Two local peers; mutually pinned certificates; reliable ordered stream; no NAT or relay test",
+        "ConnectionSupported": true,
+        "ListenerSupported": true,
+        "UnreliableDatagramApi": false,
+        "UdpLoopbackAvailable": true,
+        "UdpError": null,
+        "Measurements": {
+          "VerifiedEchoes": 101,
+          "PayloadBytes": 64,
+          "ConnectToFirstEchoMs": 67.1456,
+          "RttP50Us": 59.4,
+          "RttP95Us": 122.2
+        }
+      }
+    },
+    {
+      "case": "csharp_rust",
+      "verified": true,
+      "exitCode": 0,
+      "stderr": "",
+      "report": {
+        "Status": "PASS",
+        "Reason": "C# and Rust independently verified the authenticated echo and EOF checks.",
+        "Framework": ".NET 8.0.31",
+        "Os": "Omarchy",
+        "Transport": "System.Net.Quic / native MsQuic",
+        "Scope": "C# client and independent Rust Quinn server; mutual certificate authentication; reliable stream; no NAT or relay test",
+        "ConnectionSupported": true,
+        "ListenerSupported": true,
+        "UnreliableDatagramApi": false,
+        "UdpLoopbackAvailable": true,
+        "UdpError": null,
+        "Measurements": {
+          "VerifiedEchoes": 101,
+          "PayloadBytes": 64,
+          "ConnectToFirstEchoMs": 72.1541,
+          "RttP50Us": 40.5,
+          "RttP95Us": 78.9
+        }
+      }
+    },
+    {
+      "case": "wrong_server_pin",
+      "verified": true,
+      "exitCode": 0,
+      "stderr": "",
+      "report": {
+        "Status": "EXPECTED_REJECTION",
+        "Reason": "The TLS certificate callback rejected the deliberately incorrect server pin; no application traffic was sent.",
+        "Framework": ".NET 8.0.31",
+        "Os": "Omarchy",
+        "Transport": "System.Net.Quic / native MsQuic",
+        "Scope": "C# client and independent Rust Quinn server; mutual certificate authentication; reliable stream; no NAT or relay test",
+        "ConnectionSupported": true,
+        "ListenerSupported": true,
+        "UnreliableDatagramApi": false,
+        "UdpLoopbackAvailable": true,
+        "UdpError": null,
+        "Measurements": null
+      }
+    }
+  ]
+}
