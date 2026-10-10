@@ -1,6 +1,7 @@
 <Project>
 
 	<PropertyGroup>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 		<Authors>IAFahim</Authors>
 		<Version>1.9.0</Version>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
