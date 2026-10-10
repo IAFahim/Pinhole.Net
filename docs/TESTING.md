@@ -300,12 +300,14 @@ file proves the transfer layer on top of them.
 
 ## #20 — blob congestion control: selection, controller, acceptance
 
-The reuse-first survey is in `docs/BLOBS.md` § "Component selection": kcp2k (its own
-README recommends leaving KCP congestion control disabled), LiteNetLib (a transport, not
-a layer above one, no congestion avoidance), Lidgren (dormant), System.Net.Quic (native
-bindings, excluded by the full-managed constraint) — no component fits, so the
-receiver-side controller documented in `docs/BLOBS.md` is the smallest justified
-adaptation of RFC 6298/8085/9002/6675 ideas. The wire is unchanged.
+The source survey is in `docs/BLOBS.md` § "Component selection". kcp2k remains a
+possible managed ARQ adapter, subject to its documented congestion-control caveat;
+LiteNetLib is a transport alternative. The Lidgren maintenance claim is unverified,
+and System.Net.Quic is excluded by the current no-native-transport requirement.
+No candidate integration has completed the AOT, resource, cancellation and fairness
+comparison. The receiver-side controller provisionally preserves the existing wire
+and adapts RFC 6298/8085/9002/6675 ideas. These tests validate its measured behavior;
+they do not establish that writing custom control is preferable to reuse.
 
 `CongestionTests.cs` (acceptance) and the re-measured `BottleneckTests`/`LossLadderTests`
 (evidence, `docs/BASELINES.md` § "Controller vs fixed window"):

@@ -37,6 +37,32 @@ Core references: [options](../src/Pinhole/PinholeOptions.cs),
 Phone references: [PinholeDialer.kt with automatic router mapping](https://github.com/IAFahim/OpusVoice/blob/affd577e7d013a824116e2a9d2f1e755c0cb87af/pinhole/src/main/kotlin/pinhole/PinholeDialer.kt),
 [LAN receiver validation and ticket creation](https://github.com/IAFahim/OpusVoice/blob/169fd9d2be59a7457d2c68b51cb5a06b0e574c91/pinhole/src/main/kotlin/pinhole/LanReceiver.kt).
 
+## Scope and existing managed alternatives — 2026-10-10
+
+Pinhole is an existing custom datagram connection engine: it gathers addresses,
+tries direct UDP, uses relay fallback, authenticates sessions, and recovers routes.
+The requested TCP sidecar adds another route under that API. It is not a WebRTC
+implementation and Pinhole application packets do not interoperate with WebRTC
+peers. UDP/TCP sockets, HTTPS WebSockets and cryptographic primitives are supplied
+by the OS, .NET and BouncyCastle; Pinhole implements its own protocol clients and
+session state. It uses existing STUN/TURN/iroh infrastructure rather than replacing
+those production servers.
+
+Existing C# libraries overlap substantially. This is not a claim that their
+functionality is unavailable in .NET:
+
+| Existing component | Relevant overlap | Comparison still required |
+|---|---|---|
+| [SIPSorcery](https://github.com/sipsorcery-org/sipsorcery/tree/3ef46acfa05cbfb74debea457f64f445a9908786) | WebRTC, ICE, STUN and data channels; its [RtpIceChannel](https://sipsorcery-org.github.io/sipsorcery/api/SIPSorcery.Net.RtpIceChannel.html) gathers candidates and checks candidate pairs. | Reuse of traversal pieces versus adopting WebRTC; current license, API/wire differences, pinned identity, iroh relay integration, AOT, recovery and resource bounds. |
+| [LiteNetLib](https://github.com/RevenantX/LiteNetLib/tree/ddacf9b7a3e821cc052e90c30daf82f0702a6db4) | Reliable/unreliable UDP, NAT punching, IPv6 and MTU discovery. | Adopting a different transport versus adapting components; encrypted identity, relay routing, current peer compatibility and bounded lifecycle behavior. |
+
+Preserving the current wire format and the roadmap's full managed C# requirement
+are constraints to evaluate, not reasons to assume every feature needs a custom
+implementation. Prefer reuse for new work and record concrete integration evidence
+before dismissing a candidate. The separate [blob component survey](BLOBS.md#component-selection-source-survey-integration-comparison-remains-open)
+also remains provisional; it does not justify a new general-purpose transport or
+congestion-control framework.
+
 LAN discovery makes nearby peers discoverable; it does not traverse Internet NAT.
 Keepalive and PMTU discovery preserve and tune an existing path. They do not create
 an otherwise blocked route. QUIC runs over UDP and would not, by itself, provide

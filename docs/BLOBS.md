@@ -196,27 +196,32 @@ The honest cost: on a clean fat pipe a *short* transfer (a few BDPs) pays the sl
 climb (~100 ms) that an instantly-flooded fixed window does not — measured below as the
 one rung where the controller trails the fixed window, with near-empty queues where the
 fixed window bufferbloated. The selected rules and measured tradeoffs are in
-[BASELINES.md](BASELINES.md); the reuse-first evaluation that led to building this
-controller instead of adopting a component is next.
+[BASELINES.md](BASELINES.md); the current reuse assessment is next.
 
-### Component selection (the reuse-first answer)
+### Component selection (source survey; integration comparison remains open)
 
-Evaluated for "maintained, fully managed C#, sits above a datagram API" against
-maintenance, license, AOT/trimming, cancellation, bounded memory, pacing/loss recovery,
-congestion mode, and integration/wire compatibility:
+The requirement in #20 is to prefer maintained managed components. This survey
+identifies compatibility and congestion-control questions; it does not establish
+that no existing component can work. No candidate adapter has yet passed a
+comparative integration, AOT/trimming, cancellation, resource or fairness gate.
+Upstream snapshots below were checked on 2026-10-10.
 
 | Candidate | Verdict | Why |
 |---|---|---|
-| [kcp2k](https://github.com/MirrorNetworking/kcp2k) (MIT, actively maintained, Mirror's default transport) | **not adopted** | Its own README: "Congestion Control should be left disabled. It seems to be broken in KCP." Adopting it means adopting an ARQ whose congestion control is recommended off — the #20 requirements would still need a hand-written controller *plus* KCP's sender-driven byte-stream model, which discards the receiver-driven trust properties (anchored window, verify-on-arrival before buffering). |
-| [LiteNetLib](https://github.com/RevenantX/LiteNetLib) (MIT, maintained) | **not adopted** | A transport, not a layer above one: it owns sockets, connections, and its own framing — embedding it under Pinhole would be a second transport stack. Its reliable channel uses fixed-window resends with no congestion avoidance (no cwnd, no AIMD, no pacing). |
-| Lidgren / lidgren-genome | **not adopted** | Sparse-to-dormant maintenance; same transport-level mismatch. |
-| System.Net.Quic / MsQuic | **excluded** | Native OS bindings (full managed C# is a hard constraint) and a complete transport with its own handshake — it cannot sit above Pinhole's datagram API. |
+| [kcp2k](https://github.com/MirrorNetworking/kcp2k/tree/66efda6686f649838d42f078fbaabf56ac449de4) (MIT) | **candidate; not integrated** | The low-level C# KCP implementation has optional higher-level client/server handling, so an adapter above Pinhole is a possibility. Its README recommends disabling congestion control. That is a reason to evaluate the actual configuration and fairness, not proof that reuse is impossible. Integration must preserve verification, resume, bounded buffering and existing-peer behavior. Upstream HEAD was dated 2024-10-12; that alone does not prove continuing maintenance or abandonment. |
+| [LiteNetLib](https://github.com/RevenantX/LiteNetLib/tree/ddacf9b7a3e821cc052e90c30daf82f0702a6db4) (MIT) | **transport alternative; not integrated** | It already supplies reliable/unreliable UDP, NAT punching and MTU discovery. Its public API owns transport connections and framing, so replacing the transport or adapting its internals needs an explicit design and wire-version plan. Pacing, congestion mode, bounds, AOT and cancellation still need evidence for the proposed integration. Upstream HEAD was dated 2026-10-04. |
+| Lidgren / lidgren-genome | **not evaluated sufficiently** | The previous survey did not pin the exact project/fork or substantiate its maintenance claim. It is not a justified exclusion until that evidence is recorded. |
+| System.Net.Quic / MsQuic | **excluded by the current managed-only requirement** | The roadmap excludes native transport bindings. The .NET QUIC API is a separate transport using MsQuic, rather than a reliability component accepting Pinhole datagrams. Relaxing the native constraint would require a new transport comparison. |
 
-Conclusion, per the roadmap's escape hatch: no component fits; the controller above is
-the smallest justified adaptation of established algorithms (RFC 6298 RTO math, RFC 9002
-slow-start/IW/PTO/migration-reset thinking, RFC 8085 UDP congestion guidance, RFC 6675's
-one-reduction-per-window rule). It is not QUIC-compatible and claims to be nothing but
-itself.
+The existing receiver-side controller is retained provisionally to preserve the
+blob wire format while #20 remains open. It adapts established algorithms
+(RFC 6298 RTO math, RFC 9002 slow-start/IW/PTO/migration-reset ideas, RFC 8085 UDP
+congestion guidance, RFC 6675's one-reduction-per-window rule); it is not QUIC.
+Passing current tests does not settle the reuse decision or prove TCP fairness.
+Before declaring the choice final, compare a concrete candidate adapter against
+the existing controller under the agreed budgets, or document measured reasons
+the adapter cannot meet them. Reusing ARQ does not inherently remove application
+hash verification or resumable checkpoints; an integration must keep those checks.
 
 ### Directories
 
