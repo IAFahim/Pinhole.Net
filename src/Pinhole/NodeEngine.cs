@@ -1067,16 +1067,18 @@ internal sealed partial class NodeEngine : IDisposable
                 slot.Backoff = RelayRetryBackoff;
             }
 
-            // Receive-side bootstrap for strict TURN servers: an allocation only receives
-            // from IPs it permitted, and a peer relaying through the same server arrives
-            // from that server's IP. Permitting our own configured relay servers (and the
-            // free catalog, in PermitCatalogRelaysAsync) is what lets two strangers behind
-            // one shared relay find each other without any out-of-band permission exchange.
-            foreach (IPEndPoint own in (_options.Relays ?? _options.ResolvedRelays).Select(r => r.Server).Append(slot.Config.Server))
+            // Receive-side bootstrap: TURN only delivers from permitted source IPs.
+            // Providers such as Cloudflare allocate a data address distinct from their
+            // anycast control address. Permit our allocation's data IP too, so a stranger
+            // on that shared data IP can introduce itself before announcing its candidates.
+            IEnumerable<IPAddress> bootstrap = (_options.Relays ?? _options.ResolvedRelays)
+                .Select(r => r.Server.Address).Append(slot.Config.Server.Address);
+            if (client.RelayedAddress is { } relayed) bootstrap = bootstrap.Append(relayed.Address);
+            foreach (IPAddress own in bootstrap.Distinct())
             {
                 try
                 {
-                    await client.CreatePermissionAsync(own.Address, CancellationToken.None).ConfigureAwait(false);
+                    await client.CreatePermissionAsync(own, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException)
                 {

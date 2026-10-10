@@ -1,0 +1,23 @@
+{
+  "targetedTestsEachFramework": 36,
+  "regressionFirstFailedBeforeEngineFix": true,
+  "fullSuites": [
+    {
+      "framework": "net10.0",
+      "startedUtc": "2026-10-10T22:36:31.685618+00:00",
+      "exitCode": 0,
+      "summary": [
+        "Passed!  - Failed:     0, Passed:   624, Skipped:     3, Total:   627, Duration: 2 m 19 s - Pinhole.Tests.dll (net10.0)"
+      ]
+    },
+    {
+      "framework": "net8.0",
+      "startedUtc": "2026-10-10T22:38:53.817059+00:00",
+      "exitCode": 0,
+      "summary": [
+        "Passed!  - Failed:     0, Passed:   624, Skipped:     3, Total:   627, Duration: 2 m 22 s - Pinhole.Tests.dll (net8.0)"
+      ]
+    }
+  ],
+  "scope": "full existing Pinhole test project plus both new TURN bootstrap regressions; live relay verification recorded separately in live.json"
+}

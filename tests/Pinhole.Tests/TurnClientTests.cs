@@ -35,6 +35,7 @@ public sealed class FakeTurnServer : IDisposable
     private readonly string _realm;
     private readonly string _user;
     private readonly int _lifetimeSeconds;
+    private readonly IReadOnlyList<IPAddress>? _relayedAddresses;
     private readonly byte[] _key;
     private readonly Dictionary<EndPoint, Allocation> _byControl = new();
     private readonly Dictionary<IPEndPoint, Allocation> _byRelayed = new();
@@ -42,11 +43,12 @@ public sealed class FakeTurnServer : IDisposable
     private int _nonceVersion;
     private volatile bool _running = true;
 
-    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600, int port = 0, IPAddress? bindAddress = null)
+    public FakeTurnServer(string realm = "pinhole-test", string user = "user", string password = "pass", int lifetimeSeconds = 600, int port = 0, IPAddress? bindAddress = null, IReadOnlyList<IPAddress>? relayedAddresses = null)
     {
         _realm = realm;
         _user = user;
         _lifetimeSeconds = lifetimeSeconds;
+        _relayedAddresses = relayedAddresses;
         _key = MD5.HashData(Encoding.UTF8.GetBytes($"{user}:{realm}:{password}"));
         _main = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _main.ReceiveTimeout = 200; // bounded wakeups keep dispose from wedging on macOS
@@ -192,7 +194,12 @@ public sealed class FakeTurnServer : IDisposable
 
         var portHolder = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         portHolder.Bind(new IPEndPoint(((IPEndPoint)_main.LocalEndPoint!).Address, 0));
-        var relayed = (IPEndPoint)portHolder.LocalEndPoint!;
+        // Indications are forwarded through the control socket in this fixture. The
+        // advertised data address can differ, as on providers with an anycast control IP.
+        var allocated = (IPEndPoint)portHolder.LocalEndPoint!;
+        var address = _relayedAddresses is { Count: > 0 } addresses
+            ? addresses[Allocations % addresses.Count] : allocated.Address;
+        var relayed = new IPEndPoint(address, allocated.Port);
         var alloc = new Allocation
         {
             RelayPortHolder = portHolder,

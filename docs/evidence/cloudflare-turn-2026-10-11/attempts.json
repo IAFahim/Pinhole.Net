@@ -1,0 +1,215 @@
+{
+  "dateLocal": "2026-10-11",
+  "timezone": "Asia/Dhaka",
+  "liveCloudflareVerified": true,
+  "observations": [
+    {
+      "framework": "net8.0",
+      "commandArguments": [],
+      "exitCode": 3,
+      "output": {
+        "status": "BLOCKED",
+        "stage": "udp_socket",
+        "code": "NETWORK_PERMISSION_DENIED",
+        "relayTested": false,
+        "nativeError": 13,
+        "elapsedMs": 8
+      }
+    },
+    {
+      "framework": "net10.0",
+      "commandArguments": [],
+      "exitCode": 3,
+      "output": {
+        "status": "BLOCKED",
+        "stage": "udp_socket",
+        "code": "NETWORK_PERMISSION_DENIED",
+        "relayTested": false,
+        "nativeError": 13,
+        "elapsedMs": 9
+      }
+    },
+    {
+      "framework": "net10.0",
+      "commandArguments": [
+        "--auth-check"
+      ],
+      "exitCode": 3,
+      "output": {
+        "status": "BLOCKED",
+        "stage": "wrangler_account_access",
+        "code": "CLOUDFLARE_AUTH_SERVER_UNREACHABLE",
+        "relayTested": false,
+        "nativeError": null,
+        "elapsedMs": 480
+      }
+    },
+    {
+      "framework": "net10.0",
+      "phase": "network-enabled-retry",
+      "commandArguments": [],
+      "exitCode": 3,
+      "output": {
+        "status": "BLOCKED",
+        "stage": "temporary_turn_key",
+        "code": "CLOUDFLARE_HTTP_403",
+        "relayTested": false,
+        "nativeError": null,
+        "elapsedMs": 4564
+      }
+    },
+    {
+      "phase": "network-enabled-retry",
+      "output": {
+        "check": "live_cloudflare_udp_allocate_challenge",
+        "status": "PASS",
+        "port": 3478,
+        "responseCode": 401,
+        "realmPresent": true,
+        "noncePresent": true,
+        "authenticatedRelayTested": false
+      }
+    },
+    {
+      "framework": "net10.0",
+      "startedUtc": "2026-10-10T22:26:04.339669+00:00",
+      "exitCode": 1,
+      "probeAssemblySha256": "018ac3a9c4bd1bd74125876c1518059b8567b1db70a49dca2a0467f204a4c396",
+      "output": {
+        "status": "FAIL",
+        "stage": "encrypted_handshake",
+        "code": "TimeoutException",
+        "relayTested": false,
+        "elapsedMs": 20721,
+        "nativeError": null
+      },
+      "phase": "authenticated-single-invitation-before-data-address-fix"
+    },
+    {
+      "framework": "net10.0",
+      "startedUtc": "2026-10-10T22:32:01.815631+00:00",
+      "exitCode": 0,
+      "probeAssemblySha256": "92688d8d2a0c288af517417572ca6f006dd227cc3b0ae90d78442d6d098fea30",
+      "pinholeAssemblySha256": "2545256dfc86baeacf44d785b20c957b48451b209fd2e64b097b9ade41b7c564",
+      "output": {
+        "status": "PASS",
+        "stage": "encrypted_relay",
+        "relayTested": true,
+        "encrypted": true,
+        "path": "Relay",
+        "provider": "Cloudflare",
+        "transport": "udp",
+        "rawRoundTrips": 4,
+        "roundTripsEachDirection": 48,
+        "sendAttempts": 200,
+        "elapsedMs": 887
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=True",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "Cloudflare probe stage: encrypted_handshake",
+        "Cloudflare probe stage: encrypted_datagrams"
+      ],
+      "phase": "own-data-address-bootstrap-single-invitation"
+    },
+    {
+      "framework": "net8.0",
+      "startedUtc": "2026-10-10T22:32:02.728686+00:00",
+      "exitCode": 1,
+      "probeAssemblySha256": "7e0504a7c7e947ee6c9179e67b1183d0676719b99fc948b08bee4e3538d86033",
+      "pinholeAssemblySha256": "0c5274b07f0262bd324f6d5b443e41e4cc85ec67f3c40689ea3b99057d4a0640",
+      "output": {
+        "status": "FAIL",
+        "stage": "encrypted_handshake",
+        "code": "TimeoutException",
+        "relayTested": false,
+        "nativeError": null,
+        "elapsedMs": 20229
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=True",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "Cloudflare probe stage: encrypted_handshake"
+      ],
+      "phase": "own-data-address-bootstrap-single-invitation"
+    },
+    {
+      "framework": "net10.0",
+      "startedUtc": "2026-10-10T22:35:25.705252+00:00",
+      "phase": "mutual-ticket-exchange",
+      "exitCode": 0,
+      "probeAssemblySha256": "099d168b4d0866565d4f7b0049537bbdbd0f9b8aab1a8fbaae6f56e6dfc704d8",
+      "pinholeAssemblySha256": "2545256dfc86baeacf44d785b20c957b48451b209fd2e64b097b9ade41b7c564",
+      "output": {
+        "status": "PASS",
+        "stage": "encrypted_relay",
+        "relayTested": true,
+        "encrypted": true,
+        "path": "Relay",
+        "provider": "Cloudflare",
+        "transport": "udp",
+        "rawRoundTrips": 4,
+        "roundTripsEachDirection": 48,
+        "sendAttempts": 200,
+        "elapsedMs": 798
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=False",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "TURN node topology: sameRelayAddress=True, rawMatchesNodeA=True, rawMatchesNodeB=False",
+        "Cloudflare probe stage: encrypted_handshake",
+        "Cloudflare probe stage: encrypted_datagrams"
+      ]
+    },
+    {
+      "framework": "net8.0",
+      "startedUtc": "2026-10-10T22:35:26.527408+00:00",
+      "phase": "mutual-ticket-exchange",
+      "exitCode": 0,
+      "probeAssemblySha256": "64f06d66ba340246c5d6559b75028523a020e5de0dd6762b424343e1eb2a0c2e",
+      "pinholeAssemblySha256": "0c5274b07f0262bd324f6d5b443e41e4cc85ec67f3c40689ea3b99057d4a0640",
+      "output": {
+        "status": "PASS",
+        "stage": "encrypted_relay",
+        "relayTested": true,
+        "encrypted": true,
+        "path": "Relay",
+        "provider": "Cloudflare",
+        "transport": "udp",
+        "rawRoundTrips": 4,
+        "roundTripsEachDirection": 48,
+        "sendAttempts": 200,
+        "elapsedMs": 585
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=False",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "TURN node topology: sameRelayAddress=False, rawMatchesNodeA=True, rawMatchesNodeB=True",
+        "Cloudflare probe stage: encrypted_handshake",
+        "Cloudflare probe stage: encrypted_datagrams"
+      ]
+    }
+  ],
+  "networkNowAvailable": true,
+  "currentBlocker": null
+}

@@ -1,0 +1,75 @@
+{
+  "dateLocal": "2026-10-11",
+  "timezone": "Asia/Dhaka",
+  "scope": "two C# peers on one computer through real Cloudflare UDP TURN; mutual ticket exchange in memory",
+  "baseCommit": "020eaa5ca94b18b0675349f33dc292142f4a859d",
+  "uncommittedEngineChange": "bootstrap receive permission for the allocation data IP as well as the control IP",
+  "runs": [
+    {
+      "framework": "net10.0",
+      "startedUtc": "2026-10-10T22:35:25.705252+00:00",
+      "phase": "mutual-ticket-exchange",
+      "exitCode": 0,
+      "probeAssemblySha256": "099d168b4d0866565d4f7b0049537bbdbd0f9b8aab1a8fbaae6f56e6dfc704d8",
+      "pinholeAssemblySha256": "2545256dfc86baeacf44d785b20c957b48451b209fd2e64b097b9ade41b7c564",
+      "output": {
+        "status": "PASS",
+        "stage": "encrypted_relay",
+        "relayTested": true,
+        "encrypted": true,
+        "path": "Relay",
+        "provider": "Cloudflare",
+        "transport": "udp",
+        "rawRoundTrips": 4,
+        "roundTripsEachDirection": 48,
+        "sendAttempts": 200,
+        "elapsedMs": 798
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=False",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "TURN node topology: sameRelayAddress=True, rawMatchesNodeA=True, rawMatchesNodeB=False",
+        "Cloudflare probe stage: encrypted_handshake",
+        "Cloudflare probe stage: encrypted_datagrams"
+      ]
+    },
+    {
+      "framework": "net8.0",
+      "startedUtc": "2026-10-10T22:35:26.527408+00:00",
+      "phase": "mutual-ticket-exchange",
+      "exitCode": 0,
+      "probeAssemblySha256": "64f06d66ba340246c5d6559b75028523a020e5de0dd6762b424343e1eb2a0c2e",
+      "pinholeAssemblySha256": "0c5274b07f0262bd324f6d5b443e41e4cc85ec67f3c40689ea3b99057d4a0640",
+      "output": {
+        "status": "PASS",
+        "stage": "encrypted_relay",
+        "relayTested": true,
+        "encrypted": true,
+        "path": "Relay",
+        "provider": "Cloudflare",
+        "transport": "udp",
+        "rawRoundTrips": 4,
+        "roundTripsEachDirection": 48,
+        "sendAttempts": 200,
+        "elapsedMs": 585
+      },
+      "diagnostics": [
+        "Cloudflare probe stage: turn_key_file",
+        "Cloudflare probe stage: cloudflare_dns",
+        "Cloudflare probe stage: turn_allocation",
+        "TURN address topology: controlMatchesRelayA=False, controlMatchesRelayB=False, sameRelayAddress=False",
+        "Cloudflare probe stage: turn_permissions",
+        "Cloudflare probe stage: turn_datagrams",
+        "Cloudflare probe stage: pinhole_allocation",
+        "TURN node topology: sameRelayAddress=False, rawMatchesNodeA=True, rawMatchesNodeB=True",
+        "Cloudflare probe stage: encrypted_handshake",
+        "Cloudflare probe stage: encrypted_datagrams"
+      ]
+    }
+  ]
+}

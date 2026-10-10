@@ -102,15 +102,30 @@ await using var host = await PinholeSession.HostAsync(
     new PinholeHostSettings { RendezvousEndpoints = [...], NodeOptions = options });
 ```
 
-For managed TURN providers that use REST-style ephemeral credentials (coturn
-`use-auth-secret`, Cloudflare Realtime TURN), issue pairs server-side with
-`Pinhole.Turn.TurnRestCredentials.Issue(sharedSecret, now, lifetime, nonce)`
-— username `{unix-expiry}:{nonce}`, credential `base64(HMAC-SHA1(secret, username))`.
-The shared secret stays on your server; only the short-lived pair reaches
-the SDK. Cloudflare's free tier (1,000 GB/month shared across Realtime
-SFU+TURN, then per-GB) is a provider allowance, not a per-player bandwidth
-promise: keep credentials short-lived, hand them out with the invite, and
-put spending alarms on the account. An established direct connection does
+For **Cloudflare Realtime TURN**, obtain the short-lived username and credential
+server-side using its [generate-ice-servers API](https://developers.cloudflare.com/realtime/turn/generate-credentials/).
+Resolve a returned `turn:turn.cloudflare.com:3478?transport=udp` URI and pass that
+endpoint and the issued pair to `TurnServerConfig`. Keep the TURN key's API token
+on the backend; it is neither the SDK's TURN password nor a coturn shared secret.
+The current Pinhole TURN client uses UDP to reach the server. The standalone
+[Cloudflare relay probe](../samples/Pinhole.CloudflareProbe/README.md) obtains
+credentials and checks the real relay with two encrypted Pinhole peers.
+The signaling service must exchange both peers' allocated relay candidates before
+they dial: TURN permissions require the remote data IP, which can differ from the
+server's control IP and from the other allocation's data IP. The probe performs
+that exchange in memory; it does not implement the share-code service.
+
+For a coturn server configured with `use-auth-secret`, issue pairs server-side with
+`Pinhole.Turn.TurnRestCredentials.Issue(sharedSecret, now, lifetime, nonce)`:
+username `{unix-expiry}:{nonce}`, credential `base64(HMAC-SHA1(secret, username))`.
+The shared secret stays on your server; only the short-lived pair reaches the SDK.
+
+Cloudflare's [free allowance](https://developers.cloudflare.com/realtime/sfu/platform/pricing/)
+(1,000 GB/month shared across Realtime SFU+TURN, then per-GB) is an account allowance.
+Keep credentials short-lived and account for usage above it. The existing
+`HostAsync`/`JoinAsync` directory protocol uses UDP; using an HTTP Cloudflare Worker
+for short codes requires a directory adapter. TURN alone does not provide the
+short-code directory. An established direct connection does
 not need the directory or the TURN provider to stay up — a provider outage
 cannot tear down a direct route.
 

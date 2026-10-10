@@ -4,13 +4,15 @@ using System.Text;
 namespace Pinhole.Turn;
 
 /// <summary>Issues the REST-style ephemeral TURN credentials described by the coturn
-/// <c>use-auth-secret</c> draft and used by Cloudflare Realtime TURN and other managed
-/// providers: the username is <c>{unix-expiry}:{nonce}</c> and the credential is
+/// <c>use-auth-secret</c> draft, for servers configured with the same shared secret:
+/// the username is <c>{unix-expiry}:{nonce}</c> and the credential is
 /// base64(HMAC-SHA1(sharedSecret, username)). The shared secret never leaves the
 /// operator's server — an SDK or game embeds only the short-lived pair it is handed,
 /// which is why this helper lives with the operator's tooling, not in the client path.
 /// Generate pairs server-side with a small lifetime and hand them to hosts/joiners
-/// alongside the TURN URIs.</summary>
+/// alongside the TURN URIs. Cloudflare Realtime TURN credentials must instead be
+/// obtained from Cloudflare's generate-ice-servers API; its API token is not this
+/// shared secret.</summary>
 public static class TurnRestCredentials
 {
     /// <summary>Issues one credential pair valid until <paramref name="lifetime"/> from
