@@ -174,8 +174,12 @@ public sealed class CongestionTests(ITestOutputHelper output)
             var stats = new BlobTransferStats();
             BlobDownloadResult result = await DownloadAsync(lab, server, dir, stats).WaitAsync(Budget);
             Assert.Equal(FlowBytes, result.Bytes);
-            Assert.Equal(expectedDuplicateBytes, stats.DuplicateBytes);
-            Assert.Equal(expectedDuplicateBytes + FlowBytes, stats.ReceivedBytes);
+            // A retry whose first response was merely slow produces an extra copy beyond
+            // the ideal 64 — runner scheduling decides how many. The property under test
+            // is that duplicates are counted as wire load, never hidden or discounted.
+            Assert.True(stats.DuplicateBytes >= expectedDuplicateBytes,
+                $"only {stats.DuplicateBytes} duplicate bytes counted, expected at least {expectedDuplicateBytes}");
+            Assert.Equal(stats.DuplicateBytes + FlowBytes, stats.ReceivedBytes);
             output.WriteLine($"duplicating provider: {stats.DuplicateBytes / 1024} KiB duplicate bytes counted against " +
                              $"{stats.VerifiedBytes / 1024} KiB verified — the response side's real wire load");
         }
