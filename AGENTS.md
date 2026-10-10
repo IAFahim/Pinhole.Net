@@ -86,5 +86,7 @@ re-deriving the environment (or wrongly declaring it blocked) each session.
 Results live in `docs/evidence/<topic>-<date>/` with a README stating scope
 honestly; raw `pinhole1:` tickets never enter committed logs (hashes only).
 Post significant physical-network results to the tracking issue (#33/#43).
-CI: 20 jobs on every push; `PcpClientTests.Mapping_Retries…` is a known
-flake — rerun failed jobs before investigating.
+CI: 20 jobs on every push; timing-sensitive tests occasionally flake on a
+first pass and pass on rerun (seen: `PcpClientTests.Mapping_Retries…` on
+Ubuntu, `CryptoTests.WireOracle_LatePunch…` on macOS). Rerun failed jobs
+before investigating.
