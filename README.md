@@ -4,6 +4,12 @@ A connection library for .NET. The bottom layer — nothing else.
 
 One job: **get a connection between two machines, then keep it open until the app closes it.**
 
+The [SDK roadmap (#45)](https://github.com/IAFahim/Pinhole.Net/issues/45) plans a
+minimal host/join-by-code API using existing libraries and hosted coordination.
+Direct UDP, direct TCP, NAT punching and automatic routing remain requirements.
+WebRTC is a candidate to compare with the working transport; the host/join API is
+planned, and existing APIs and wire formats remain available.
+
 - **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
 - **LAN IPv6 fallback by default.** Link-local candidates supplement routable addresses, with probes on each eligible local Wi-Fi/Ethernet interface. Mobile and tunnel interfaces are excluded from link-local probing.

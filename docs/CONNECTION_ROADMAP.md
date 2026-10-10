@@ -1,8 +1,22 @@
 # Connection techniques status — 2026-10-09
 
-Tracking issue: [#40](https://github.com/IAFahim/Pinhole.Net/issues/40).
-The issue was created before this implementation work. Keep its full scope open
-until the remaining implementation and validation are complete.
+Current product roadmap: [#45](https://github.com/IAFahim/Pinhole.Net/issues/45),
+with the [full SDK plan](issues/minimal-sdk-roadmap.md). The owner now prioritizes
+a small host/join SDK, reuse of existing components and infrastructure, direct
+UDP/TCP, NAT punching, and automatic connection/latency selection. #40 is closed
+as a superseded exhaustive implementation mandate. Required unfinished work is
+mapped to the retained implementation and validation issues in #45.
+
+The inventory below is the **2026-10-09 historical snapshot**, including its then
+restricted execution environment. It does not describe today's test access or
+current CI status. Core `4f3caea` subsequently passed all twenty jobs in
+[CI run 38040052589](https://github.com/IAFahim/Pinhole.Net/actions/runs/38040052589),
+and phone [draft PR #4](https://github.com/IAFahim/OpusVoice/pull/4) passed its
+seventeen interop cases. The current transport is preserved as the baseline;
+WebRTC feasibility and new SDK integration evidence remain pending. No API,
+package or wire format is deprecated by the planning change.
+
+## Historical technique inventory
 
 Two of ten requirements have shipped. Five more now have substantial .NET drafts:
 TCP, IPv6 router firewall leases, source-bound UDP interface candidates, initial

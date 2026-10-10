@@ -1,9 +1,12 @@
 # Open-issue completion audit — 2026-10-10
 
-The goal is to complete every open issue, including cross-repository work and
-release evidence. Implementation, passing focused tests, a completed platform
-matrix, physical-network results, and release approval are separate requirements.
-An issue closes only when its own requirements are proved.
+The current product roadmap is [#45](https://github.com/IAFahim/Pinhole.Net/issues/45),
+mirrored in the [minimal SDK plan](minimal-sdk-roadmap.md): a small host/join API,
+reuse first, direct UDP/TCP, NAT punching and automatic routing. The original
+all-open-issues audit is retained below, with superseded planning mandates
+distinguished from completed implementation. Existing code is not deprecated.
+Implementation, focused checks, platform CI, physical networks and release
+approval remain distinct evidence; a planning closure proves none of them.
 
 ## Completed issues
 
@@ -15,32 +18,49 @@ An issue closes only when its own requirements are proved.
 | #44: same-endpoint UDP restoration | Both TCP-enabled/disabled real-socket variants passed in all six functional jobs. Initial/restored UDP, endpoints, object identity and data assertions remain. Closed on 2026-10-10. |
 | #38: protocol specification | `docs/PROTOCOL.md` covers all requested frames, handshake flow/admission, canonical DH/HKDF labels and exact OKM offsets, nonce/AAD/replay/epoch rules, tickets and candidate encoding. Independent crypto vectors and real C#↔Kotlin interop verify the layouts. Closed on 2026-10-10. |
 
-## Remaining scope
+## Superseded planning scope
+
+| Issue | Disposition |
+|---|---|
+| #15: connection-power audit | Closed as superseded/not planned. Its measured relay-selection question moves to #28/#27; historical plaintext, identity, discovery and PMTU claims are outdated. |
+| #23: reliability roadmap | Closed as superseded/not planned. #45 controls product scope; its security, compatibility, recovery, managed C# and release obligations remain in the retained issues. |
+| #40: every technique across core/phone | Closed as superseded/not planned. Direct UDP/TCP stays required; manual parity/prediction/gateway work is conditional on measured gaps. Candidate/recovery/platform needs move to #28/#31/#33/#43. |
+
+These three closures are not implementation completions. The nineteen original
+open issues were audited individually; sixteen remain open, plus the new #45.
+OpusVoice and `YouAnd-I/OpusVoice.Receiver` had no open issues at this audit.
+Phone draft PR #4 remains open; the planning change does not merge or close it.
+
+## Remaining scope under #45
 
 This table identifies the next missing evidence or implementation; it does not
 replace the full acceptance checklist in each GitHub issue.
 
 | Issue | Remaining requirements |
 |---|---|
-| #14: blobs | Complete extended file/directory/loss/recovery/security matrix, throughput canary and per-chunk allocation evidence. |
-| #15: connection-power audit | Measure and decide the optional latency-based relay selection; update historical claims for current identity, encryption and PMTU behavior. |
+| #14: blobs | Optional application layer outside the first SDK MVP; complete its extended transfer matrix, throughput canary and allocation evidence before a blob release. |
 | #17: testing discipline | Finish per-test trace files and changelog automation; attach evidence for topology/API/capacity gates. Warnings-as-errors is now the solution default. |
-| #20: component selection and congestion control | Document maintained managed-component evaluation, then complete sustained/mixed-RTT/TCP-competition and response-byte/aggregate-budget evidence. |
-| #23: reliability roadmap | Remains open until all named child issues and release gates are complete. |
+| #20: component selection and congestion control | Compare maintained managed SDK components against the current backend. Custom blob control remains conditional/optional; retain applicable wire-load/fairness evidence. |
 | #24: independent security/recovery review | Record and fix all material findings, verify fixes, and complete independent review on the final candidate. The separate AI review stopped before completion; it is not a completed human audit or safety certification. |
 | #25: diagnostics | Complete cause-specific events, reproducible JSON reports, latency distributions/cohorts, redaction and opt-in collection guidance. |
 | #26: real network topology | Run pinned Patchbay/kernel configurations and actual HTTPS/TURN servers, including UDP blocking, failure capture and cleanup. Portable simulation is additional evidence. |
 | #27: bottleneck baselines | The per-chunk worker dispatch and stale-path retry state are fixed; all six performance jobs pass in subsequent matrices without lowering floors. Complete sustained seed distributions, asymmetry/reorder/burst cases and actual TCP competition. |
-| #28: candidate racing | Verify bounded shared-deadline racing, actual HTTPS/proxy/TLS negative cases, cancellation and authenticated upgrade/fallback. |
-| #29: identity and rediscovery | Audit complete full-key/freshness/provider/privacy/restart requirements against current tests and real infrastructure. Both-direction roaming regression is fixed. |
+| #28: candidate racing | Add SDK backend agreement to bounded UDP/TCP/relay racing, authenticated completion, cancellation and measured route improvement; retain real HTTPS/proxy/TLS checks. |
+| #29: identity and rediscovery | Add account-free code lookup and authenticated signaling/key binding to full-key/freshness/provider/privacy/restart requirements. Both-direction roaming regression is fixed. |
 | #30: relay failover | Finish independent provider/domain, DNS/TLS/proxy, allocation-change and long-outage evidence; only authenticated definitive TURN errors may condemn allocations. |
 | #31: logical connection recovery | Complete all stated route/family/MTU/suspend/outage cases and platform evidence with the same connection object and bounded retry work. |
-| #32: automatic verified resume | Verify every handshake interruption, directory/counter/checkpoint invariant, prolonged outage, restart, tamper and cancellation case. Recovery allowance now has deterministic clock checks and a shaped restart scenario. |
+| #32: automatic verified resume | Optional application layer; retain checkpoint/crypto/durable-resume requirements for blob releases. Reliable channels alone do not supply verified resume. |
 | #33: desktop/mobile matrix | Declare and test supported runtime/AOT/device combinations and physical network/lifecycle transitions. OPPO Android 16 LTE and same-session Wi-Fi/LTE/VPN transport checks pass; audio, suspend and other devices remain. |
 | #34: bounded resources and soaks | Complete 24-hour and 72-hour runs with declared budgets, varied seeds, all required workloads and resource ledgers. Existing short tests and a harness do not prove long-run completion. |
-| #35: release gate | Consolidate exact-candidate compatibility/security/platform/performance/soak evidence, correct reliability claims, verify package contents, and prepare a canary/rollback. Owner approval remains required for a release. |
-| #40: all connection techniques | Kotlin outgoing TCP fallback, path labels and scoped IPv6 are in draft PR #4 with interop/device evidence. Finish interface/signaling/IPv6-pinhole/NAT-prediction/TURN parity, receiver firewall/listener integration, remaining physical network tests and release evidence. The full parent checklist remains authoritative. |
-| #43: direct TCP | Kotlin outgoing transport/path labels/scoped IPv6 pass local socket and interop checks. Complete prior-version compatibility/performance, source-bound OS simultaneous-open evaluation and final phone CI evidence. |
+| #35: release gate | Apply exact-candidate compatibility/security/platform/performance/soak and managed/license evidence to shipped packages; keep canary/rollback and owner approval. Optional blob work blocks blob releases, not the connection-only MVP by association. |
+| #43: direct TCP | Required capability. Current core/phone tests and CI pass; finish source-bound OS simultaneous-open evaluation and supported integration evidence. TURN/TCP is not direct peer TCP. |
+
+The current core baseline `4f3caea` passed **20/20** jobs in
+[run 38040052589](https://github.com/IAFahim/Pinhole.Net/actions/runs/38040052589).
+The running frozen-candidate 24h soak and queued 72h stage cover two concurrent
+file transfers, verified cancel/resume and short blackouts. They remain useful
+baseline observations; they do not validate a new WebRTC/signaling implementation
+or all #34 roaming, relay restart and prolonged-outage workloads.
 
 ## Current implementation and validation
 
