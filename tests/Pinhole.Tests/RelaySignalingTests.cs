@@ -260,15 +260,22 @@ public sealed class RelaySignalingTests
         Task<PinholeConnection> dial = a.ConnectAsync(RelayTicket(b), stop.Token);
         await Until(() => a.Engine.Lookup(b.PeerId) is { PeerCandidatesReceived: true });
         ConnState state = a.Engine.Lookup(b.PeerId)!;
-        PinholeCandidate[] before = state.PeerCandidates.ToArray();
+        // Honest retries parse the same relay identity into a new byte array.
+        // Compare every candidate field by value, including its key bytes, so that
+        // reference identity cannot turn an unchanged target into a false failure.
+        var before = CandidateValues();
         byte[] original = relay.Traffic.First(d => d.Payload[0] == 0x55 && d.Source.SequenceEqual(b.EndpointPublicKey!)).Payload;
         long rejected = state.Public!.FramesRejected;
         relay.Deliver(b.EndpointPublicKey!, a.EndpointPublicKey!, original);
         byte[] corrupted = (byte[])original.Clone(); corrupted[^1] ^= 1;
         relay.Deliver(b.EndpointPublicKey!, a.EndpointPublicKey!, corrupted);
         await Until(() => state.Public.FramesRejected >= rejected + 2);
-        Assert.Equal(before, state.PeerCandidates.ToArray()); Assert.False(dial.IsCompleted);
+        Assert.Equal(before, CandidateValues()); Assert.False(dial.IsCompleted);
         stop.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dial);
+
+        (CandidateKind, IPEndPoint, IPEndPoint?, string?, string?, Uri?, string?)[] CandidateValues() =>
+            state.PeerCandidates.Select(c => (c.Kind, c.Address, c.RelayServer, c.Username, c.Credential,
+                c.RelayUrl, c.RelayKey is { } key ? Convert.ToHexString(key) : null)).ToArray();
     }
 
     [Fact]
