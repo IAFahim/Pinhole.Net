@@ -69,8 +69,10 @@ after the fix.
 
 **Fixes (product, semantics preserved):**
 - `TcpTransport.ConnectAsync`: a dial that produced no link removes its
-  `_attempts` entry on failure; successful dials keep it. Concurrent dials
-  remain impossible (`_dialing`).
+  `_attempts` entry on failure; successful dials keep it. The endpoint's
+  `_dialing` guard stays owned through greeting and cleanup, then is released
+  atomically with failed throttle cleanup. Socket reservations transfer to the
+  link table without counting a handshaking socket twice against `MaxLinks`.
 - `NodeEngine.TryTcpPathsAsync`: the single 5 s `LastTcpAttempt` gate is
   split — a wholly failed batch backs off 1 s (batches serialize via
   `TcpDialing`; punch pace is 200 ms), while a batch that **established a
@@ -87,6 +89,11 @@ after the fix.
 - Full suite net10.0/net8.0 in this checkout: green (see PR checks for CI).
 - Assertions unchanged everywhere: `Assert.NotNull(TcpListeningPort)`, the
   exact-exception pinned-key asserts, oversized-frame close/EOF asserts.
+- Concurrent-retry regression: a handshaking socket occupies one link slot,
+  overlapping attempts are refused, cancellation releases the reservation, and
+  sixteen immediate retries establish one shared link.
+- Dual-stack port probing keeps UDP bound while checking TCP and stops after
+  128 attempts with a clear error instead of looping indefinitely.
 
 ## Not addressed (documented for triage)
 

@@ -13,25 +13,29 @@ internal static class SidecarSockets
 {
     public static IPEndPoint ProbeDualStackEndpoint(IPAddress address)
     {
-        while (true)
+        const int maximumAttempts = 128;
+        SocketException? lastFailure = null;
+        for (int attempt = 0; attempt < maximumAttempts; attempt++)
         {
-            int port;
-            using (var udp = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp))
-            {
-                udp.Bind(new IPEndPoint(address, 0));
-                port = ((IPEndPoint)udp.LocalEndPoint!).Port;
-            }
+            using var udp = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            udp.Bind(new IPEndPoint(address, 0));
+            int port = ((IPEndPoint)udp.LocalEndPoint!).Port;
             try
             {
                 using var tcp = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                if (address.AddressFamily == AddressFamily.InterNetworkV6) tcp.DualMode = true;
+                if (OperatingSystem.IsWindows()) tcp.ExclusiveAddressUse = true;
                 tcp.Bind(new IPEndPoint(address, port));
                 return new IPEndPoint(address, port);
             }
-            catch (SocketException)
+            catch (SocketException ex)
             {
                 // The number sits in an excluded TCP range; draw another one.
+                lastFailure = ex;
             }
         }
+        throw new InvalidOperationException(
+            $"Could not find a port accepting both UDP and TCP after {maximumAttempts} attempts.", lastFailure);
     }
 
     /// <summary>Binds a node whose TCP sidecar must be listening. A rare

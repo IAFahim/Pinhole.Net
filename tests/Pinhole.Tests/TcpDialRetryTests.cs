@@ -16,6 +16,51 @@ public sealed class TcpDialRetryTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(12);
 
     [Fact]
+    public async Task ConcurrentRetries_ShareOneLinkAndReleaseFailedReservation()
+    {
+        var sink = new TcpListener(IPAddress.Loopback, 0);
+        sink.Start();
+        var endpoint = (IPEndPoint)sink.LocalEndpoint;
+        using var transport = new TcpTransport(new IPEndPoint(IPAddress.Loopback, 0), (_, _) => { }, _ => { });
+        using var firstAttempt = new CancellationTokenSource();
+        try
+        {
+            Task<TcpLink?> pending = transport.ConnectAsync(endpoint, firstAttempt.Token);
+            using var accepted = await sink.AcceptSocketAsync().WaitAsync(Timeout);
+            // Receiving the preface proves AddLink already owns this socket, while
+            // the silent sink keeps greeting incomplete. It still occupies one slot.
+            using var stream = new NetworkStream(accepted, ownsSocket: false);
+            var preface = new byte[TcpTransport.Preface.Length];
+            await stream.ReadExactlyAsync(preface).AsTask().WaitAsync(Timeout);
+            Assert.Equal(1, transport.LiveLinks);
+
+            TcpLink?[] blocked = await Task.WhenAll(Enumerable.Range(0, 16)
+                .Select(_ => transport.ConnectAsync(endpoint, CancellationToken.None))).WaitAsync(Timeout);
+            Assert.All(blocked, link => Assert.Null(link));
+
+            firstAttempt.Cancel();
+            Assert.Null(await pending.WaitAsync(Timeout));
+            Assert.Equal(0, transport.LiveLinks);
+            sink.Stop();
+
+            using var peer = new TcpTransport(endpoint, (_, _) => { }, _ => { });
+            Assert.Equal(endpoint.Port, peer.ListeningPort);
+            TcpLink?[] retries = await Task.WhenAll(Enumerable.Range(0, 16)
+                .Select(_ => transport.ConnectAsync(endpoint, CancellationToken.None))).WaitAsync(Timeout);
+            TcpLink link = Assert.Single(retries.OfType<TcpLink>().Distinct());
+            Assert.True(link.IsReady);
+            Assert.Equal(1, transport.LiveLinks);
+            link.Dispose();
+            Assert.Equal(0, transport.LiveLinks);
+        }
+        finally
+        {
+            firstAttempt.Cancel();
+            sink.Stop();
+        }
+    }
+
+    [Fact]
     public async Task FailedDial_DoesNotFreezeTheEndpointForTheSuccessThrottle()
     {
         // Phase 1 — a silent acceptor: the socket is accepted but never greets, so
