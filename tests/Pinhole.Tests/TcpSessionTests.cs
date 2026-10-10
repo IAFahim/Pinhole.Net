@@ -24,7 +24,8 @@ public sealed class TcpSessionTests
     public async Task TcpOnly_AuthenticatesExchangesDatagramsAndClosesThePeer(string address)
     {
         IPAddress ip = IPAddress.Parse(address);
-        await using var listener = await PinholeNode.BindAsync(Options(ip));
+        await using var listener = await SidecarSockets.BindWithSidecarAsync(ip,
+            endpoint => Options(ip) with { Bind = endpoint });
         await using var dialer = await PinholeNode.BindAsync(Options(ip));
         var ticket = new ConnectionString(listener.PeerId,
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(ip, listener.LocalPort))], staticKey: listener.StaticPublicKey);
@@ -82,7 +83,8 @@ public sealed class TcpSessionTests
     [InlineData(true)]
     public async Task MalformedLengthOrPlaintextStranger_CannotCreateASession(bool plaintext)
     {
-        await using var node = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
+        await using var node = await SidecarSockets.BindWithSidecarAsync(IPAddress.Loopback,
+            endpoint => Options(IPAddress.Loopback) with { Bind = endpoint });
         using var socket = new TcpClient();
         await socket.ConnectAsync(IPAddress.Loopback, node.TcpListeningPort!.Value).WaitAsync(Timeout);
         NetworkStream stream = socket.GetStream();

@@ -119,6 +119,12 @@ internal sealed class TcpTransport : IDisposable
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException or IOException)
         {
             connected?.Dispose();
+            // A dial that never produced a link must not leave the endpoint in the
+            // five-second throttle table: dial budgets are only seconds long, so one
+            // failed round (refused connect, silent peer, slow greeting) would freeze
+            // every retry out of the budget. Overlap is still impossible (_dialing),
+            // and successful dials keep the throttle entry.
+            lock (_gate) _attempts.Remove(key);
             return null;
         }
         finally

@@ -23,21 +23,11 @@ public sealed class TcpSocketHardeningTests
 
     /// <summary>The sidecar reuses the UDP socket's numeric port; on Windows that TCP
     /// port can sit in an excluded range (Hyper-V reserves blocks), which legitimately
-    /// leaves TcpListeningPort null. These cases need the sidecar, so retry on a fresh
-    /// ephemeral port rather than treating the miss as a transport defect.</summary>
-    private static async Task<PinholeNode> BindWithSidecarAsync(IPAddress address, IPEndPoint? bind = null)
-    {
-        for (int attempt = 0; ; attempt++)
-        {
-            PinholeNode node = await PinholeNode.BindAsync(bind is null ? Options(address) : Options(address) with { Bind = bind });
-            if (node.TcpListeningPort is not null || attempt >= 7)
-            {
-                return node;
-            }
-            await node.DisposeAsync();
-            await Task.Delay(150); // a busy runner's port pressure is transient
-        }
-    }
+    /// leaves TcpListeningPort null. These cases need the sidecar, so probe for a port
+    /// both stacks accept before binding rather than treating the miss as a transport
+    /// defect.</summary>
+    private static Task<PinholeNode> BindWithSidecarAsync(IPAddress address, IPEndPoint? bind = null)
+        => SidecarSockets.BindWithSidecarAsync(address, endpoint => Options(address) with { Bind = endpoint }, bind);
 
     [Theory]
     [InlineData(8193)]   // one past TcpTransport.MaxFrame
