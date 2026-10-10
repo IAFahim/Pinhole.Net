@@ -234,6 +234,12 @@ internal sealed partial class NodeEngine : IDisposable
     private int _networkWatchHooked;
     private Task? _maintenance; // one scheduler for the whole node (path validation + STUN refresh)
     private long _nextStunRefreshTicks; // maintenance deadline; 0 = refresh disabled
+    // Receive-path forensics (Interlocked/volatile): a dial whose peer answers everything
+    // yet completes nothing is only diagnosable by seeing whether the recv loop itself is
+    // alive and whether dispatch is dropping frames for absent connections.
+    private long _recvDatagrams;
+    private long _recvLastTick;
+    private long _noConnDrops;
     private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
@@ -2658,6 +2664,9 @@ internal sealed partial class NodeEngine : IDisposable
                 continue;
             }
 
+            Interlocked.Increment(ref _recvDatagrams);
+            Volatile.Write(ref _recvLastTick, Environment.TickCount64);
+
             if (_rawReceive is not null)
             {
                 // Raw iroh packets can have any first byte, including Pinhole's frame tags.
@@ -2786,6 +2795,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             if (type != FrameType.Punc || !_options.Listen || _disposed)
             {
+                Interlocked.Increment(ref _noConnDrops);
                 return;
             }
 
@@ -4241,6 +4251,13 @@ internal sealed partial class NodeEngine : IDisposable
               + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
               + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}"
             : "no conn";
+
+    /// <summary>Receive-path liveness for stuck-dial forensics: datagrams the recv loop has
+    /// taken, how long ago the last one landed, and how many frames dispatch dropped for
+    /// want of a connection. Separates a frozen loop from a deaf socket from a lost table
+    /// entry in one line.</summary>
+    internal string RecvDiagnostics() =>
+        $"rx={Volatile.Read(ref _recvDatagrams)} last-rx-ago={(_recvLastTick == 0 ? -1 : Environment.TickCount64 - Volatile.Read(ref _recvLastTick))}ms no-conn-drops={Volatile.Read(ref _noConnDrops)}";
 
     // ------------------------------------------------------------------ dispose
 

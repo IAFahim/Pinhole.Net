@@ -303,6 +303,8 @@ public sealed class RediscoveryTests
             _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
             _output.WriteLine($"handshake a2-side: {a2.Engine.HandshakeSummary(b2.PeerId)}");
             _output.WriteLine($"handshake b2-side: {b2.Engine.HandshakeSummary(a2.PeerId)}");
+            _output.WriteLine($"recv a2: {a2.Engine.RecvDiagnostics()}");
+            _output.WriteLine($"recv b2: {b2.Engine.RecvDiagnostics()}");
             throw;
         }
 
@@ -323,6 +325,8 @@ public sealed class RediscoveryTests
             _output.WriteLine($"b2 conns: {string.Join(",", b2.Connections.Select(c => $"{c.State}/{c.Path.Kind}@{c.Path.Remote}"))}");
             _output.WriteLine($"handshake a2-side: {a2.Engine.HandshakeSummary(b2.PeerId)}");
             _output.WriteLine($"handshake b2-side: {b2.Engine.HandshakeSummary(a2.PeerId)}");
+            _output.WriteLine($"recv a2: {a2.Engine.RecvDiagnostics()}");
+            _output.WriteLine($"recv b2: {b2.Engine.RecvDiagnostics()}");
             throw;
         }
     }
