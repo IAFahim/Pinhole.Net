@@ -41,6 +41,10 @@ public sealed class TcpDialRetryTests
             firstAttempt.Cancel();
             Assert.Null(await pending.WaitAsync(Timeout));
             Assert.Equal(0, transport.LiveLinks);
+            // Windows exclusive listeners cannot reclaim a port while an accepted
+            // socket from the previous listener still owns it.
+            stream.Dispose();
+            accepted.Dispose();
             sink.Stop();
 
             using var peer = new TcpTransport(endpoint, (_, _) => { }, _ => { });
