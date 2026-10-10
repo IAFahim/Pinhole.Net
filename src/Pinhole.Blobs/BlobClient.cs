@@ -259,24 +259,25 @@ public static class BlobClient
 
     /// <summary>One monotonic allowance shared by every dial, stream, and outage in
     /// this download. Healthy transfers do not spend it; recovery never resets it.</summary>
-    private sealed class RecoveryBudget(TimeSpan timeout)
+    internal sealed class RecoveryBudget(TimeSpan timeout, Func<long>? clock = null)
     {
         private readonly long _limitMs = (long)Math.Ceiling(timeout.TotalMilliseconds);
         private long _spentMs;
         private long _sinceMs = -1;
+        private long Now => clock?.Invoke() ?? Environment.TickCount64;
 
         public TimeSpan Remaining => TimeSpan.FromMilliseconds(Math.Max(0,
-            _limitMs - _spentMs - (_sinceMs < 0 ? 0 : Environment.TickCount64 - _sinceMs)));
+            _limitMs - _spentMs - (_sinceMs < 0 ? 0 : Now - _sinceMs)));
 
         public void Begin(long? since = null)
         {
-            if (_sinceMs < 0) _sinceMs = since ?? Environment.TickCount64;
+            if (_sinceMs < 0) _sinceMs = since ?? Now;
         }
 
         public void End()
         {
             if (_sinceMs < 0) return;
-            _spentMs += Environment.TickCount64 - _sinceMs;
+            _spentMs += Now - _sinceMs;
             _sinceMs = -1;
             Check();
         }
@@ -290,7 +291,7 @@ public static class BlobClient
             ? ordinaryLimitMs : Math.Min(ordinaryLimitMs, (long)Remaining.TotalMilliseconds);
 
         public TimeoutException Exhausted(Exception? inner = null) => new(
-            $"the transfer could not be re-established within {timeout.TotalSeconds:0}s of disruptions", inner);
+            $"the transfer could not be re-established within {timeout.TotalSeconds:0.###}s of disruptions", inner);
     }
 
     // ---------------------------------------------------------------- stream downloader

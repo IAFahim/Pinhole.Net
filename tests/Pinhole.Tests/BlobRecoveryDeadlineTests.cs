@@ -14,6 +14,59 @@ public sealed class BlobRecoveryDeadlineTests
     private static readonly TimeSpan Ceiling = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public void HealthyIntervals_DoNotSpendOrResetRecoveryAllowance()
+    {
+        long now = 100;
+        var budget = new BlobClient.RecoveryBudget(TimeSpan.FromSeconds(1), () => now);
+        budget.Begin();
+        now += 100;
+        budget.End();
+
+        now += 300_000; // Five minutes of healthy progress after the first dial.
+        budget.Check();
+        Assert.Equal(TimeSpan.FromMilliseconds(900), budget.Remaining);
+
+        budget.Begin();
+        now += 899;
+        budget.End();
+        Assert.Equal(TimeSpan.FromMilliseconds(1), budget.Remaining);
+        now += 300_000;
+        Assert.Equal(TimeSpan.FromMilliseconds(1), budget.Remaining);
+    }
+
+    [Fact]
+    public void RepeatedDisruptions_ExpireAtTheirSharedAllowance()
+    {
+        long now = 100;
+        var budget = new BlobClient.RecoveryBudget(TimeSpan.FromSeconds(1), () => now);
+        budget.Begin();
+        now += 600;
+        budget.End();
+        now += 300_000;
+
+        budget.Begin();
+        now += 300;
+        budget.Begin(); // A retry inside this outage cannot restart its clock.
+        now += 99;
+        budget.Check();
+        Assert.Equal(TimeSpan.FromMilliseconds(1), budget.Remaining);
+        now++;
+        Assert.Throws<TimeoutException>(budget.Check);
+    }
+
+    [Fact]
+    public void DelayedPathLossObservation_CountsTimeSinceLastVerifiedProgress()
+    {
+        long now = 100;
+        var budget = new BlobClient.RecoveryBudget(TimeSpan.FromMilliseconds(750), () => now);
+        long lastVerified = now;
+        now += 750;
+        budget.Begin(lastVerified);
+        Assert.Throws<TimeoutException>(budget.Check);
+        Assert.Equal(TimeSpan.Zero, budget.Remaining);
+    }
+
+    [Fact]
     public async Task UnreachableProvider_RecoveryBudgetCancelsThePendingDial()
     {
         string dir = TempDir();
@@ -108,13 +161,13 @@ public sealed class BlobRecoveryDeadlineTests
     public async Task HealthyTimeBeforeProviderRestart_DoesNotSpendRecoveryAllowance()
     {
         string dir = TempDir();
-        using var stop = new CancellationTokenSource(Ceiling + Ceiling);
+        using var stop = new CancellationTokenSource(TestBudget.Scenario + Ceiling);
         Task<BlobDownloadResult>? download = null;
         try
         {
             using var lab = new VirtualLab();
             byte[] seed = RandomNumberGenerator.GetBytes(32);
-            byte[] expected = TestDispose.Pattern(512 * 1024, 0xA3);
+            byte[] expected = TestDispose.Pattern(2 * 1024 * 1024, 0xA3);
             string source = Path.Combine(dir, "asset.bin");
             await File.WriteAllBytesAsync(source, expected);
             BlobServeOptions serveOptions = new()
@@ -132,20 +185,43 @@ public sealed class BlobRecoveryDeadlineTests
                 if (p.VerifiedBytes >= expected.Length / 2) halfDone.TrySetResult();
             });
             var watch = Stopwatch.StartNew();
-            // 1.5 s, not 1 s: the property under test is WHEN the allowance starts
-            // (at the disruption, not at transfer start), while the re-dial rides a
-            // 20 ms-delay bottleneck — CI runners with a scheduling hiccup need the
-            // extra half second. The healthy-half floor (~2.1 s at the 1 Mbps cap)
-            // still exceeds it, so the watch assertion keeps its margin.
-            TimeSpan allowance = TimeSpan.FromSeconds(1.5);
+            // Half the file takes at least 8.4 s at 1 Mbps, exceeding this allowance.
+            // Clock accounting is also tested above without scheduler/timer noise;
+            // this scenario verifies actual provider replacement and checkpoint reuse.
+            TimeSpan allowance = TimeSpan.FromSeconds(5);
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
-                Options(lab) with { RecoveryTimeout = allowance }, stop.Token);
-            await halfDone.Task.WaitAsync(Ceiling);
+                Options(lab) with
+                {
+                    RecoveryTimeout = allowance,
+                    // The blackout fixtures use one 20 ms probe, shorter than this
+                    // link's 40 ms RTT. Give healthy traffic a valid probe budget here.
+                    NodeOptions = ClientOptions(lab) with
+                    {
+                        PathValidationIdle = TimeSpan.FromSeconds(2),
+                        PathValidationProbeInterval = TimeSpan.FromSeconds(1),
+                        PathValidationMaxUnansweredProbes = 3,
+                    },
+                }, stop.Token);
+            Task first = await Task.WhenAny(halfDone.Task, download).WaitAsync(TestBudget.Scenario);
+            if (first == download)
+            {
+                await download; // Report a transfer failure immediately, before the progress wait.
+                Assert.Fail("the transfer finished before the provider-restart trigger");
+            }
             Assert.True(watch.Elapsed > allowance, "the healthy portion must exceed the recovery allowance");
             await server.DisposeAsync();
             await using BlobServer successor = await BlobServer.ServeAsync(source, serveOptions);
 
-            BlobDownloadResult result = await download.WaitAsync(Ceiling);
+            BlobDownloadResult result;
+            try { result = await download.WaitAsync(TestBudget.Scenario); }
+            catch (TimeoutException ex)
+            {
+                Assert.Fail($"provider-restart recovery failed after {watch.Elapsed}: {ex}; "
+                    + $"successor accepted={successor.ConnectionsAccepted}, chunks={successor.ChunksServed}; "
+                    + $"network={lab.Net.Counters()}; "
+                    + $"handshakes={string.Join("; ", successor.Node.Connections.Select(c => successor.Node.Engine.HandshakeSummary(c.PeerId)))}");
+                throw;
+            }
             Assert.True(result.Resumed);
             Assert.True(successor.ConnectionsAccepted >= 1);
             Assert.Equal(expected, await File.ReadAllBytesAsync(result.Path));
