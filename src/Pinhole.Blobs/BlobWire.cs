@@ -462,11 +462,12 @@ internal static class BlobWire
     /// blob layer's job, so bounded pathlessness is a wait, not a death — the frame goes
     /// out the moment a path exists again. Only a Closed connection (the peer is gone) or
     /// an expired <see cref="RideOutBudget"/> rethrows.</summary>
-    internal static void SendRidingOutPathlessness(Pinhole.PinholeConnection conn, byte[] wire, CancellationToken ct)
+    internal static async ValueTask SendRidingOutPathlessnessAsync(Pinhole.PinholeConnection conn, byte[] wire, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (true)
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
                 conn.Send(wire);
@@ -474,8 +475,7 @@ internal static class BlobWire
             }
             catch (InvalidOperationException) when (conn.State != Pinhole.PinholeConnectionState.Closed && sw.Elapsed < RideOutBudget)
             {
-                ct.ThrowIfCancellationRequested();
-                Thread.Sleep(RideOutPace);
+                await Task.Delay(RideOutPace, ct).ConfigureAwait(false);
             }
         }
     }
