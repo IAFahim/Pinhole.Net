@@ -158,11 +158,19 @@ public sealed class BufferingTests
         await atDialer.CloseAsync();
         await atListener.Closed.WaitAsync(Timeout);
 
-        // EOF only after the buffered three come out.
-        Assert.Equal("one"u8.ToArray(), (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
-        Assert.Equal("two"u8.ToArray(), (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
-        Assert.Equal("three"u8.ToArray(), (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
-        Assert.Null(await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout));
+        // EOF only after the buffered three come out. Collect with labels so a rare
+        // ordering failure names its mode (early EOF? a fourth frame? a swap?) instead
+        // of leaving a bare assert-equal behind.
+        string[] reads = new string[4];
+        for (int i = 0; i < reads.Length; i++)
+        {
+            reads[i] = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout)) is { } payload
+                ? Encoding.UTF8.GetString(payload.Span)
+                : "<eof>";
+        }
+
+        Assert.True(new[] { "one", "two", "three", "<eof>" }.SequenceEqual(reads),
+            $"drain order was [{string.Join(", ", reads)}]");
 
         int yielded = 0;
         await foreach (ReadOnlyMemory<byte> _ in atListener.ReadAllAsync()) { yielded++; }
