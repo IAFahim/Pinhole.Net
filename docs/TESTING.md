@@ -361,25 +361,51 @@ within a connection by design and distinct across session recreations.
 `MixedWorkloadSoak` is skipped unless `PINHOLE_SOAK_MINUTES` names a duration:
 
 ```sh
-PINHOLE_SOAK_MINUTES=60 \
-  dotnet test --filter "FullyQualifiedName~MixedWorkloadSoak"
+PINHOLE_SOAK_MINUTES=60 PINHOLE_SOAK_SEED=20640 \
+  dotnet test tests/Pinhole.Tests -c Release -f net10.0 \
+    --filter "FullyQualifiedName~MixedWorkloadSoak"
 ```
 
-It runs a mixed workload — shaped-link downloads, brief mid-transfer blackouts,
-cancel-and-resume cycles — under a fixed RNG seed (0x50A0; a failing soak is
-reproducible by re-running the same duration). Every 60 s it appends a line to
-`$TMPDIR/pinhole-soak/<timestamp>-<id>/soak-observations.csv`:
-`elapsedSec,heapMiB,threads,handles,liveSockets,budgetUsed,completed,cancelled,errors`.
-The CSV is written after warmup, at each minute and on completion; already-written
-samples survive a process crash or runner kill. Every cycle asserts the original
-socket count and zero flow-budget debt. Completion also requires zero errors and
-nonzero workload. Heap, thread and handle samples support resource review; the
-soak does not replace the dedicated cancellation heap-growth gate.
+Two downloaders share an 8 Mbit/s shaped link and a private 4 MiB flow budget.
+Each cycle combines an ordinary download with an ordinary download, a 600–1400 ms
+blackout after verified progress, or cancellation followed by an actual verified
+checkpoint resume. Every completed file is compared byte for byte and deleted;
+disk usage stays bounded. All three cases warm up before measurement. The first
+three measured cycles cover each case, then the recorded seed chooses the mix.
+`PINHOLE_SOAK_SEED` defaults to decimal 20640; it also determines the file bytes.
+
+Every 60 seconds, and at completion or failure, the harness appends raw samples
+to `$TMPDIR/pinhole-soak/<timestamp>-<id>/soak-observations.csv`. Set
+`PINHOLE_SOAK_REPORT_DIR` to choose a persistent report directory, and
+`PINHOLE_SOAK_COMMIT` to record the source commit. `metadata.json` records runtime,
+architecture, assembly hashes, coverage, warm baseline and budgets before the
+measured loop starts. A failure writes its seed and cycle to `failure.json`.
+Previously written samples survive a process crash or runner kill.
+
+Each cycle requires the original live-socket count, zero provider connections
+and serving tasks, and zero private/shared flow-budget debt. Post-collection
+samples track heap, process threads, handles, active managed timers, pending
+thread-pool work, CPU time, cumulative allocations, verified bytes and workload
+counters. The initial budgets are baseline plus 16 MiB heap, 16 threads,
+32 handles and 32 timers, with at most 64 pending thread-pool items. Average CPU
+allows four times warmup usage with a one-core minimum; allocation bytes per
+verified byte allow four times warmup usage with a 128-byte minimum. Both exact
+limits are stored in the metadata.
+
+After five minutes of settling and at least one hour of samples, linear leak
+slopes must stay below 2 MiB heap/hour, one thread/hour, two handles/hour and one
+timer/hour. A short smoke run validates the harness and absolute budgets; it
+does not exercise the long-run slope gate or establish release reliability.
+These initial budgets need review with the observations before release. The
+existing eight-cycle cancellation heap gate remains unchanged.
 
 ### What this does NOT yet cover (open #34 remainder)
 
-- **24 h / 72 h scheduled soaks** — the harness exists; the long runs are release
-  evidence (#35), run on real hardware with the CSV attached.
+- **24 h / 72 h scheduled soaks** — require completed runs and attached raw
+  observations. This workload covers concurrent transfers, cancellation/resume
+  and brief blackouts in the portable lab. Repeated roaming, relay restarts,
+  intermittent long outages and real OS networking need additional long-run
+  coverage; one timed run does not complete #34.
 - **`NodeEngine.MaxConnections` flood** — COVERED: `PinholeOptions.MaxConnectionsOverride`
   (internal, like the other test seams) shrinks the stranger-flood bound, and
   `AttackTests.MaxConnectionsFlood_RealHandshakes_RefusesOverflowAndRecovers` proves
