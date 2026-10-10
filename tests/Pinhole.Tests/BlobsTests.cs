@@ -876,6 +876,7 @@ public sealed class BlobsTests
                     _crypto.MyStaticPublic.CopyTo(pack.AsSpan(49));
                     _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
                     await Sock.SendToAsync(pack, client, ct);
+                    await SendSealedAsync(client, new byte[8], ct, frameType: 0x53);
                     break;
                 }
             }
@@ -953,10 +954,11 @@ public sealed class BlobsTests
         /// <summary>Wraps one blob payload in a genuine engine Data frame — sealed under
         /// the session keys, so the client's engine accepts it; only the inner blob layer
         /// sees hostility.</summary>
-        private async Task SendSealedAsync(EndPoint to, ReadOnlyMemory<byte> blobPayload, CancellationToken ct)
+        private async Task SendSealedAsync(EndPoint to, ReadOnlyMemory<byte> blobPayload, CancellationToken ct,
+            byte frameType = 0x52)
         {
             var frame = new byte[13 + CryptoWire.SealedOverhead + blobPayload.Length];
-            frame[0] = 0x52; // Data
+            frame[0] = frameType;
             BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), PeerId);
             BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(9), EngineToken);
             _crypto!.Send!.Seal(frame.AsSpan(13), frame.AsSpan(0, 13), blobPayload.Span);

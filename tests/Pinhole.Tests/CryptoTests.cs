@@ -668,7 +668,7 @@ public class CryptoTests
 
         /// <summary>Waits for the node's crypto PUNC, derives the same keys, answers PACK.
         /// The node must already be dialing this peer.</summary>
-        public async Task ShakeHandsAsync(PinholeNode node, CancellationToken ct = default)
+        public async Task ShakeHandsAsync(PinholeNode node, CancellationToken ct = default, uint? advertisedToken = null)
         {
             var nodeEp = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
             _crypto = ConnectionCrypto.New(Identity, PeerId, node.PeerId);
@@ -696,7 +696,7 @@ public class CryptoTests
             pack[0] = 0x51;
             BinaryPrimitives.WriteUInt64LittleEndian(pack.AsSpan(1), PeerId);
             BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(9), dialerToken);
-            BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), Token);
+            BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), advertisedToken ?? Token);
             _crypto.MyEphPublic.CopyTo(pack.AsSpan(17));
             _crypto.MyStaticPublic.CopyTo(pack.AsSpan(49));
             _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
@@ -794,6 +794,25 @@ public class CryptoTests
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 2);
         Assert.Equal(1, conn.Stats.DatagramsReceived); // the replay did not double-deliver
+    }
+
+    [Fact]
+    public async Task WireOracle_EditedInitialPackTokenIsHealedOnlyByAuthenticatedTraffic()
+    {
+        await using PinholeNode node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
+        await oracle.ShakeHandsAsync(node, advertisedToken: OraclePeer.Token + 1);
+        PinholeConnection conn = await dial.WaitAsync(Timeout);
+        ConnState state = node.Engine.Lookup(oracle.PeerId)!;
+        Assert.True(state.RemoteTokenAuthenticated);
+        Assert.Equal(OraclePeer.Token, state.RemoteToken);
+        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        conn.Received += p => got.TrySetResult(p.ToArray());
+        await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "real token"u8),
+            new IPEndPoint(IPAddress.Loopback, node.LocalPort));
+        Assert.Equal("real token"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
     [Theory]

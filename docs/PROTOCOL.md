@@ -105,8 +105,10 @@ dials converge on one session instead of colliding.
 
 An unconfirmed key latch from a stale PUNC may be replaced only by a PACK whose
 confirm MAC verifies under the arriving keys, after checking the pinned static
-key. A confirmed session never replaces its keys or peer token from another
-handshake. Malformed, substituted, or downgraded handshake retries are rejected
+key. Key confirmation does not finalize the peer token: the first successfully
+opened sealed frame authenticates its token through AAD, correcting any edited
+token in a plaintext handshake. That token and the keys are then fixed for the
+session. Malformed, substituted, or downgraded handshake retries are rejected
 without closing a confirmed session. The confirm MAC covers the key transcript;
 it does not authenticate the PACK's token fields or source address.
 

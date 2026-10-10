@@ -66,6 +66,7 @@ internal sealed class ConnState
     public bool SymmetricHint;               // peer advertised a symmetric NAT: relay-first scheduling
     public uint RemoteToken;                 // learned from the peer's frames; staleness filter
     public bool RemoteTokenKnown;
+    public bool RemoteTokenAuthenticated;    // Gate: established by a sealed frame's AAD
     public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
     public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
     public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
@@ -2843,7 +2844,8 @@ internal sealed partial class NodeEngine : IDisposable
             }
         }
 
-        if (type is not (FrameType.Punc or FrameType.Pack) && !TokenOk(c, frame))
+        bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck) && c.Crypto is not null;
+        if (type is not (FrameType.Punc or FrameType.Pack) && !sealedFrame && !TokenOk(c, frame))
         {
             return; // post-handshake frame without the connection token: spoofed, drop it
         }
@@ -2852,26 +2854,36 @@ internal sealed partial class NodeEngine : IDisposable
         // decrypts into thread-local scratch prefixed with the untouched header and token, so
         // every handler below parses one layout regardless of the session's existence.
         int wireLength = frame.Length;
-        if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck) && c.Crypto is { } cryptoState)
+        if (sealedFrame && c.Crypto is { } cryptoState)
         {
-            if (!cryptoState.Established)
-            {
-                // We offered crypto (the string pinned a key); an honest peer cannot speak
-                // plaintext here and its sealed frames cannot precede the PACK that carries
-                // our half of the keys. This frame is hostile or reordered beyond recovery.
-                cryptoState.CountRejected();
-                return;
-            }
-
             byte[] scratch = CryptoScratch();
-            frame[..(HeaderSize + CryptoWire.TokenLength)].CopyTo(scratch);
-            if (!cryptoState.Recv!.Open(frame, scratch.AsSpan(HeaderSize + CryptoWire.TokenLength), out int plainLen))
+            int plainLen;
+            lock (c.Gate)
             {
-                cryptoState.CountRejected(); // tampered, replayed, or from a bogus epoch
-                return;
+                // Key confirmation and token confirmation are different facts: a PACK
+                // MAC covers the key transcript, while only a sealed frame binds its token.
+                // Open and confirmation share the handshake lock so a stale sealer cannot
+                // authenticate a frame and then confirm newly superseded keys.
+                if (!cryptoState.Established || frame.Length < HeaderSize + CryptoWire.TokenLength
+                    || c.RemoteTokenAuthenticated && !TokenOk(c, frame))
+                {
+                    cryptoState.CountRejected();
+                    return;
+                }
+
+                frame[..(HeaderSize + CryptoWire.TokenLength)].CopyTo(scratch);
+                if (!cryptoState.Recv!.Open(frame, scratch.AsSpan(HeaderSize + CryptoWire.TokenLength), out plainLen))
+                {
+                    cryptoState.CountRejected(); // a failed tag changes no token or key state
+                    return;
+                }
+
+                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+                c.RemoteTokenKnown = true;
+                c.RemoteTokenAuthenticated = true;
+                cryptoState.MarkPeerConfirmed();
             }
 
-            cryptoState.MarkPeerConfirmed(); // only a key holder can seal a frame that opens
             if (arrival.ViaRelay) RelayPathConfirmed(c, arrival);
             frame = scratch.AsSpan(0, HeaderSize + CryptoWire.TokenLength + plainLen);
         }
@@ -2948,12 +2960,7 @@ internal sealed partial class NodeEngine : IDisposable
         ConnectionCrypto? crypto;
         lock (c.Gate)
         {
-            if (!c.RemoteTokenKnown)
-            {
-                c.RemoteToken = token;
-                c.RemoteTokenKnown = true;
-            }
-            else if (c.RemoteToken != token)
+            if (c.RemoteTokenKnown && c.RemoteToken != token && (c.Crypto is null || c.RemoteTokenAuthenticated))
             {
                 Reject(c, 3, c.RemoteToken, token, arrival);
                 return; // stale frames from an older connection to the same peer ID
@@ -2980,6 +2987,9 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
+            // A malformed/low-order PUNC must not install even a provisional token.
+            c.RemoteToken = token;
+            c.RemoteTokenKnown = true;
             crypto = c.Crypto;
         }
 
@@ -3092,7 +3102,7 @@ internal sealed partial class NodeEngine : IDisposable
                 uint remoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
                 // Confirmation binds the keys, not these token fields. A replayed PACK
                 // with an edited token must not change an authenticated session's token.
-                if (crypto.PeerConfirmed && c.RemoteTokenKnown && remoteToken != c.RemoteToken)
+                if (c.RemoteTokenAuthenticated && remoteToken != c.RemoteToken)
                 {
                     Reject(c, 8, c.RemoteToken, remoteToken, arrival);
                     crypto.CountRejected();
