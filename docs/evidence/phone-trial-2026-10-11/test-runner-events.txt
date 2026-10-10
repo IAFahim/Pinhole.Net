@@ -1,0 +1,53 @@
+10-11 00:35:52.737 I/TestRunner(10839): run started: 2 tests
+10-11 00:35:52.738 I/TestRunner(10839): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:35:52.748 I/TestRunner(10839): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:35:52.753 I/TestRunner(10839): started: encryptedConnectionSurvivesNetworkHandoffs(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:35:52.761 I/TestRunner(10839): finished: encryptedConnectionSurvivesNetworkHandoffs(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:35:52.764 I/TestRunner(10839): run finished: 2 tests, 0 failed, 0 ignored
+10-11 00:39:34.548 I/TestRunner(10910): run started: 1 tests
+10-11 00:39:34.550 I/TestRunner(10910): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:39:41.294 I/PinholeDeviceTest(10910): PASS device=OPPO/CPH2819 android=16 cellular=false relayOnly=false tcpOnly=false path=Direct(address=/192.168.0.187:38373) connectMs=1110 echoes=48 attempts=48 rttP50Ms=8 rttP95Ms=12 rttMaxMs=213
+10-11 00:39:41.314 I/TestRunner(10910): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:39:41.324 I/TestRunner(10910): run finished: 1 tests, 0 failed, 0 ignored
+10-11 00:40:07.678 I/TestRunner(11347): run started: 1 tests
+10-11 00:40:07.679 I/TestRunner(11347): started: encryptedConnectionSurvivesNetworkHandoffs(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:40:07.696 I/TestRunner(11347): finished: encryptedConnectionSurvivesNetworkHandoffs(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:40:07.701 I/TestRunner(11347): run finished: 1 tests, 0 failed, 0 ignored
+10-11 00:40:35.193 I/TestRunner(11383): run started: 1 tests
+10-11 00:40:35.195 I/TestRunner(11383): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:40:46.231 E/TestRunner(11383): java.lang.AssertionError: Echo 0 did not arrive before its deadline
+10-11 00:40:46.237 I/TestRunner(11383): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:40:46.246 I/TestRunner(11383): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:40:55.276 I/TestRunner(11446): run started: 1 tests
+10-11 00:40:55.277 I/TestRunner(11446): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:41:06.311 E/TestRunner(11446): java.lang.AssertionError: Echo 0 did not arrive before its deadline
+10-11 00:41:06.318 I/TestRunner(11446): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:41:06.324 I/TestRunner(11446): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:41:30.909 I/TestRunner(11514): run started: 1 tests
+10-11 00:41:30.911 I/TestRunner(11514): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:42:01.044 I/TestRunner(11514): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:42:01.050 I/TestRunner(11514): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:42:48.630 I/TestRunner(11586): run started: 1 tests
+10-11 00:42:48.632 I/TestRunner(11586): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:43:18.778 I/TestRunner(11586): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:43:18.786 I/TestRunner(11586): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:44:48.777 I/TestRunner(11786): run started: 1 tests
+10-11 00:44:48.779 I/TestRunner(11786): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:45:18.920 I/TestRunner(11786): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:45:18.925 I/TestRunner(11786): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:45:39.215 I/TestRunner(11856): run started: 1 tests
+10-11 00:45:39.216 I/TestRunner(11856): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:46:09.359 I/TestRunner(11856): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:46:09.364 I/TestRunner(11856): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:46:58.532 I/TestRunner(11964): run started: 1 tests
+10-11 00:46:58.533 I/TestRunner(11964): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:47:28.672 I/TestRunner(11964): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:47:28.678 I/TestRunner(11964): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:48:07.892 I/TestRunner(12043): run started: 1 tests
+10-11 00:48:07.894 I/TestRunner(12043): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:48:38.031 I/TestRunner(12043): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:48:38.040 I/TestRunner(12043): run finished: 1 tests, 1 failed, 0 ignored
+10-11 00:49:07.611 I/TestRunner(12108): run started: 1 tests
+10-11 00:49:07.613 I/TestRunner(12108): started: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:49:37.752 I/TestRunner(12108): finished: encryptedRoundTripsAcrossThePhysicalNetwork(org.pinhole.devicetest.PhysicalPeerTest)
+10-11 00:49:37.759 I/TestRunner(12108): run finished: 1 tests, 1 failed, 0 ignored
