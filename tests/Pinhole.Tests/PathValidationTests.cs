@@ -178,16 +178,18 @@ public sealed class PathValidationTests
     public async Task HealthyDirectTraffic_ProducesNoProbes_AndStaysOpen()
     {
         // A wider idle window than the file default: the flood paces at ~20 ms and a single
-        // scheduler stall on a loaded CI runner must not read as a dead path.
-        await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(500)));
-        await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(500)));
+        // scheduler stall on a loaded CI runner must not read as a dead path. 750 ms rather
+        // than 500: on a steal-heavy runner the maintenance loop itself (75 ms ticks) can
+        // stall past half a second, which showed up as a silent side that never probed.
+        await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(750)));
+        await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(750)));
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         // One-way flood for far longer than the idle window: the RECEIVER hears constant
         // direct traffic and must never probe; the SENDER hears nothing, so its probes run —
         // and are answered, which is exactly a healthy one-way stream staying Open.
         var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromMilliseconds(2000))
+        while (sw.Elapsed < TimeSpan.FromMilliseconds(3000))
         {
             atB.Send("streaming"u8);
             await Task.Delay(20);

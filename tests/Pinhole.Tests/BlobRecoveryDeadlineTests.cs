@@ -132,7 +132,12 @@ public sealed class BlobRecoveryDeadlineTests
                 if (p.VerifiedBytes >= expected.Length / 2) halfDone.TrySetResult();
             });
             var watch = Stopwatch.StartNew();
-            TimeSpan allowance = TimeSpan.FromSeconds(1);
+            // 1.5 s, not 1 s: the property under test is WHEN the allowance starts
+            // (at the disruption, not at transfer start), while the re-dial rides a
+            // 20 ms-delay bottleneck — CI runners with a scheduling hiccup need the
+            // extra half second. The healthy-half floor (~2.1 s at the 1 Mbps cap)
+            // still exceeds it, so the watch assertion keeps its margin.
+            TimeSpan allowance = TimeSpan.FromSeconds(1.5);
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with { RecoveryTimeout = allowance }, stop.Token);
             await halfDone.Task.WaitAsync(Ceiling);

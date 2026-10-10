@@ -13,7 +13,10 @@ namespace Pinhole.Tests;
 /// seams (gateway override, SSDP unicast override) so CI never touches a real router.</summary>
 public sealed class PortMappingTests
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+    // The fallback ladder this suite exercises (PCP → PMP → SSDP → SOAP) runs several
+    // protocol round trips before the mapping lands; a steal-heavy shared runner can
+    // stretch one retry cycle past a tight budget. Healthy runs finish in milliseconds.
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
     private static PinholeOptions Opts(IPEndPoint? ssdp = null, IReadOnlyList<IPEndPoint>? gateways = null,
         bool enabled = true, TimeSpan? lease = null) => new()

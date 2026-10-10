@@ -292,9 +292,11 @@ internal sealed class TcpLink : IDisposable
         }
         finally
         {
-            Dispose();
+            // Only the teardown winner may retire the stop source: a concurrent Dispose
+            // that already passed the guard could still be between it and Cancel.
+            bool owner = TryDispose();
             if (writer is not null) await writer.ConfigureAwait(false);
-            _stop.Dispose();
+            if (owner) _stop.Dispose();
         }
     }
 
@@ -315,13 +317,17 @@ internal sealed class TcpLink : IDisposable
 
     internal void CloseGracefully() => _outgoing.Writer.TryComplete();
 
-    public void Dispose()
+    /// <summary>Single-shot teardown; true when THIS call performed it.</summary>
+    private bool TryDispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         _authenticationDeadline.Dispose();
         _outgoing.Writer.TryComplete();
         _stop.Cancel();
         _stream.Dispose();
         _closed(this);
+        return true;
     }
+
+    public void Dispose() => TryDispose();
 }
