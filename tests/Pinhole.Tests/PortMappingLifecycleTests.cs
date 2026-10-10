@@ -8,7 +8,9 @@ namespace Pinhole.Tests;
 /// independent recording lease. No OS sockets or production mapping codec is used.</summary>
 public sealed class PortMappingLifecycleTests
 {
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(4);
+    // The choreography here runs on sub-second lease lifetimes; the budget only needs to
+    // absorb a steal-heavy runner's multi-second scheduler stalls (observed on mac CI).
+    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(10);
     private sealed class Lease(int port, ConcurrentQueue<string> trace) : IPortMapLease
     {
         public IPEndPoint External { get; } = new(IPAddress.Parse("203.0.113.10"), port);

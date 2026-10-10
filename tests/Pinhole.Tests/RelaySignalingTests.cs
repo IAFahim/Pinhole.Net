@@ -136,7 +136,10 @@ public sealed class RelaySignalingTests
         PinholeConnectResult result = await a.TryConnectAsync(RelayTicket(b)).WaitAsync(Budget);
         Assert.False(result.IsSuccess); Assert.Equal(PinholeConnectFailure.TimedOut, result.Failure);
         Assert.Contains("signaling", result.ErrorMessage!);
-        Assert.Empty(a.Connections); await Until(() => b.Connections.Count == 0);
+        // Husk cleanup is asynchronous on BOTH sides: the timed-out dial's local entry is
+        // closed in the background, so poll it down like the peer's instead of asserting
+        // a single instant (a loaded runner once caught the husk mid-retirement).
+        await Until(() => a.Connections.Count == 0 && b.Connections.Count == 0);
         Assert.DoesNotContain(relay.Traffic, d => d.Payload[0] == 0x52);
     }
 

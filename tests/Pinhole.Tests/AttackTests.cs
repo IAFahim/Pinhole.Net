@@ -291,7 +291,10 @@ public sealed class AttackTests
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(ReadOnlySpan<byte>.Empty));
-        Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(new byte[PinholeConnection.MaxPayload + 1]));
+        // The ceiling is whatever the path has PROVEN it can carry: PMTUD can lift it past
+        // MaxPayload on a jumbo-capable path (loopback), so the boundary assert must use a
+        // size no discovered MTU can ever legalize — not MaxPayload + 1, which races PMTUD.
+        Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(new byte[66_000]));
 
         byte[] max = new byte[PinholeConnection.MaxPayload];
         max.AsSpan().Fill(0xAB);

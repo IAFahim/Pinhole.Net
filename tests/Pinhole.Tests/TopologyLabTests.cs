@@ -114,11 +114,12 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         else
         {
             // The physics forbid a direct path: after the quiet window the session must
-            // still be relayed — and still carrying traffic.
+            // still be relayed — and still carrying traffic. Eventually-retry: a quiet
+            // relay leg may need one permission-refresh round trip before it flows again.
             Assert.Equal(PathKind.Relay, conn.Path.Kind);
             await Task.Delay(Quiet);
             Assert.Equal(PathKind.Relay, conn.Path.Kind);
-            await ExchangeAsync(conn, atListener, "relay-only pair still flowing");
+            await ExchangeEventuallyAsync(conn, atListener, "relay-only pair still flowing", TestBudget.Scenario);
         }
 
         Assert.True(listenerNat.MappingsCreated > 0, $"listener NAT translated nothing — {lab.Net.Counters()}");
