@@ -129,9 +129,9 @@ internal sealed class ConnState
     // Last reject's branch and tokens (volatile): the counters say HOW MANY answers died;
     // these say WHICH check killed them and what the peer actually echoed.
     public volatile uint LastRejectWanted, LastRejectGot;
-    public long LastRejectKind; // 1=pack-token, 2=pack-length, 3=punc-token, 4=punc-keys, 5=punc-pin, 6=mixed-mode
+    public long LastRejectKind; // 1=pack-token, 2=pack-length, 3=punc-token, 4=punc-keys, 5=punc-pin, 6=mixed-mode, 7=pack-confirm
     public volatile string? LastRejectFrom; // source endpoint of the last token-rejected frame
-    public readonly long[] RejectsByKind = new long[7]; // indexed by the kinds above
+    public readonly long[] RejectsByKind = new long[8]; // indexed by the kinds above
     public long LastRttTicks = long.MinValue; // Interlocked
     public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
@@ -2966,7 +2966,7 @@ internal sealed partial class NodeEngine : IDisposable
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
                 if (!c.Crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]))
                 {
-                    Reject(c, 4);
+                    RejectKeys(c, body[..CryptoWire.EphemeralLength]);
                     c.Crypto.CountRejected();
                     return;
                 }
@@ -3095,7 +3095,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
                 {
-                    Reject(c, 4);
+                    RejectKeys(c, body[..CryptoWire.EphemeralLength]);
                     crypto.CountRejected();
                     if (TraceEnabled)
                     {
@@ -3106,7 +3106,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
                 {
-                    Reject(c, 4);
+                    Reject(c, 7);
                     crypto.CountRejected();
                     HandshakeFailed(c, "handshake confirmation failed: the answering peer does not hold the advertised key");
                     return;
@@ -4290,9 +4290,24 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
+    /// <summary>Key-agreement rejects get their own lens: whether a session was already
+    /// derived and the first bytes of the stored versus arriving ephemeral keys, which
+    /// names WHOSE keys the stale session belongs to.</summary>
+    private static void RejectKeys(ConnState c, ReadOnlySpan<byte> arrivingEph)
+    {
+        Interlocked.Increment(ref c.HandshakeRejects);
+        Interlocked.Increment(ref c.RejectsByKind[4]);
+        Volatile.Write(ref c.LastRejectKind, 4);
+        if (Volatile.Read(ref c.RejectsByKind[4]) == 1)
+        {
+            c.Crypto?.NoteKeyReject(arrivingEph); // capture arrival bytes once
+        }
+    }
+
     private static string LiveHandshakeSummary(ConnState c)
     {
         string line = $"self={c.Token:x8} remote={(c.RemoteTokenKnown ? c.RemoteToken.ToString("x8") : "-")} "
+            + $"my-eph={c.Crypto?.MyEphPrefix ?? "-"} "
             + $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
             + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
             + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}";
@@ -4304,7 +4319,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (Volatile.Read(ref c.HandshakeRejects) > 0)
         {
             long[] byKind = c.RejectsByKind;
-            line += $" by-kind[{string.Join(",", Enumerable.Range(1, 6).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
+            line += $" by-kind[{string.Join(",", Enumerable.Range(1, 7).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
         }
         return line;
     }
@@ -4314,9 +4329,11 @@ internal sealed partial class NodeEngine : IDisposable
         1 => $" last=pack-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8} from {Volatile.Read(ref c.LastRejectFrom) ?? "?"}",
         2 => " last=pack-length",
         3 => $" last=punc-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8} from {Volatile.Read(ref c.LastRejectFrom) ?? "?"}",
-        4 => " last=punc-keys",
+        4 => " last=punc-keys" + (c.Crypto?.KeyRejectSummary ?? ""),
         5 => " last=punc-pin",
-        _ => " last=mixed-mode",
+        6 => " last=mixed-mode",
+        7 => " last=pack-confirm",
+        _ => "",
     };
 
     /// <summary>Receive-path liveness for stuck-dial forensics: datagrams the recv loop has

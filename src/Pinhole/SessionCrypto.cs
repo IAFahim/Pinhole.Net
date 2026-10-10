@@ -541,4 +541,26 @@ internal sealed class ConnectionCrypto
         Interlocked.Increment(ref Rejected);
         Telemetry.FrameRejected("session", "unverified");
     }
+
+    // Key-agreement forensics: at the FIRST reject, remember whether a session was already
+    // derived and the leading bytes of the stored, arriving, and own ephemeral keys. Cross-
+    // referencing the three names whose handshake the stale latch belongs to.
+    private long _keyRejectCaptured; // Interlocked: first reject wins
+    private volatile string _keyRejectDetail = "";
+
+    public string KeyRejectSummary => _keyRejectDetail;
+
+    public string MyEphPrefix => HexPrefix(MyEphPublic);
+
+    public void NoteKeyReject(ReadOnlySpan<byte> arrivingEph)
+    {
+        if (Interlocked.Exchange(ref _keyRejectCaptured, 1) == 1) return;
+        _keyRejectDetail = $"[{(Keys is not null ? "derived" : "underived")}"
+            + $" stored-eph={HexPrefix(PeerEphPublic)}"
+            + $" arriving-eph={HexPrefix(arrivingEph)}"
+            + $" my-eph={HexPrefix(MyEphPublic)}]";
+    }
+
+    private static string HexPrefix(ReadOnlySpan<byte> key) =>
+        key.IsEmpty ? "-" : Convert.ToHexString(key[..4]).ToLowerInvariant();
 }
