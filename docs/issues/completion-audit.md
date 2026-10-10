@@ -53,7 +53,7 @@ replace the full acceptance checklist in each GitHub issue.
 | #33: desktop/mobile matrix | Declare and test supported runtime/AOT/device combinations and physical network/lifecycle transitions. OPPO Android 16 LTE and same-session Wi-Fi/LTE/VPN transport checks pass; audio, suspend and other devices remain. |
 | #34: bounded resources and soaks | Complete 24-hour and 72-hour runs with declared budgets, varied seeds, all required workloads and resource ledgers. Existing short tests and a harness do not prove long-run completion. |
 | #35: release gate | Apply exact-candidate compatibility/security/platform/performance/soak and managed/license evidence to shipped packages; keep canary/rollback and owner approval. Optional blob work blocks blob releases, not the connection-only MVP by association. |
-| #43: direct TCP | Required capability. Current core/phone tests and CI pass; finish source-bound OS simultaneous-open evaluation and supported integration evidence. TURN/TCP is not direct peer TCP. |
+| #43: direct TCP | Required capability. Physical same-LAN TCP now passes from the OPPO phone on both primary-IPv4 and full tickets with the host bound to the firewall-permitted port; the earlier ephemeral-port failure is assigned to the host firewall, not the dialer. Remaining: WAN/port-forwarded TCP and source-bound OS simultaneous-open evidence. TURN/TCP is not direct peer TCP. |
 
 The current core baseline `4f3caea` passed **20/20** jobs in
 [run 38040052589](https://github.com/IAFahim/Pinhole.Net/actions/runs/38040052589).
@@ -63,6 +63,24 @@ baseline observations; they do not validate a new WebRTC/signaling implementatio
 or all #34 roaming, relay restart and prolonged-outage workloads.
 
 ## Current implementation and validation
+
+The [2026-10-11 physical follow-up](../evidence/phone-trial-2026-10-11/README.md)
+adds Teletalk Wi-Fi → LTE → Wi-Fi continuity through the same encrypted relay
+session: 48 echoes across 50 sends, one connection attempt, no path changes.
+The relay-only run passes 48/48; the earlier relay-blackhole claim was retracted
+as stale tickets from incorrectly managed host processes. This is one device,
+carrier and relay-backed handoff, not all #31/#33 scenarios.
+
+The local TCP follow-up fixes bind-failure cleanup that masked socket errors
+with a null-reference exception in both node and raw transport APIs. All four
+injected error cases pass directly in process on .NET 8 and .NET 10. The
+physical comparison coordinator then ran for real with the phone attached:
+bound to the firewall-permitted port 53317, both the primary IPv4 direct-only
+and full tickets connect over encrypted physical TCP (`DirectTcp`, 48/48
+echoes, 313/389 ms connect, 10 ms p50). The ephemeral-port failure is thereby
+assigned to the host firewall's default-DROP policy; the dialer, candidate
+racing and framing are exonerated. Same-LAN scope only — see the
+[trial record](../evidence/phone-trial-2026-10-11/README.md).
 
 - `ebf8937` prevents confirmed-session PACK retries from killing a session,
   editing its token or promoting an unproved source route; adds both-role latch

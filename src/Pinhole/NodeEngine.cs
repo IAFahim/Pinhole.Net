@@ -4478,7 +4478,8 @@ internal sealed partial class NodeEngine : IDisposable
         _incoming?.Writer.TryComplete();
         lock (_gate)
         {
-            _udp.Dispose();
+            // Bind failure can reach cleanup before CreateSocket returns.
+            _udp?.Dispose();
             _tcp?.Dispose();
             foreach (IrohRelay relay in _irohRelays.Values) relay.Dispose();
             foreach (RelaySlot slot in _relays)

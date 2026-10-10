@@ -7,6 +7,31 @@ namespace Pinhole.Tests;
 public sealed class DiscoveryLifecycleTests
 {
     [Theory]
+    [InlineData(false, SocketError.AccessDenied)]
+    [InlineData(true, SocketError.AccessDenied)]
+    [InlineData(false, SocketError.AddressAlreadyInUse)]
+    [InlineData(true, SocketError.AddressAlreadyInUse)]
+    public async Task SocketCreationFailure_PreservesTheOriginalException(bool rawTransport, SocketError error)
+    {
+        var original = new SocketException((int)error);
+        int attempts = 0;
+        var network = new PinholeOptions
+        {
+            StunServers = [], Relays = [], IrohRelayUrls = [], PublishIrohAddress = false,
+            EnableNetworkWatch = false, EnablePortMapping = false, EnableLanDiscovery = false,
+            UdpSocketFactory = _ => { attempts++; throw original; },
+        };
+
+        Task pending = rawTransport
+            ? IrohTransport.BindAsync(new IrohTransportOptions { Network = network, PublishAddress = false })
+            : PinholeNode.BindAsync(network);
+        var actual = await Assert.ThrowsAsync<SocketException>(() => pending);
+
+        Assert.Same(original, actual);
+        Assert.Equal(1, attempts);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task CancellationDuringDefaultPublication_ReleasesTheBoundSocket(bool rawTransport)

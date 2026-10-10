@@ -1,0 +1,29 @@
+{
+  "status": "PASS",
+  "port": 53317,
+  "trials": [
+    {
+      "profile": "primary-ipv4-direct",
+      "status": "PASS",
+      "ticket_sha256": "cf43353d030410996ec9cac48ce2e892058a09f232639472f4e8d17b16129a00",
+      "duration_seconds": 11.629
+    },
+    {
+      "profile": "full",
+      "status": "PASS",
+      "ticket_sha256": "4ed39cb331df091e6841950001b139c7effab62ecace15d1f360bac514c8cc81",
+      "duration_seconds": 10.345
+    }
+  ],
+  "network_changes": false,
+  "EchoHost.dll_sha256": "c2e49dc7557582f4c8fa706ea88272e1c4f756d0ec327edc9e433695c85fbfca",
+  "Pinhole.dll_sha256": "def30700d8ebac244951c2f9ff158cde8fd29707dee6323f86445ac6b76dfeae",
+  "installed_apk_sha256": {
+    "org.pinhole.devicetest": [
+      "852681082f4d0ca4596b4c030c54670e3127572a35f347c7e9400628aafce44c"
+    ],
+    "org.pinhole.devicetest.test": [
+      "35286fbd7b81b0fa469b2d836fb3d499e854d4c04de5635a874730a7dd6b1f9b"
+    ]
+  }
+}
