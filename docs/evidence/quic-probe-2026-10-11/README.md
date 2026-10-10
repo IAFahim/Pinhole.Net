@@ -50,5 +50,10 @@ traversal, relay fallback, Internet paths, or unreliable datagrams — the
 inspected .NET 8/10 public API exposes no unreliable-datagram surface, and
 `System.Net.Quic` still carries native MsQuic as a deployment dependency.
 The [QUIC feasibility workflow](../../../.github/workflows/quic.yml) repeats
-these gates on GitHub runners (Ubuntu 24.04 with distro libmsquic, and
-Windows with the bundled implementation).
+these gates on GitHub runners: first run
+[38086611685](https://github.com/IAFahim/Pinhole.Net/actions/runs/38086611685)
+passed Ubuntu but failed Windows (`ConfigurationLoadCredential`/
+SEC_E_NO_CREDENTIALS — Schannel cannot open the ephemeral `CreateSelfSigned`
+key; fixed by persisting identities through PFX), and
+[run 38087357297](https://github.com/IAFahim/Pinhole.Net/actions/runs/38087357297)
+passed all four jobs (Ubuntu 24.04 + Windows, .NET 8 + .NET 10).
