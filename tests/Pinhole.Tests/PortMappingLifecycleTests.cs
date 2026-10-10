@@ -9,8 +9,9 @@ namespace Pinhole.Tests;
 public sealed class PortMappingLifecycleTests
 {
     // The choreography here runs on sub-second lease lifetimes; the budget only needs to
-    // absorb a steal-heavy runner's multi-second scheduler stalls (observed on mac CI).
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(10);
+    // absorb a steal-heavy runner's scheduler stalls. 20 s: one mac CI run starved the
+    // worker's post-cancellation continuation past a full 10 s without any lease fault.
+    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(20);
     private sealed class Lease(int port, ConcurrentQueue<string> trace) : IPortMapLease
     {
         public IPEndPoint External { get; } = new(IPAddress.Parse("203.0.113.10"), port);

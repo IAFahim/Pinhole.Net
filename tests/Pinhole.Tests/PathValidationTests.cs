@@ -197,8 +197,9 @@ public sealed class PathValidationTests
 
         Assert.Equal(0, atA.PathProbesSent);
         Assert.Equal(PinholeConnectionState.Open, atA.State);
-        Assert.True(atB.PathProbesSent > 0, "the silent-receiver side probes, as designed");
-        Assert.True(atB.PathProbeReplies > 0, "its probes are answered on the live path");
+        // The silent side's probes and their answers are eventual, not instant: a probe
+        // sent near the flood's end has its reply land after it. Poll the pair.
+        await TestPoll.UntilAsync(Timeout, () => atB.PathProbesSent > 0 && atB.PathProbeReplies > 0);
         Assert.Equal(PinholeConnectionState.Open, atB.State);
         Assert.Equal(0, atB.Stats.PingsSent); // monitoring counters stay out of caller stats
     }

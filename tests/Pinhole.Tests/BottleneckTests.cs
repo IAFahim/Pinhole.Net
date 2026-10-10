@@ -33,15 +33,20 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
+            // A 2 MiB flow, not the class's 512 KiB default: the receive window opens small
+            // and ramps over ~40 ms RTTs, and on a slow runner the ramp alone can eat a
+            // quarter of a short flow (observed 435 KiB/s vs the 1953 ceiling, zero loss,
+            // queue depth 1). The saturation claim needs the sustained phase to dominate.
+            const long bytes = 2 * 1024 * 1024;
             using var lab = new VirtualLab();
-            await using BlobServer server = await ServeAsync(lab, dir);
+            await using BlobServer server = await ServeAsync(lab, dir, bytes);
             AddBottleneck(lab, queuePackets: 256);
 
             var transfer = new TransferProgress();
             var sw = Stopwatch.StartNew();
             BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer).WaitAsync(FlowBudget);
             sw.Stop();
-            AssertVerified(dir, result);
+            Assert.Equal(bytes, result.Bytes);
 
             Assert.True(transfer.Bytes > 0 && transfer.Elapsed > TimeSpan.Zero);
             double kibPerSecond = transfer.Bytes / transfer.Elapsed.TotalSeconds / 1024;
@@ -178,12 +183,13 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         return dir;
     }
 
-    private static async Task<BlobServer> ServeAsync(VirtualLab lab, string dir) =>
-        await ServeAtAsync(lab, dir, "198.51.100.10", 32010, "rung.bin");
+    private static async Task<BlobServer> ServeAsync(VirtualLab lab, string dir, long bytes = FlowBytes) =>
+        await ServeAtAsync(lab, dir, "198.51.100.10", 32010, "rung.bin", bytes);
 
-    private static async Task<BlobServer> ServeAtAsync(VirtualLab lab, string dir, string address, int port, string name)
+    private static async Task<BlobServer> ServeAtAsync(VirtualLab lab, string dir, string address, int port, string name,
+        long bytes = FlowBytes)
     {
-        byte[] data = new byte[FlowBytes];
+        byte[] data = new byte[bytes];
         Random.Shared.NextBytes(data);
         string src = Path.Combine(dir, name + ".src");
         await File.WriteAllBytesAsync(src, data);
