@@ -319,7 +319,7 @@ public static class BlobClient
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly BlobController _controller;
-        private readonly Dictionary<long, (long SentAtMs, int Retransmits)> _outstanding = new();
+        private readonly Dictionary<long, (long SentAtMs, int Retransmits, bool SampleRtt)> _outstanding = new();
         private readonly SendCounter _send;
         private readonly RecoveryBudget _recovery;
         private long _maxRequested = -1;
@@ -625,7 +625,10 @@ public static class BlobClient
                 long[] refresh = [.. _outstanding.Keys];
                 foreach (long idx in refresh)
                 {
-                    _outstanding[idx] = (now, _outstanding[idx].Retransmits);
+                    // Backoff measured the old route. Carrying it into a freshly
+                    // proved route can delay the first request by 8× the new PTO
+                    // and exhaust recovery while that route is already healthy.
+                    _outstanding[idx] = (now, 0, false);
                 }
             }
 
@@ -652,9 +655,9 @@ public static class BlobClient
                 throw new InvalidDataException($"chunk {f.Index} failed verification");
             }
 
-            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits) entry);
+            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, bool SampleRtt) entry);
             bool fresh = _sink.Apply(f.Index, f.ChunkData);
-            if (hadReservation && entry.Retransmits == 0)
+            if (hadReservation && entry.SampleRtt)
             {
                 // Karn's rule: only a first-attempt arrival measures the path's RTT — a
                 // retransmitted request's arrival time no longer bounds the original send.
@@ -705,7 +708,7 @@ public static class BlobClient
 
                 for (long idx = start; idx < start + count; idx++)
                 {
-                    _outstanding[idx] = (now, 0);
+                    _outstanding[idx] = (now, 0, true);
                 }
 
                 Send(BlobWire.Request(_stream, start, count));
@@ -715,7 +718,7 @@ public static class BlobClient
 
         private void SweepStale(long now)
         {
-            foreach ((long idx, (long sentAt, int retransmits)) in _outstanding)
+            foreach ((long idx, (long sentAt, int retransmits, _)) in _outstanding)
             {
                 if (now - sentAt < (long)_controller.PtoFor(retransmits).TotalMilliseconds)
                 {
@@ -731,7 +734,7 @@ public static class BlobClient
                 // must not be throttled by a collapsed window or recovery livelocks
                 // at the floor rate. The honest bounds on re-request rate are the
                 // per-chunk PTO and the reorder horizon.
-                _outstanding[idx] = (now, retransmits + 1);
+                _outstanding[idx] = (now, retransmits + 1, false);
                 if (Send(BlobWire.Request(_stream, idx, 1))) _controller.OnRetransmit(now);
             }
         }

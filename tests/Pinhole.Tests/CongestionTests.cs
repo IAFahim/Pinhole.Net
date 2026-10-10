@@ -116,10 +116,12 @@ public sealed class CongestionTests(ITestOutputHelper output)
     public void Controller_AdaptsToRttAndBacksOffRepeatedLoss()
     {
         var budget = new BlobFlowBudget(1024 * 1024);
-        var controller = new BlobController(1024 * 1024, budget, null, fixedWindow: false);
+        var stats = new BlobTransferStats();
+        var controller = new BlobController(1024 * 1024, budget, stats, fixedWindow: false);
         var baseline = new BlobController(1024 * 1024, budget, null, fixedWindow: true);
         TimeSpan initial = controller.PtoFor(0);
         controller.ObserveRtt(TimeSpan.FromMilliseconds(40));
+        Assert.NotNull(stats.SmoothedRtt);
         Assert.True(controller.PtoFor(0) < initial);
         Assert.True(controller.PtoFor(0) < baseline.PtoFor(0));
         Assert.True(controller.PtoFor(2) > controller.PtoFor(1));
@@ -135,6 +137,23 @@ public sealed class CongestionTests(ITestOutputHelper output)
         controller.OnPathChanged();
         Assert.Equal(window, controller.WindowBytes);
         Assert.Equal(initial, controller.PtoFor(0));
+        Assert.Null(stats.SmoothedRtt); // the old route's sample cannot describe the new one
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, 2000);
+        Assert.Equal(window + 1024, controller.WindowBytes); // fresh-route slow start is restored
+    }
+
+    [Theory]
+    [InlineData(4096)]
+    [InlineData(16384)]
+    [InlineData(32768)]
+    public void ConfiguredWindowCap_HoldsAtStartupGrowthAndMigration(long maximum)
+    {
+        var controller = new BlobController(maximum, new BlobFlowBudget(64 * 1024), null, fixedWindow: false);
+        Assert.InRange(controller.WindowBytes, 4096, maximum);
+        for (int i = 0; i < 100; i++) controller.OnChunkArrived(1024, hadReservation: false, fresh: true, i);
+        Assert.InRange(controller.WindowBytes, 4096, maximum);
+        controller.OnPathChanged();
+        Assert.InRange(controller.WindowBytes, 4096, maximum);
     }
 
     [Fact]

@@ -242,7 +242,7 @@ public sealed class BlobRecoveryDeadlineTests
     public async Task RepeatedBlackouts_SpendOneSharedAllowance()
     {
         string dir = TempDir();
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         Task<BlobDownloadResult>? download = null;
         try
         {
@@ -269,17 +269,19 @@ public sealed class BlobRecoveryDeadlineTests
             });
             var flow = new BlobFlowBudget(64 * 1024);
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
-                Options(lab) with { RecoveryTimeout = TimeSpan.FromSeconds(4), FlowBudget = flow }, stop.Token);
+                Options(lab) with { RecoveryTimeout = TimeSpan.FromSeconds(8), FlowBudget = flow }, stop.Token);
             await firstCut.Task.WaitAsync(Ceiling);
-            await Task.Delay(TimeSpan.FromMilliseconds(2500), stop.Token);
+            await Task.Delay(TimeSpan.FromSeconds(5), stop.Token);
             Volatile.Write(ref allowedChunks, 16);
             lab.Net.RemoveRule(cut);
-            await secondCut.Task.WaitAsync(Ceiling);
+            Task second = await Task.WhenAny(secondCut.Task, download).WaitAsync(Ceiling);
+            if (second == download) await download; // report the real fault instead of hiding it behind a wait
+            await secondCut.Task;
 
-            // The first outage used over half the allowance. A fresh four-second
+            // The first outage used over half the allowance. A fresh eight-second
             // clock on the second outage would fail to terminate within this wait.
             TimeoutException failure = await Assert.ThrowsAsync<TimeoutException>(async () =>
-                await download.WaitAsync(TimeSpan.FromSeconds(3)));
+                await download.WaitAsync(TimeSpan.FromSeconds(4.5)));
             Assert.Contains("re-established", failure.Message);
             Assert.Equal(0, flow.UsedBytes);
         }

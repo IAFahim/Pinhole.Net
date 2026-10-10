@@ -151,10 +151,23 @@ public sealed class BufferingTests
         (PinholeConnection atDialer, Task<PinholeConnection> accept) = await PairAsync(listener, dialer);
         await using PinholeConnection atListener = await accept.WaitAsync(Timeout);
 
-        atDialer.Send("one"u8);
-        atDialer.Send("two"u8);
-        atDialer.Send("three"u8);
-        await Task.Delay(200);
+        foreach (string text in new[] { "one", "two", "three" })
+        {
+            var enqueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Received(ReadOnlySpan<byte> payload)
+            {
+                if (Encoding.UTF8.GetString(payload) == text) enqueued.TrySetResult();
+            }
+            atListener.Received += Received;
+            try
+            {
+                // This test checks local FIFO drain. The transport can reorder during
+                // a path change, so establish enqueue order through its receive event.
+                atDialer.Send(Encoding.UTF8.GetBytes(text));
+                await enqueued.Task.WaitAsync(Timeout);
+            }
+            finally { atListener.Received -= Received; }
+        }
         await atDialer.CloseAsync();
         await atListener.Closed.WaitAsync(Timeout);
 

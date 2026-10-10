@@ -134,7 +134,7 @@ internal sealed class BlobController
         _budget = budget;
         _stats = stats;
         _fixedWindow = fixedWindow;
-        _window = fixedWindow ? 4 * BlobWire.MaxRequestCount * ChunkBytes : InitialWindow;
+        _window = fixedWindow ? 4 * BlobWire.MaxRequestCount * ChunkBytes : Math.Min(InitialWindow, _maxWindow);
     }
 
     public long WindowBytes => _window;
@@ -422,17 +422,25 @@ internal sealed class BlobController
         }
 
         _haveRtt = false;
+        _srttMs = 0;
+        _rttvarMs = 0;
         _minRttMs = long.MaxValue;
-        _window = InitialWindow;
+        _fractionalGrowth = 0;
+        _window = Math.Min(InitialWindow, _maxWindow);
+        _ssthresh = long.MaxValue;
         _ptoInflation = 1.0;
         _dupWindowBytes = 0;
         _dupWindowStartMs = 0;
+        _lastDupMs = 0;
         _pacerCreditBytes = 0;
+        _lastPacerMs = long.MinValue;
         _lossWindowStartMs = 0;
+        _expiriesThisLossWindow = 0;
         _lastLossMs = -long.MaxValue / 2;
         if (_stats is not null)
         {
             _stats.ConservativeResumes++;
+            _stats.SmoothedRtt = null;
             _stats.WindowBytes = _window;
         }
     }

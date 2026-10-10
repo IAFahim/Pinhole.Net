@@ -370,6 +370,18 @@ public sealed class BlobsTests
             Task firstRun = Task.Run(() => BlobClient.DownloadAsync(server.Ticket, outDir, progress,
                 new BlobDownloadOptions { NodeOptions = Offline() }, cancelFirst.Token));
             await firstProgress.Task.WaitAsync(Timeout);
+            // Verified chunks can arrive ahead of a missing leading chunk. Resume
+            // starts at the persisted contiguous prefix, so wait for that evidence
+            // before interrupting instead of equating aggregate progress with it.
+            await TestPoll.UntilAsync(Timeout, () =>
+            {
+                try
+                {
+                    byte[] state = File.ReadAllBytes(Path.Combine(target + ".pinhole-part", "state"));
+                    return state.Length == 56 && BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(48)) >= 20;
+                }
+                catch (IOException) { return false; }
+            });
             cancelFirst.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstRun).WaitAsync(Timeout);
             Assert.True(Directory.Exists(target + ".pinhole-part"), "interrupted download left its part directory");
