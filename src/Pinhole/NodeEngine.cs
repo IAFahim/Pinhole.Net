@@ -1685,7 +1685,7 @@ internal sealed partial class NodeEngine : IDisposable
         ClosedHandshake closed;
         lock (c.Gate)
             closed = new(LiveHandshakeSummary(c) + $" final={c.State}", c.RemoteToken,
-                c.RemoteTokenAuthenticated ? c.Crypto?.PeerEphPublic?.ToArray() : null, Environment.TickCount64);
+                c.Crypto is { PeerConfirmed: true } crypto ? crypto.PeerEphPublic?.ToArray() : null, Environment.TickCount64);
         lock (_closedHandshakeGate)
         {
             if (!_lastClosedHandshake.ContainsKey(c.PeerId)) _closedHandshakeOrder.Enqueue(c.PeerId);
@@ -2908,7 +2908,7 @@ internal sealed partial class NodeEngine : IDisposable
                 && frame.Slice(HeaderSize + CryptoWire.TokenLength, CryptoWire.EphemeralLength).SequenceEqual(ephemeral))
             {
                 Interlocked.Increment(ref StaleHandshakeDrops);
-                return; // retry of an authenticated session we already closed; fresh keys still dial normally
+                return; // retry of a key-confirmed handshake we closed; fresh keys still dial normally
             }
 
             if (TraceEnabled)

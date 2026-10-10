@@ -96,17 +96,17 @@ relay outage while direct carries (a non-event, as it should be).
 
 ## The loss ladder (`LossLadderTests`) — the CC baseline
 
-The blob ARQ's fixed 4×64-chunk window and 900 ms re-requests, driven by increasing loss
-on the direct path, goodput logged per rung. These curves are the baseline the ARQ
-congestion-control work (#20 part 2) is judged against — re-run this file before and
-after any CC change and compare the logged lines.
+The loss ladder records verified downloads under independent and Gilbert-Elliott
+loss with the current adaptive window and retry timing. Re-run it before and after
+congestion-control changes and compare the logged lines. The fixed-seed curve is
+tagged `Category=Performance` and runs in the fresh performance process; disabling
+parallel test bodies cannot remove background work from earlier collections.
 
-Representative numbers (single runner, 512 KiB per rung): 1% ≈ 494 KiB/s, 2% ≈ 464,
+Historical fixed-window baseline (single runner, 512 KiB per rung): 1% ≈ 494 KiB/s, 2% ≈ 464,
 5% ≈ 410, 10% ≈ 101, 20% ≈ 82; Gilbert-Elliott at 10% mean with bursts of 8 ≈ 251.
-Two facts a CC design should know: the cliff between 5% and 10% (the fixed 900 ms
-re-request dominates once several rounds are needed), and that bursty loss at the same
-mean is *gentler* than independent loss — clean stretches between bursts let the window
-run, while iid loss at 10% keeps every round short.
+That baseline showed a cliff between 5% and 10% from the fixed retry delay. Its
+recorded burst distribution was gentler than scattered loss at the same mean;
+the comparison does not establish a universal ordering for every burst pattern.
 
 Assertions are deliberately loose (completion, byte-exact verification, curve ordering);
 exact goodput is machine-dependent and belongs in the logs.

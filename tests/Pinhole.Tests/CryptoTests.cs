@@ -675,7 +675,7 @@ public class CryptoTests
             return punc;
         }
 
-        public async Task SendUnfinishedIncomingHandshakeAsync(PinholeNode node, bool confirm, NodeIdentity? identity = null)
+        public async Task<byte[]> SendUnfinishedIncomingHandshakeAsync(PinholeNode node, bool confirm, NodeIdentity? identity = null)
         {
             var crypto = ConnectionCrypto.New(identity ?? Identity, PeerId, node.PeerId);
             var target = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
@@ -703,6 +703,7 @@ public class CryptoTests
                 await Sock.SendToAsync(hsck, target);
                 await TestPoll.UntilAsync(Timeout, () => node.Engine.Lookup(PeerId)?.Crypto?.PeerConfirmed == true);
             }
+            return punc;
         }
 
         /// <summary>Waits for the node's crypto PUNC, derives the same keys, answers PACK.
@@ -909,6 +910,32 @@ public class CryptoTests
         Assert.NotSame(stranger.Public, connected);
         Assert.Equal(PinholeConnectionState.Closed, stranger.State);
         Assert.Equal(oracle.Identity.PublicKey, connected.RemoteStaticKey);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WireOracle_ClosingAKeyConfirmedHandshakeSuppressesItsLatePunch(bool confirmed)
+    {
+        await using var node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        byte[] latePunch = await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirmed);
+        ConnState previous = node.Engine.Lookup(oracle.PeerId)!;
+        Assert.Equal(confirmed, previous.Crypto!.PeerConfirmed);
+        Assert.False(previous.RemoteTokenAuthenticated); // key proof precedes the first sealed frame
+        await previous.Public!.CloseAsync();
+        await oracle.Sock.SendToAsync(latePunch, new IPEndPoint(IPAddress.Loopback, node.LocalPort));
+        if (confirmed)
+        {
+            await TestPoll.UntilAsync(Timeout, () => Volatile.Read(ref node.Engine.StaleHandshakeDrops) > 0);
+            Assert.Null(node.Engine.Lookup(oracle.PeerId));
+        }
+        else
+        {
+            await TestPoll.UntilAsync(Timeout, () => node.Engine.Lookup(oracle.PeerId) is not null);
+            Assert.NotSame(previous, node.Engine.Lookup(oracle.PeerId)); // an unproved latch cannot reserve its keys
+        }
     }
 
     [Theory]

@@ -115,3 +115,22 @@ and file hashing/deduplication retain bounded metadata. HEAD totals must agree.
 The real encrypted UDP regressions, independent hash oracle, parser properties,
 fresh-process resource checks and unchanged throughput gates pass locally.
 The independent final-candidate security review and long soaks remain open.
+
+The `1f5fad2` matrix passed all twelve resource/throughput jobs, but two macOS
+functional jobs failed: signaling cancellation left a retry husk, and the loss
+curve inverted after earlier functional workloads. A new actual UDP regression
+reproduced closing after a valid key confirmation but before token authentication.
+The closed-handshake cache now remembers confirmed keys in that window; an
+unproved handshake still cannot reserve its keys. The loss curve now runs in the
+fresh performance process with its existing assertions unchanged. The complete
+local verification script passes both frameworks: per framework, three interop,
+588 functional, seven resource and three performance cases pass, with three
+explicit environment-gated skips.
+
+The revised soak warms and samples two concurrent downloaders, actually verifies
+cancelled checkpoints on resume, deletes each output, and records candidate hashes,
+seed, declared budgets and leak slopes before measurement. Short smokes pass on
+.NET 10 (two minutes, 98 completed files, 19 resumes) and .NET 8 (one minute,
+46 files, 10 resumes). Socket, connection, serving-worker and flow-budget ledgers
+return to baseline every cycle. These validate the harness; they do not complete
+the required 24h/72h or relay/roaming/long-outage workloads.

@@ -11,14 +11,10 @@ namespace Pinhole.Tests;
 [CollectionDefinition(nameof(LossLadderTimingCollection), DisableParallelization = true)]
 public sealed class LossLadderTimingCollection { }
 
-/// <summary>The loss ladder (#20's baseline deliverable): the blob ARQ's fixed 4×64-chunk
-/// window and 900 ms re-requests driven by increasing loss — independent rungs and a
-/// Gilbert-Elliott burst rung — with goodput recorded per rung. These curves are the
-/// baseline the ARQ congestion-control work is judged against: re-run this file before and
-/// after any CC change. Assertions stay deliberately loose (completion, integrity, curve
-/// ordering) — exact goodput numbers are machine-dependent and belong in the logs, not the
-/// asserts. Each rung runs in its own lab and directory: loss chains, counters, and resume
-/// sidecars never bleed between rungs.</summary>
+/// <summary>The loss ladder (#20): verified downloads under independent and
+/// Gilbert-Elliott loss, with per-rung goodput for the current congestion controller.
+/// Each rung owns its lab and directory. Completion/integrity checks stay in the
+/// functional suite; the fixed-seed curve comparison uses a fresh performance process.</summary>
 [Collection(nameof(LossLadderTimingCollection))]
 public sealed class LossLadderTests(ITestOutputHelper output)
 {
@@ -83,13 +79,10 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The curve itself: goodput at 2% must beat 10%, and the bursty rung must
-    /// beat the 10% scattered rung — measured in one process so machine speed cancels
-    /// out. (The controller era inverted the old "bursty ≤ 2%" ordering: long clean
-    /// stretches between bursts let the window ramp, so GE(10%, burst 8) legitimately
-    /// runs near the clean rate — bursty loss is FRIENDLIER to a window-controlled
-    /// receiver than constant scatter, and the assertion now says so.)</summary>
-    [Fact]
+    /// <summary>Fixed-seed baseline: compare 2%, 10% and bursty loss in the
+    /// dedicated performance process. Collection isolation alone cannot remove
+    /// runtime caches or residual background work from earlier functional tests.</summary>
+    [Fact, Trait("Category", "Performance")]
     public async Task LadderCurve_GoodputFallsAsLossRises()
     {
         double at2 = await RunIsolatedRungAsync(0.02, 501);
@@ -99,8 +92,8 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         output.WriteLine($"ladder curve: 2% -> {at2:F0} B/s, 10% -> {at10:F0} B/s, GE(10%, burst 8) -> {burst:F0} B/s");
         // The orderings are qualitative, but on a loaded runner the three rungs compress
         // to within ~0.5% of each other (observed: 972383/971757/968504), so a strict
-        // inequality flips on scheduling noise. A 2% band keeps the claim — loss never
-        // helps, bursts never hurt — without demanding luck from the machine.
+        // inequality flips on scheduling noise. Preserve the fixed-seed baseline's
+        // two orderings within the existing 2% measurement band.
         Assert.True(at10 < at2 * 1.02, $"goodput at 10% loss ({at10:F0} B/s) must fall below 2% ({at2:F0} B/s)");
         Assert.True(burst > at10 * 0.98, $"bursty-loss goodput ({burst:F0} B/s) must beat scattered 10% ({at10:F0} B/s)");
     }
