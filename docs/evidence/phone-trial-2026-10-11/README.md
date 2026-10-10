@@ -1,7 +1,8 @@
 # Physical phone ↔ desktop trial — 2026-10-11
 
-First real-device validation of the direct UDP transport between the Kotlin
-dialer and the C# engine on physical hardware over a real network.
+Real-device validation of the transport between the Kotlin dialer and the C#
+engine on physical hardware over real networks, including a live Wi-Fi↔cellular
+handoff. Supersedes the first draft of this file (see *Correction* below).
 
 ## Setup
 
@@ -9,104 +10,100 @@ dialer and the C# engine on physical hardware over a real network.
   (main, CI green). Online echo host (`echo-host.cs`): `PinholeNode.BindAsync`
   with production defaults — public STUN, the four n0 iroh relay URLs, mDNS,
   port mapping, network watch — accepts one peer and echoes every datagram.
-- **Phone** (dialer): OPPO CPH2819 (OnePlus), Android 16, Wi-Fi on the same
-  LAN (192.168.0.0/24), **no cellular service** (`cellular=false`), USB with
+  Run with `PINHOLE_TRACE_FILE=...` for the engine trace used here.
+- **Phone** (dialer): OPPO CPH2819 (OnePlus), Android 16, Wi-Fi on the home
+  LAN, dual SIM with Teletalk LTE data (`Stay Home-Teletalk`, 47004), USB with
   adb. The prepared `org.pinhole.devicetest` instrumented harness
   (versionCode 1, debug build installed 2026-10-10) embeds the Kotlin
   `pinhole/` module; tests take `-e pinholeTicket <connection string>` plus
-  optional `-e relayOnly true` / `-e tcpOnly true`.
-- Both endpoints behind the same home NAT; traffic left the box (real Wi-Fi,
-  real STUN, real internet relays).
+  `-e relayOnly true` / `-e tcpOnly true` / `-e networkSequence wifi,cellular,wifi`.
+- The handoff test **waits for the operator** to switch radios on
+  `WAIT_HANDOFF stage=N network=…` cues; we automated this with
+  `svc wifi disable/enable` driven from a logcat watcher (`radio-cue` pattern
+  below).
 
 ## Results
 
-| Scenario | Outcome |
-| --- | --- |
-| Default (UDP + relay racing) | **PASS** — details below |
-| `-e relayOnly true` | **FAIL** — relay handshake completes, first data frame never reaches the C# app (4 reproducible runs) |
-| `-e tcpOnly true` | **FAIL** — same signature as relayOnly (1 run) |
-| `encryptedConnectionSurvivesNetworkHandoffs` | Assume-skipped — requires cellular; the phone has no active SIM |
+| Scenario | Outcome | Connect | Echoes | RTT p50 / max |
+| --- | --- | --- | --- | --- |
+| Default, direct upgrade | **PASS** | 1110 ms | 48/48 | 8 / 213 ms (LAN direct) |
+| Default, relay path | **PASS** | 842 ms | 48/48 | 132 / 193 ms (aps1 relay) |
+| `-e relayOnly true` | **PASS** | 812 ms | 48/48 | 139 / 183 ms (aps1 relay) |
+| `-e tcpOnly true` | **FAIL** | timeout 30 s | 0 | dialer never reached the node |
+| Handoff wifi→cellular→wifi | **PASS** | — | 48/50 | session preserved, 1 connection |
 
-### Default mode — pass evidence
+Raw lines: `handoff-and-redo-events.txt`, `test-runner-events.txt`, `logcat.txt`.
 
-logcat (`10910`, 00:39:41):
+### Handoff evidence (the #31 roaming scenario, real hardware)
 
 ```
-PASS device=OPPO/CPH2819 android=16 cellular=false relayOnly=false tcpOnly=false
-     path=Direct(address=/192.168.0.187:38373) connectMs=1110
-     echoes=48 attempts=48 rttP50Ms=8 rttP95Ms=12 rttMaxMs=213
+PASS_HANDOFF stage=0 network=wifi      echoes=16/16 firstEchoMs=159  rttMaxMs=188  path=Relay(aps1-1)
+PASS_HANDOFF stage=1 network=cellular  echoes=16/18 firstEchoMs=2167 rttMaxMs=2167 path=Relay(aps1-1)
+PASS_HANDOFF stage=2 network=wifi      echoes=16/16 firstEchoMs=146  rttMaxMs=165  path=Relay(aps1-1)
+PASS_HANDOFF_COMPLETE stages=3 connectionAttempts=1 pathChanges=0
 ```
 
-- Initial connection in **1.11 s** on real hardware (the UDP-first window),
-  then **48/48 encrypted echo round-trips**, p50 **8 ms** / p95 **12 ms** /
-  max 213 ms over Wi-Fi.
-- The C# echo host printed `PEER encrypted=True kind=Relay` at accept while
-  the phone reports `path=Direct`: the session established over the relay
-  first and upgraded to the direct LAN path, on real devices,
-  cross-implementation, exactly as designed.
-- mDNS nearby discovery also worked end-to-end: the OpusVoice app listed the
-  desktop receiver (`OpusVoiceReceiver` @ 192.168.0.187) without typing a
-  ticket (`phone-23.png`).
+One encrypted session end-to-end (`connectionAttempts=1`): 2 of 18 echoes lost
+while Wi-Fi dropped and LTE took over, first cellular echo 2.17 s later, and
+instant recovery (146 ms first echo) when Wi-Fi returned. The engine trace
+shows the node punching the phone's Wi-Fi, link-local, and public addresses
+throughout while the relay carried the session.
 
-### relayOnly / tcpOnly — reproducible interop defect
+### tcpOnly — open finding against the PR #4 draft dialer
 
-Signature (every run): the dialer completes the encrypted handshake over the
-relay; the C# node accepts (`kind=Relay, encrypted=True`); **zero** data
-datagrams ever reach `ReceiveAsync` on the C# side; the test fails with
-`AssertionError: Echo 0 did not arrive before its deadline`
-(`test-runner-events.txt`).
+The dialer times out after 30 s with **zero** traffic reaching the C# node (no
+frames, no TCP connection; engine trace empty). The ticket was verified
+(`TicketDump`) to carry `Direct 192.168.0.187:<port>` candidates where the
+port is the TCP sidecar listener (confirmed listening via `ss`), so usable
+TCP candidates exist. Prime suspect: the dialer dials the **reflexive**
+candidate (`157.10.28.45:<port>` — the router's WAN address), which from
+inside the LAN is a hairpin connection this router does not support. Needs
+the PR #4 branch's dialer source to confirm; filed on OpusVoice PR #4.
 
-Exoneration: two C# nodes on this machine with `EnableDirectUdp=false` on
-**both** ends (`relay-only-probe.cs`) round-trip 64-byte datagrams over the
-same public relays, `kind=Relay` throughout, ~100 ms RTT — so the C# relay
-data path is sound C#↔C#. The black hole is specific to the cross-implementation
-relay path (Kotlin QUIC/iroh relay transport dialing in, C# WebSocket +
-TURN-style permit model accepting). Suspect area: peer relay-address changes
-or permit staleness across the two relay transports. Root cause needs a wire
-capture or engine trace; not fixed by this trial.
+## Correction
 
-### OpusVoice app (separate defect, found on the way)
-
-The installed OpusVoice app (side-load built 2026-10-08) reached a UI state
-showing `STREAMING` with a live path label while sending **zero packets** —
-verified by both endpoints' counters (`/proc/net/snmp` Udp OutDatagrams
-frozen on the phone, InDatagrams +72 over 4 min on the desktop). The first
-START attempt showed a generic error dialog; a later attempt rendered the
-streaming/stats cards with no traffic behind them. A debug build was
-installed on the phone to continue diagnosis (`phone-01-home.png` …
-`phone-28.png` show the flow). This is an app-level defect in OpusVoice,
-not a transport failure — nothing ever left the phone.
+The first draft of this trial reported `relayOnly`/`tcpOnly` as a
+"reproducible cross-implementation relay data black hole" and locally
+"exonerated" the C# relay path. That finding was **wrong**: the failures were
+an artifact of the desktop harness — backgrounded echo-host restarts silently
+died (a `pkill` pattern was matching its own launching shell), and the test
+runs were handed **stale tickets belonging to dead nodes**; the dialer could
+never have connected. With a verified single live host and a ticket read from
+its own log, `relayOnly` passes 48/48 at 139 ms p50 (and default mode also
+passes on a pure relay path). Only `tcpOnly` still fails, as a genuine
+dialer-side finding above. The C#↔C# relay-only probe (`relay-only-probe.cs`)
+remains valid and passing.
 
 ## Reproduction
 
 ```bash
-# desktop: echo host (one peer per process start)
-dotnet run docs/evidence/phone-trial-2026-10-11/echo-host.cs   # prints TICKET …
+# desktop: one peer per process start; give the dialer THIS process's ticket
+PINHOLE_TRACE_FILE=/tmp/trace.txt dotnet run echo-host.cs   # prints TICKET …
 
-# phone: harness
+# phone: harness (restart the host between runs — single accept)
 adb shell am instrument -w \
   -e pinholeTicket 'pinhole1:…' \
   [-e relayOnly true | -e tcpOnly true] \
   org.pinhole.devicetest.test/androidx.test.runner.AndroidJUnitRunner
-```
 
-The harness accepts **one** peer per echo-host process — restart the host
-between runs or the second run fails on a dead accept queue.
+# handoff: the test waits on the operator; toggle on the WAIT_HANDOFF cues
+adb logcat -v time | grep --line-buffered WAIT_HANDOFF   # stage=1 → cellular …
+```
 
 ## Honest scope
 
-- One device, one OS (Android 16), one LAN, Wi-Fi only. No cellular handoff,
-  no VPN, no suspend/resume, no iOS. This is *initial-connection + steady-state
-  latency + reliability* evidence for the direct path on real hardware —
-  not the full #33 support matrix.
-- The relay-pinned failure means relay-only operation (blocked-UDP fallback
-  for a mobile peer) is **not validated** and currently appears broken
-  cross-implementation; tracked in OpusVoice PR #4 and blocking the #26
-  "HTTPS-relayed" phone-side claim until root-caused.
+- One device, one OS (Android 16), one Wi-Fi AP + one LTE carrier
+  (Teletalk), relay-path handoff (aps1-1). No VPN, no suspend/resume, no
+  iOS, no carrier-GNAT-only direct punching (the direct PASS was same-LAN).
+- Direct-path handoff (punching through LTE CGNAT after the switch) was not
+  isolated: the session rode the relay across the handoff, which is the
+  designed continuity mechanism; `pathChanges=0` reflects that.
+- tcpOnly (the #43 sidecar from a real phone) remains unvalidated pending the
+  PR #4 dialer fix.
 
 ## Files
 
-- `logcat.txt` — full device log for the session window
-- `test-runner-events.txt` — TestRunner pass/fail/assumption events
+- `logcat.txt` — full device log for the first-session window
+- `test-runner-events.txt`, `handoff-and-redo-events.txt` — pass/fail/stage events
 - `echo-host.cs`, `relay-only-probe.cs` — the two probes used
 - `phone-*.png` — app-flow screenshots (fake-STREAMING defect on the way)
