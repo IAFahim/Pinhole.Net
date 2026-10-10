@@ -101,6 +101,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
                 Assert.Equal(FlowBytes, stats.VerifiedBytes);
                 Assert.True(lab.Net.DroppedByPolicy > 0, "the link must really drop packets");
                 Assert.True(stats.Retransmits > 0, "dropped chunks must require recovery");
+                Assert.True(stats.RequestsSent > stats.Retransmits, "request accounting must include both new demand and retries");
                 if (!fixedWindow) Assert.NotNull(stats.SmoothedRtt);
                 return sw.Elapsed;
             }
@@ -163,6 +164,49 @@ public sealed class CongestionTests(ITestOutputHelper output)
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task BufferedResponses_AreVerifiedBeforeExpiredRequestsAreRetried()
+    {
+        string dir = TempDir();
+        try
+        {
+            using var lab = new VirtualLab();
+            await using BlobServer server = await ServeAsync(lab, dir);
+            var stats = new BlobTransferStats();
+            bool paused = false;
+            var progress = new InlineProgress(p =>
+            {
+                if (paused || p.VerifiedBytes < 16 * 1024) return;
+                paused = true;
+                // The network pump keeps receiving while application work stalls the
+                // verifier past its PTO. Already buffered responses are not lost data.
+                Thread.Sleep(350);
+            });
+            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
+                progress, new BlobDownloadOptions
+                {
+                    NodeOptions = lab.BaseOptions(o => o with
+                    {
+                        UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.20"), 32020)),
+                    }),
+                    Stats = stats,
+                }, default).WaitAsync(Budget);
+            Assert.True(paused);
+            Assert.Equal(FlowBytes, result.Bytes);
+            Assert.Equal(0, lab.Net.DroppedByPolicy);
+            Assert.Equal(0, stats.Retransmits);
+            Assert.Equal(0, stats.LossEvents);
+            Assert.Equal(0, stats.DuplicateBytes);
+            Assert.True(stats.RequestsSent > 0);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    private sealed class InlineProgress(Action<BlobProgress> report) : IProgress<BlobProgress>
+    {
+        public void Report(BlobProgress value) => report(value);
     }
 
     [Fact]

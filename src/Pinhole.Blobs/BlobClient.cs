@@ -303,6 +303,8 @@ public static class BlobClient
     /// resets.</summary>
     private sealed class StreamDownloader
     {
+        private readonly record struct ReceivedFrame(BlobWire.Frame Frame, long ArrivedAtMs);
+
         private static readonly TimeSpan ControlTick = TimeSpan.FromMilliseconds(5);
         private static readonly TimeSpan HelloPace = TimeSpan.FromMilliseconds(250);
         private static readonly TimeSpan CheckpointPace = TimeSpan.FromMilliseconds(50);
@@ -359,7 +361,14 @@ public static class BlobClient
             // own linked token so finishing (or failing) one stream releases the read slot
             // before the next stream's pump claims it — directory downloads run several
             // streams back-to-back over one connection.
-            var frames = Channel.CreateUnbounded<BlobWire.Frame>(new UnboundedChannelOptions { SingleReader = true });
+            // A slow verifier must backpressure its sole pump instead of retaining
+            // an unbounded number of authenticated 1 KiB chunks.
+            var frames = Channel.CreateBounded<ReceivedFrame>(new BoundedChannelOptions(256)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
             using var pumpCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             Task pump = Task.Run(() => PumpAsync(frames.Writer, pumpCts.Token), CancellationToken.None);
             try
@@ -380,7 +389,7 @@ public static class BlobClient
             }
         }
 
-        private async Task PumpAsync(ChannelWriter<BlobWire.Frame> writer, CancellationToken ct)
+        private async Task PumpAsync(ChannelWriter<ReceivedFrame> writer, CancellationToken ct)
         {
             while (true)
             {
@@ -399,12 +408,13 @@ public static class BlobClient
                     return; // connection closed; the control loop notices the quiet
                 }
 
+                long arrivedAtMs = Environment.TickCount64;
                 if (!_session.TryOpen(mem.Span, _stream, out BlobWire.Frame f))
                 {
                     continue; // garbage, tampered ciphertext, or another stream's frame
                 }
 
-                await writer.WriteAsync(f, ct).ConfigureAwait(false);
+                await writer.WriteAsync(new ReceivedFrame(f, arrivedAtMs), ct).ConfigureAwait(false);
                 if (f.Type == BlobWire.TypeBye)
                 {
                     return;
@@ -412,7 +422,7 @@ public static class BlobClient
             }
         }
 
-        private async Task<long> RunLoopAsync(ChannelReader<BlobWire.Frame> frames, CancellationToken ct)
+        private async Task<long> RunLoopAsync(ChannelReader<ReceivedFrame> frames, CancellationToken ct)
         {
             _lastVerifiedTicks = Environment.TickCount64;
             try
@@ -425,6 +435,16 @@ public static class BlobClient
                         // Pathlessness is a wait; Closed is a route verdict — the caller's
                         // recovery loop re-dials and resumes from the checkpoints.
                         throw new BlobTransportLostException("the connection closed before the transfer finished");
+                    }
+
+                    // Receive work precedes loss decisions. A delayed verifier may
+                    // have the genuine answers queued past their PTO; retrying first
+                    // would manufacture duplicates and shrink a healthy window.
+                    // Limit the batch so cancellation, path watching and checkpoints
+                    // continue even when an authenticated peer fills the queue.
+                    for (int drained = 0; drained < 64 && frames.TryRead(out ReceivedFrame buffered); drained++)
+                    {
+                        ReceiveFrame(buffered);
                     }
 
                     long now = Environment.TickCount64;
@@ -468,7 +488,7 @@ public static class BlobClient
                             break;
                         }
 
-                        if (pathPresent)
+                        if (pathPresent && !frames.TryPeek(out _))
                         {
                             // Healing before fresh demand: re-requests get first claim
                             // on the pacer's credit each tick, the way loss recovery
@@ -490,7 +510,7 @@ public static class BlobClient
 
                     // Availability wait, not a consuming read: an abandoned WaitToReadAsync can
                     // steal a signal but never an item — TryRead below is the only consumer.
-                    if (!frames.TryRead(out BlobWire.Frame f))
+                    if (!frames.TryRead(out ReceivedFrame f))
                     {
                         bool more;
                         try
@@ -509,37 +529,8 @@ public static class BlobClient
                         }
                     }
 
-                    switch (f.Type)
-                    {
-                        case BlobWire.TypeHead:
-                            if (_totalChunks < 0)
-                            {
-                                _totalBytes = f.TotalBytes;
-                                _totalChunks = f.TotalChunks;
-                                _sink.Init(_totalBytes, _totalChunks);
-                                // Resume means resume ON THE WIRE: requests start at the
-                                // checkpointed prefix's first gap, not at chunk zero —
-                                // verified bytes never cross the network again.
-                                _maxRequested = _sink.Applied - 1;
-                                if (_sink.Applied > 0)
-                                {
-                                    // A resumed attempt reports from the checkpointed
-                                    // prefix: progress must never visibly go backwards
-                                    // across a recovery.
-                                    _verified = Math.Min(_sink.Applied * Blake3.ChunkSize, _totalBytes);
-                                    _onVerified(_verified);
-                                }
-                            }
-
-                            break;
-                        case BlobWire.TypeChunk:
-                            ReceiveChunk(f, now);
-                            break;
-                        case BlobWire.TypeBye:
-                            throw new InvalidDataException("the provider cancelled this stream");
-                    }
-
-                    CheckStall(now);
+                    ReceiveFrame(f);
+                    CheckStall(Environment.TickCount64);
                 }
             }
             finally
@@ -570,6 +561,34 @@ public static class BlobClient
             }
 
             return _totalBytes;
+        }
+
+        private void ReceiveFrame(ReceivedFrame received)
+        {
+            BlobWire.Frame frame = received.Frame;
+            switch (frame.Type)
+            {
+                case BlobWire.TypeHead:
+                    if (_totalChunks < 0)
+                    {
+                        _totalBytes = frame.TotalBytes;
+                        _totalChunks = frame.TotalChunks;
+                        _sink.Init(_totalBytes, _totalChunks);
+                        // Resume on the wire from the checkpoint's first gap.
+                        _maxRequested = _sink.Applied - 1;
+                        if (_sink.Applied > 0)
+                        {
+                            _verified = Math.Min(_sink.Applied * Blake3.ChunkSize, _totalBytes);
+                            _onVerified(_verified);
+                        }
+                    }
+                    break;
+                case BlobWire.TypeChunk:
+                    ReceiveChunk(frame, received.ArrivedAtMs, Environment.TickCount64);
+                    break;
+                case BlobWire.TypeBye:
+                    throw new InvalidDataException("the provider cancelled this stream");
+            }
         }
 
         /// <summary>Path watching: returns whether a usable path exists right now. A path
@@ -613,7 +632,7 @@ public static class BlobClient
             return true;
         }
 
-        private void ReceiveChunk(BlobWire.Frame f, long now)
+        private void ReceiveChunk(BlobWire.Frame f, long arrivedAtMs, long now)
         {
             if (f.Index >= _totalChunks)
             {
@@ -639,7 +658,7 @@ public static class BlobClient
             {
                 // Karn's rule: only a first-attempt arrival measures the path's RTT — a
                 // retransmitted request's arrival time no longer bounds the original send.
-                _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(now - entry.SentAtMs, 1)));
+                _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(arrivedAtMs - entry.SentAtMs, 1)));
             }
 
             _controller.OnChunkArrived(len, hadReservation, fresh, now);
@@ -712,9 +731,8 @@ public static class BlobClient
                 // must not be throttled by a collapsed window or recovery livelocks
                 // at the floor rate. The honest bounds on re-request rate are the
                 // per-chunk PTO and the reorder horizon.
-                _controller.OnRetransmit(now);
                 _outstanding[idx] = (now, retransmits + 1);
-                Send(BlobWire.Request(_stream, idx, 1));
+                if (Send(BlobWire.Request(_stream, idx, 1))) _controller.OnRetransmit(now);
             }
         }
 
@@ -727,19 +745,22 @@ public static class BlobClient
             }
         }
 
-        private void Send(byte[] plain)
+        private bool Send(byte[] plain)
         {
-            TrySend(_session.Seal(_send.Next(), plain));
+            if (!TrySend(_session.Seal(_send.Next(), plain))) return false;
+            _controller.OnRequestSent();
+            return true;
         }
 
-        private void TrySend(byte[] wire)
+        private bool TrySend(byte[] wire)
         {
-            try { _conn.Send(wire); }
+            try { _conn.Send(wire); return true; }
             catch (InvalidOperationException) when (_conn.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
             {
                 // The path can disappear between WatchPath and Send. Leave this frame
                 // to the next Hello/request retry so the control loop continues checking
                 // cancellation and the shared deadline instead of blocking in a ride-out.
+                return false;
             }
         }
     }

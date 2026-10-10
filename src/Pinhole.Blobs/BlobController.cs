@@ -139,6 +139,11 @@ internal sealed class BlobController
 
     public long WindowBytes => _window;
 
+    public void OnRequestSent()
+    {
+        if (_stats is not null) _stats.RequestsSent++;
+    }
+
     /// <summary>How many chunks a single Req run may carry: grows with the window so a
     /// fat path batches and a thin one stays deferential — every run is a back-to-back
     /// provider burst, so its size is a burst bound. The granularity stays at most a
