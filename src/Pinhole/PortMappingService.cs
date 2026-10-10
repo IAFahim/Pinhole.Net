@@ -154,7 +154,14 @@ internal sealed class PortMappingService : IDisposable
                 CancellationTokenSource? operation;
                 lock (_gate)
                 {
-                    ExpireNoLock(Environment.TickCount64);
+                    // A renewal due right now outranks the loop-top expiry check: waking
+                    // late (timer slack under load) must not retire the very lease its
+                    // renewal was about to extend — that would strand the mapping for the
+                    // full rediscovery backoff. Tick()/Current still expire on their own.
+                    if (_lease is null || _nextActionTicks > Environment.TickCount64)
+                    {
+                        ExpireNoLock(Environment.TickCount64);
+                    }
                     retired = _retiring.Count == 0 ? null : _retiring.Dequeue();
                     if (_disposed && retired is null) return;
                     live = _lease;
