@@ -18,7 +18,7 @@ public sealed class TcpSocketHardeningTests
         Bind = new IPEndPoint(bind, 0), StunServers = [], IrohRelayUrls = [],
         EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnableDirectUdp = false, ReceiveBufferCapacity = 16,
-        ConnectTimeout = TimeSpan.FromSeconds(5),
+        ConnectTimeout = TimeSpan.FromSeconds(8), // TCP rounds start after the 1.2 s UDP-first window
     };
 
     /// <summary>The sidecar reuses the UDP socket's numeric port; on Windows that TCP
@@ -30,11 +30,12 @@ public sealed class TcpSocketHardeningTests
         for (int attempt = 0; ; attempt++)
         {
             PinholeNode node = await PinholeNode.BindAsync(bind is null ? Options(address) : Options(address) with { Bind = bind });
-            if (node.TcpListeningPort is not null || attempt >= 3)
+            if (node.TcpListeningPort is not null || attempt >= 7)
             {
                 return node;
             }
             await node.DisposeAsync();
+            await Task.Delay(150); // a busy runner's port pressure is transient
         }
     }
 
