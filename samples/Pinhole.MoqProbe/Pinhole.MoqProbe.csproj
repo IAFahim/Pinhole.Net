@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnablePreviewFeatures Condition="'$(TargetFramework)' == 'net8.0'">true</EnablePreviewFeatures>
+    <GenerateRequiresPreviewFeaturesAttribute Condition="'$(TargetFramework)' == 'net8.0'">true</GenerateRequiresPreviewFeaturesAttribute>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Pinhole.Moq/Pinhole.Moq.csproj" /></ItemGroup>
+</Project>

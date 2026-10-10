@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "stage": "complete",
+  "service": "Cloudflare MoQ",
+  "draft": 16,
+  "transport": "native QUIC reliable subgroup streams",
+  "tlsCertificateValidated": true,
+  "relayVerified": true,
+  "messagesEachDirection": 50,
+  "observerMessages": 50,
+  "regularObjectBytes": 256,
+  "boundaryObjectBytes": [
+    0,
+    65536
+  ],
+  "overLimitRejected": true,
+  "cleanupCompleted": true,
+  "connectedMs": 115.32,
+  "elapsedMs": 1635.76,
+  "rttP50Ms": 4.33,
+  "rttP95Ms": 31.02,
+  "subscribeOnlyPublishRejected": true,
+  "subscribeOnlyError": 32,
+  "sameTargetPublishPositiveControl": true,
+  "invalidSignatureRejected": true,
+  "invalidSignatureError": 3,
+  "invalidSignatureRequestError": null,
+  "payloadDigest": "55d8e59c01ef423ce55fda219ed42d938064560902e745dec3e3e4d04860f650",
+  "runtime": "10.0.12",
+  "verifierPassed": true,
+  "framework": "net10.0",
+  "platform": "Linux x86_64",
+  "probeAssemblySha256": "06d35b7a77cdabe0361e15f1a579ae6bdb638a52b4374fa242a8850d040b4f65",
+  "clientAssemblySha256": "3ecf501295c5a6e1c04070b4da7cce143fc53aac98c6daec8bc60b9940517998",
+  "localUnitTests": {
+    "passed": 24,
+    "failed": 0
+  }
+}

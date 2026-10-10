@@ -56,12 +56,23 @@ jobs:
           -c Release --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
+      - name: Build Cloudflare probes
+        run: |
+          dotnet build samples/Pinhole.CloudflareProbe -c Release -f ${{ matrix.framework }} -warnaserror
+          dotnet build samples/Pinhole.MoqProbe -c Release -f ${{ matrix.framework }} -warnaserror
+      - name: Test MoQ wire parsing and request limits
+        run: >
+          dotnet test tests/Pinhole.Moq.Tests -c Release
+          -f ${{ matrix.framework }}
+          --logger trx --logger "console;verbosity=normal"
       - name: Upload test results (hang diagnostics)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: testresults-${{ matrix.os }}-${{ matrix.framework }}
-          path: tests/Pinhole.Tests/TestResults/
+          path: |
+            tests/Pinhole.Tests/TestResults/
+            tests/Pinhole.Moq.Tests/TestResults/
           retention-days: 5
 
   resources:
