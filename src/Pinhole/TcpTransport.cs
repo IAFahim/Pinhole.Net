@@ -18,6 +18,7 @@ internal sealed class TcpTransport : IDisposable
     private readonly Dictionary<long, TcpLink> _links = [];
     private readonly Dictionary<string, long> _attempts = [];
     private readonly HashSet<string> _dialing = [];
+    private int _reservedDials;
     private Socket? _listener;
     private long _nextId;
     private bool _disposed;
@@ -30,7 +31,7 @@ internal sealed class TcpTransport : IDisposable
     }
 
     internal int? ListeningPort { get { lock (_gate) return ((IPEndPoint?)_listener?.LocalEndPoint)?.Port; } }
-    internal int LiveLinks { get { lock (_gate) return _links.Count + _dialing.Count; } }
+    internal int LiveLinks { get { lock (_gate) return _links.Count + _reservedDials; } }
 
     internal void Rebind(IPEndPoint endpoint)
     {
@@ -72,7 +73,7 @@ internal sealed class TcpTransport : IDisposable
             TcpLink? link = null;
             try
             {
-                lock (_gate) link = _disposed || _links.Count + _dialing.Count >= MaxLinks ? null : AddLink(socket);
+                lock (_gate) link = _disposed || _links.Count + _reservedDials >= MaxLinks ? null : AddLink(socket);
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }
             if (link is null) socket.Dispose();
@@ -91,14 +92,17 @@ internal sealed class TcpTransport : IDisposable
             TcpLink? existing = _links.Values.FirstOrDefault(link => link.OutgoingTarget?.Equals(endpoint) == true && link.IsReady);
             if (existing is not null) return existing;
             long now = Environment.TickCount64;
-            if (_links.Count + _dialing.Count >= MaxLinks || _dialing.Contains(key)
+            if (_links.Count + _reservedDials >= MaxLinks || _dialing.Contains(key)
                 || _attempts.TryGetValue(key, out long last) && now - last < 5_000) return null;
             if (_attempts.Count >= 128) _attempts.Remove(_attempts.MinBy(p => p.Value).Key);
             _attempts[key] = now;
             _dialing.Add(key);
+            _reservedDials++;
         }
         Socket? socket = null;
         TcpLink? connected = null;
+        bool ownsReservation = true;
+        bool succeeded = false;
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
@@ -107,13 +111,15 @@ internal sealed class TcpTransport : IDisposable
             await socket.ConnectAsync(endpoint, deadline.Token).ConfigureAwait(false);
             lock (_gate)
             {
-                _dialing.Remove(key);
                 if (_disposed) return null;
                 connected = AddLink(socket, endpoint);
+                _reservedDials--;
+                ownsReservation = false;
                 socket = null; // link now owns it
             }
             _ = connected.RunAsync(initiator: true);
             await connected.Ready.WaitAsync(deadline.Token).ConfigureAwait(false);
+            succeeded = true;
             return connected;
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException or IOException)
@@ -124,7 +130,16 @@ internal sealed class TcpTransport : IDisposable
         finally
         {
             socket?.Dispose();
-            lock (_gate) _dialing.Remove(key);
+            lock (_gate)
+            {
+                // Own the endpoint through greeting and cleanup. Release the failed
+                // throttle and flight together, so an old finally cannot erase the
+                // guard of a newer retry. Count the socket reservation only until
+                // AddLink takes ownership, keeping MaxLinks unchanged.
+                if (!succeeded) _attempts.Remove(key);
+                if (ownsReservation) _reservedDials--;
+                _dialing.Remove(key);
+            }
         }
     }
 
