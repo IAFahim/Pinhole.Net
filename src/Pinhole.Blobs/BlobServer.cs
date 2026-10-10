@@ -62,6 +62,11 @@ public sealed class BlobServer : IAsyncDisposable
     /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
     internal PinholeNode Node => _node;
 
+    internal int ActiveServingTasks
+    {
+        get { lock (_servingGate) return _serving.Count; }
+    }
+
     /// <summary>Total downloader connections accepted so far.</summary>
     public long ConnectionsAccepted { get; private set; }
 

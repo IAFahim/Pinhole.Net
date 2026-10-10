@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Pinhole.Blobs;
 using Xunit;
 using Xunit.Abstractions;
@@ -428,135 +431,254 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Env-gated soak: <c>PINHOLE_SOAK_MINUTES</c> sets the duration. Mixed
-    /// workload — downloads over a shaped link, brief blackouts, cancel-and-resume —
-    /// with a per-minute resource sample written to a report file beside the run. The
-    /// scheduled 24h/72h runs use this same harness; exact socket/budget ledgers are
-    /// asserted each cycle, with process samples retained for slope review.</summary>
+    /// <summary>Opt-in two-client shaped-link soak. Records its seed, binaries,
+    /// post-warmup budgets and resource observations before accepting results.
+    /// Long outages, relays and roaming require additional workload coverage.</summary>
     [SoakFact]
     public async Task MixedWorkloadSoak()
     {
         int minutes = int.Parse(Environment.GetEnvironmentVariable("PINHOLE_SOAK_MINUTES")!);
+        int seed = int.TryParse(Environment.GetEnvironmentVariable("PINHOLE_SOAK_SEED"), out int selected)
+            ? selected : 0x50A0;
         string dir = TempDir();
-        string reportDir = Path.Combine(Path.GetTempPath(), "pinhole-soak",
-            DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
+        string reportDir = Environment.GetEnvironmentVariable("PINHOLE_SOAK_REPORT_DIR")
+            ?? Path.Combine(Path.GetTempPath(), "pinhole-soak",
+                DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(reportDir);
         string reportPath = Path.Combine(reportDir, "soak-observations.csv");
-        var rng = new Random(0x50A0); // fixed seed: a failing soak is reproducible
-        var observations = new List<string> { "elapsedSec,heapMiB,threads,handles,liveSockets,budgetUsed,completed,cancelled,errors" };
-        await File.WriteAllLinesAsync(reportPath, observations);
+        var rng = new Random(seed);
+        var observations = new List<SoakSample>();
+        const string columns = "elapsedSec,heapBytes,threads,handles,timers,pendingThreadPoolWork,liveSockets,connections,servingTasks,budgetUsed,cpuSeconds,totalAllocatedBytes,verifiedBytes,completed,cancelled,resumed,blackouts,cycles,errors";
+        await File.WriteAllTextAsync(reportPath, columns + Environment.NewLine);
+        output.WriteLine($"soak seed={seed}, duration={minutes} min; report={reportDir}");
         try
         {
             using VirtualLab lab = new();
             byte[] data = new byte[FlowBytes];
-            Random.Shared.NextBytes(data);
+            new Random(seed ^ 0x434F).NextBytes(data);
             string src = Path.Combine(dir, "rung.bin");
             await File.WriteAllBytesAsync(src, data);
             await using BlobServer server = await ServeAtAsync(lab, src, "198.51.100.10", 34110);
             Shape(lab, 8_000_000);
 
-            BlobDownloadResult warm = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "warmup"),
-                options: DownOptions(lab, 34020)).WaitAsync(Budget);
-            Assert.Equal(data, await File.ReadAllBytesAsync(warm.Path));
             int socketsAtRest = lab.Net.LiveSockets;
-
+            var budget = new BlobFlowBudget(4 * 1024 * 1024);
             var sw = Stopwatch.StartNew();
             var deadline = TimeSpan.FromMinutes(minutes);
-            int completed = 0, cancelled = 0;
-            var errors = new List<string>();
+            int completed = 0, cancelled = 0, resumed = 0, blackouts = 0, cycles = 0, errors = 0;
+            long verifiedBytes = 0;
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
 
-            async Task RecordSampleAsync()
+            SoakSample ReadSample()
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
                 using var proc = Process.GetCurrentProcess();
-                string row = $"{sw.Elapsed.TotalSeconds:F0},{GC.GetTotalMemory(false) / 1048576.0:F1},"
-                    + $"{proc.Threads.Count},{proc.HandleCount},{lab.Net.LiveSockets},"
-                    + $"{BlobFlowBudget.Shared.UsedBytes},{completed},{cancelled},{errors.Count}";
-                observations.Add(row);
-                // A crash or runner kill must not erase the earlier observations.
-                await File.AppendAllTextAsync(reportPath, row + Environment.NewLine);
+                return new(sw.Elapsed.TotalSeconds, GC.GetTotalMemory(false), proc.Threads.Count,
+                    proc.HandleCount, Timer.ActiveCount, ThreadPool.PendingWorkItemCount,
+                    lab.Net.LiveSockets, server.Node.Connections.Count, server.ActiveServingTasks,
+                    budget.UsedBytes, proc.TotalProcessorTime.TotalSeconds, GC.GetTotalAllocatedBytes(true));
             }
 
-            await RecordSampleAsync();
-            long nextSample = 60;
-            while (sw.Elapsed < deadline)
+            async Task<SoakSample> RecordSampleAsync()
             {
-                string outDir = Path.Combine(dir, $"out{completed + cancelled}");
-                var stats = new BlobTransferStats();
+                SoakSample sample = ReadSample();
+                observations.Add(sample);
+                object[] values = [sample.ElapsedSeconds, sample.HeapBytes, sample.Threads, sample.Handles,
+                    sample.Timers, sample.PendingWork, sample.LiveSockets, sample.Connections,
+                    sample.ServingTasks, sample.BudgetUsed, sample.CpuSeconds, sample.AllocatedBytes,
+                    verifiedBytes, completed, cancelled, resumed, blackouts, cycles, errors];
+                string row = string.Join(",", values.Select(value => Convert.ToString(value, CultureInfo.InvariantCulture)));
+                await File.AppendAllTextAsync(reportPath, row + Environment.NewLine);
+                return sample;
+            }
+
+            async Task TransferAsync(string outDir, int port, int kind)
+            {
                 using var cts = new CancellationTokenSource();
-                Task<BlobDownloadResult> run = BlobClient.DownloadAsync(server.Ticket, outDir,
-                    options: DownOptions(lab, 34020) with { Stats = stats }, ct: cts.Token);
-
-                // Weather: a short blackout mid-transfer on a third of the cycles, a
-                // cancel on a third, a clean run otherwise. The blackout lifts before the
-                // await — it is mid-transfer weather to ride out, not the whole run.
-                int pick = rng.Next(3);
-                if (pick == 0)
+                using var resumeCts = new CancellationTokenSource();
+                Task<BlobDownloadResult>? retry = null;
+                var cutStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                LinkRule cut = LinkRule.Blackhole(region);
+                int cutInstalled = 0;
+                int blackoutMs = kind == 0 ? 600 + rng.Next(800) : 0;
+                var progress = new SyncProgress(p =>
                 {
-                    LinkRule cut = LinkRule.Blackhole(region);
-                    lab.Net.AddRule(cut);
-                    await Task.Delay(600 + rng.Next(800));
-                    lab.Net.RemoveRule(cut);
-                }
-                else
+                    if (kind == 0 && p.VerifiedBytes >= 32 * 1024 && Interlocked.Exchange(ref cutInstalled, 1) == 0)
+                    {
+                        lab.Net.AddRule(cut);
+                        cutStarted.TrySetResult();
+                    }
+                    if (kind == 1 && p.VerifiedBytes >= 64 * 1024 && p.TotalBytes - p.VerifiedBytes > 64 * 1024)
+                        cts.Cancel(); // on the verifier: cancellation cannot race past completion
+                });
+                var options = DownOptions(lab, port) with
                 {
-                    // A cancel must land mid-transfer deterministically: 512 KiB over an
-                    // 8 Mbit/s link cannot finish before ~520 ms of wire time.
-                    await Task.Delay(pick == 1 ? 200 : 600 + rng.Next(800));
-                }
-
+                    FlowBudget = budget, MaxWindowBytes = kind == 1 ? 8192 : 1024 * 1024,
+                };
+                Task<BlobDownloadResult> run = BlobClient.DownloadAsync(server.Ticket, outDir, progress, options, cts.Token);
                 try
                 {
-                    if (pick == 1)
+                    if (kind == 0)
                     {
-                        cts.Cancel();
-                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run).WaitAsync(TestBudget.Scenario);
-                        cancelled++;
+                        await cutStarted.Task.WaitAsync(Budget);
+                        await Task.Delay(blackoutMs);
+                        lab.Net.RemoveRule(cut);
+                        Interlocked.Increment(ref blackouts);
                     }
-                    else
+                    BlobDownloadResult result;
+                    if (kind == 1)
                     {
-                        BlobDownloadResult r = await run.WaitAsync(Budget);
-                        Assert.Equal(data, await File.ReadAllBytesAsync(r.Path));
-                        completed++;
+                        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run).WaitAsync(Budget);
+                        Interlocked.Increment(ref cancelled);
+                        retry = BlobClient.DownloadAsync(server.Ticket, outDir, options: options, ct: resumeCts.Token);
+                        result = await retry.WaitAsync(Budget);
+                        Assert.True(result.Resumed, "cancelled cycle discarded its verified checkpoint");
+                        Interlocked.Increment(ref resumed);
                     }
+                    else result = await run.WaitAsync(Budget);
+                    Assert.Equal(data, await File.ReadAllBytesAsync(result.Path));
+                    Interlocked.Add(ref verifiedBytes, result.Bytes);
+                    Interlocked.Increment(ref completed);
                 }
-                catch (Exception ex)
+                finally
                 {
-                    errors.Add($"{sw.Elapsed:mm\\:ss} {ex.GetType().Name}: {ex.Message}");
+                    lab.Net.RemoveRule(cut);
                     cts.Cancel();
-                    try { await run.WaitAsync(TestBudget.Teardown); }
-                    catch (Exception cleanup) when (cleanup is OperationCanceledException or TimeoutException or InvalidOperationException) { }
-                }
-
-                if (lab.Net.LiveSockets != socketsAtRest || BlobFlowBudget.Shared.UsedBytes != 0)
-                    await RecordSampleAsync();
-                Assert.Equal(socketsAtRest, lab.Net.LiveSockets);
-                Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);
-
-                if (sw.Elapsed.TotalSeconds >= nextSample)
-                {
-                    nextSample += 60;
-                    await RecordSampleAsync();
+                    resumeCts.Cancel();
+                    Task[] pending = retry is null ? [run] : [run, retry];
+                    foreach (Task task in pending.Where(task => !task.IsCompleted))
+                    {
+                        try { await task.WaitAsync(TestBudget.Teardown); }
+                        catch (OperationCanceledException) { }
+                    }
                 }
             }
 
-            await RecordSampleAsync();
-            Assert.Empty(errors);
-            Assert.True(completed + cancelled > 0, "the soak ran zero workload cycles");
-            Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);
-            output.WriteLine($"soak {minutes} min: {completed} completed, {cancelled} cancelled, " +
-                             $"{errors.Count} errors; observations -> {reportPath}");
+            async Task CycleAsync(int kind)
+            {
+                string first = Path.Combine(dir, "client-a"), second = Path.Combine(dir, "client-b");
+                try
+                {
+                    await Task.WhenAll(TransferAsync(first, 34020, kind), TransferAsync(second, 34021, 2));
+                    await TestPoll.UntilAsync(TestBudget.Teardown, () => server.Node.Connections.Count == 0
+                        && server.ActiveServingTasks == 0 && lab.Net.LiveSockets == socketsAtRest && budget.UsedBytes == 0);
+                }
+                finally
+                {
+                    // Keep disk usage constant for 24h/72h; observations live outside dir.
+                    if (Directory.Exists(first)) Directory.Delete(first, recursive: true);
+                    if (Directory.Exists(second)) Directory.Delete(second, recursive: true);
+                }
+                Assert.Equal(socketsAtRest, lab.Net.LiveSockets);
+                Assert.Equal(0, budget.UsedBytes);
+                Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);
+            }
+
+            // Warm all three workloads with both peers before deriving budgets.
+            SoakSample warmStart = ReadSample();
+            for (int kind = 0; kind < 3; kind++) await CycleAsync(kind);
+            SoakSample warmEnd = ReadSample();
+            double cpuCoreLimit = Math.Min(Environment.ProcessorCount,
+                Math.Max(1, 4 * (warmEnd.CpuSeconds - warmStart.CpuSeconds) / (warmEnd.ElapsedSeconds - warmStart.ElapsedSeconds)));
+            double allocationRatioLimit = Math.Max(128,
+                4.0 * (warmEnd.AllocatedBytes - warmStart.AllocatedBytes) / verifiedBytes);
+            completed = cancelled = resumed = blackouts = 0;
+            verifiedBytes = 0;
+            sw.Restart();
+            SoakSample baseline = await RecordSampleAsync();
+            const long heapGrowthLimit = 16 * 1024 * 1024;
+            const int threadGrowthLimit = 16, handleGrowthLimit = 32, timerGrowthLimit = 32;
+            const double heapSlopeLimit = 2 * 1024 * 1024, threadSlopeLimit = 1, handleSlopeLimit = 2, timerSlopeLimit = 1;
+            string HashAssembly(Type type) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(type.Assembly.Location))).ToLowerInvariant();
+            await File.WriteAllTextAsync(Path.Combine(reportDir, "metadata.json"), JsonSerializer.Serialize(new
+            {
+                Seed = seed, Minutes = minutes, StartedUtc = DateTimeOffset.UtcNow,
+                SourceCommit = Environment.GetEnvironmentVariable("PINHOLE_SOAK_COMMIT"),
+                Runtime = RuntimeInformation.FrameworkDescription, OS = RuntimeInformation.OSDescription,
+                Architecture = RuntimeInformation.ProcessArchitecture.ToString(),
+                AssemblySha256 = new { Test = HashAssembly(typeof(BoundedResourceTests)), Core = HashAssembly(typeof(PinholeNode)), Blobs = HashAssembly(typeof(BlobClient)) },
+                Workload = new { Clients = 2, BytesPerFile = FlowBytes, LinkBitsPerSecond = 8_000_000,
+                    Cases = new[] { "concurrent downloads", "verified cancel/resume", "600-1400ms mid-transfer blackouts" },
+                    Excludes = new[] { "relay restarts", "roaming", "long outages", "real OS networking" } },
+                Baseline = baseline,
+                Budgets = new { HeapGrowthBytes = heapGrowthLimit, AdditionalThreads = threadGrowthLimit,
+                    AdditionalHandles = handleGrowthLimit, AdditionalTimers = timerGrowthLimit,
+                    PendingThreadPoolWork = 64, CpuCores = cpuCoreLimit, AllocationBytesPerVerifiedByte = allocationRatioLimit,
+                    HeapSlopeBytesPerHour = heapSlopeLimit, ThreadSlopePerHour = threadSlopeLimit,
+                    HandleSlopePerHour = handleSlopeLimit, TimerSlopePerHour = timerSlopeLimit,
+                    SlopeMinimumHours = 1, SlopeWarmupMinutes = 5 },
+            }, new JsonSerializerOptions { WriteIndented = true }));
+
+            void CheckBudgets(SoakSample sample)
+            {
+                Assert.True(sample.HeapBytes - baseline.HeapBytes <= heapGrowthLimit, "soak exceeded its declared heap budget");
+                Assert.True(sample.Threads - baseline.Threads <= threadGrowthLimit, "soak exceeded its declared thread budget");
+                Assert.True(sample.Handles - baseline.Handles <= handleGrowthLimit, "soak exceeded its declared handle budget");
+                Assert.True(sample.Timers - baseline.Timers <= timerGrowthLimit, "soak exceeded its declared timer budget");
+                Assert.True(sample.PendingWork <= 64, "soak exceeded its declared thread-pool queue budget");
+                if (sample.ElapsedSeconds < 60) return;
+                Assert.True((sample.CpuSeconds - baseline.CpuSeconds) / sample.ElapsedSeconds <= cpuCoreLimit, "soak exceeded its declared CPU budget");
+                Assert.True((sample.AllocatedBytes - baseline.AllocatedBytes) / (double)Math.Max(FlowBytes, verifiedBytes) <= allocationRatioLimit,
+                    "soak exceeded its declared allocation budget");
+            }
+
+            try
+            {
+                long nextSample = 60;
+                while (sw.Elapsed < deadline)
+                {
+                    await CycleAsync(cycles < 3 ? cycles : rng.Next(3));
+                    cycles++;
+                    if (sw.Elapsed.TotalSeconds >= nextSample)
+                    {
+                        nextSample += 60;
+                        CheckBudgets(await RecordSampleAsync());
+                    }
+                }
+                CheckBudgets(await RecordSampleAsync());
+                Assert.True(completed > 0 && resumed > 0 && blackouts > 0, "soak did not exercise every declared workload");
+                SoakSample[] settled = observations.Where(s => s.ElapsedSeconds >= 300).ToArray();
+                if (settled.Length >= 2 && settled[^1].ElapsedSeconds - settled[0].ElapsedSeconds >= 3600)
+                {
+                    Assert.True(SoakSlope(settled, s => s.HeapBytes) <= heapSlopeLimit, "soak exceeded its declared heap leak slope");
+                    Assert.True(SoakSlope(settled, s => s.Threads) <= threadSlopeLimit, "soak exceeded its declared thread leak slope");
+                    Assert.True(SoakSlope(settled, s => s.Handles) <= handleSlopeLimit, "soak exceeded its declared handle leak slope");
+                    Assert.True(SoakSlope(settled, s => s.Timers) <= timerSlopeLimit, "soak exceeded its declared timer leak slope");
+                }
+                output.WriteLine($"soak {minutes} min: {cycles} cycles, {completed} completed, {cancelled} cancelled, {resumed} resumed; report={reportDir}");
+            }
+            catch (Exception ex)
+            {
+                errors++;
+                await RecordSampleAsync();
+                await File.WriteAllTextAsync(Path.Combine(reportDir, "failure.json"), JsonSerializer.Serialize(new
+                    { Seed = seed, Cycle = cycles, Exception = ex.GetType().Name, ex.Message }, new JsonSerializerOptions { WriteIndented = true }));
+                throw;
+            }
         }
         finally
         {
-            // Raw observations survive the run regardless of outcome — the issue asks for
-            // attached evidence, not anecdotes.
-            await File.WriteAllLinesAsync(reportPath, observations);
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    private sealed record SoakSample(double ElapsedSeconds, long HeapBytes, int Threads, int Handles,
+        long Timers, long PendingWork, int LiveSockets, int Connections, int ServingTasks, long BudgetUsed,
+        double CpuSeconds, long AllocatedBytes);
+
+    private static double SoakSlope(SoakSample[] samples, Func<SoakSample, double> value)
+    {
+        double meanTime = samples.Average(s => s.ElapsedSeconds / 3600), meanValue = samples.Average(value);
+        double numerator = 0, denominator = 0;
+        foreach (SoakSample sample in samples)
+        {
+            double time = sample.ElapsedSeconds / 3600 - meanTime;
+            numerator += time * (value(sample) - meanValue);
+            denominator += time * time;
+        }
+        return numerator / denominator;
     }
 
     /// <summary>Skips unless PINHOLE_SOAK_MINUTES names a duration — the same mechanism as
