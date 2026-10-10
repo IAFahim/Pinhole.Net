@@ -59,6 +59,7 @@ internal sealed class ConnState
     public volatile PortPredictionState? Prediction;
     public int TcpDialing;
     public long LastTcpAttempt;
+    public long LastTcpLinkTicks;           // last batch that actually established a link
     public TcpLink? ProbeTcp;
     public IUdpSocket? ProbeUdpSocket;
     public IPEndPoint? RelayRemote;          // peer's relayed address
@@ -2612,19 +2613,28 @@ internal sealed partial class NodeEngine : IDisposable
 
     private async Task TryTcpPathsAsync(ConnState c, PinholeCandidate[] candidates, CancellationToken stop)
     {
+        long now = Environment.TickCount64;
         long lastAttempt = Volatile.Read(ref c.LastTcpAttempt);
+        long lastLink = Volatile.Read(ref c.LastTcpLinkTicks);
         if (_tcp is not { } transport || c.Crypto is null || c.Dead.IsCancellationRequested
-            || lastAttempt != 0 && Environment.TickCount64 - lastAttempt < 5_000
+            // A wholly failed batch only backs off briefly: dial budgets are seconds
+            // long, and one refused connect or slow greeting must not eat the whole
+            // budget (batches serialize via TcpDialing and the punch pace paces them).
+            || lastAttempt != 0 && now - lastAttempt < 1_000
+            // A batch that established a link is still carrying the handshake; re-dialing
+            // sooner would only churn live links.
+            || lastLink != 0 && now - lastLink < 5_000
             || Interlocked.CompareExchange(ref c.TcpDialing, 1, 0) != 0) return;
         try
         {
-            Volatile.Write(ref c.LastTcpAttempt, Environment.TickCount64);
+            Volatile.Write(ref c.LastTcpAttempt, now);
             IReadOnlyList<int> scopes = LinkLocalSendScopes();
             IPEndPoint[] targets = candidates.Where(candidate => candidate.Kind is CandidateKind.Direct or CandidateKind.Reflexive)
                 .SelectMany(candidate => ScopeLinkLocal(candidate.Address, scopes)).Distinct().Take(8).ToArray();
             await Task.WhenAll(targets.Select(async target =>
             {
                 TcpLink? link = await transport.ConnectAsync(target, stop).ConfigureAwait(false);
+                if (link is not null) Volatile.Write(ref c.LastTcpLinkTicks, Environment.TickCount64);
                 if (link is null || !link.BindPeer(c.PeerId)) return;
                 if (c.State == PinholeConnectionState.Closed || c.Dead.IsCancellationRequested) { link.Dispose(); return; }
                 if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct && c.DirectTcp is null) return;
