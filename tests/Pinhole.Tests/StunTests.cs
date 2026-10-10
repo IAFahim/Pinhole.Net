@@ -19,7 +19,9 @@ public sealed class FakeStunServer : IDisposable
         _udp = new Socket(ipv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _udp.Bind(new IPEndPoint(ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback, 0));
         LocalEndPoint = (IPEndPoint)_udp.LocalEndPoint!;
-        _ = Task.Run(RunAsync);
+        // Arm the receive before returning. An extra pool dispatch could consume
+        // the client's entire probe deadline before this local fixture starts.
+        _ = RunAsync();
     }
 
     public IPEndPoint LocalEndPoint { get; }

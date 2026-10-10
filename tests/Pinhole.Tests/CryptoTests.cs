@@ -666,6 +666,45 @@ public class CryptoTests
         public ConnectionString StringPointingAt(IPEndPoint ep) => new(
             PeerId, [new PinholeCandidate(CandidateKind.Direct, ep)], NatHint.Unknown, Identity.PublicKey);
 
+        public byte[] CurrentPunch()
+        {
+            byte[] punc = new byte[77]; punc[0] = 0x50;
+            BinaryPrimitives.WriteUInt64LittleEndian(punc.AsSpan(1), PeerId);
+            BinaryPrimitives.WriteUInt32LittleEndian(punc.AsSpan(9), Token);
+            _crypto!.MyEphPublic.CopyTo(punc, 13); _crypto.MyStaticPublic.CopyTo(punc, 45);
+            return punc;
+        }
+
+        public async Task SendUnfinishedIncomingHandshakeAsync(PinholeNode node, bool confirm, NodeIdentity? identity = null)
+        {
+            var crypto = ConnectionCrypto.New(identity ?? Identity, PeerId, node.PeerId);
+            var target = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
+            byte[] punc = new byte[77]; punc[0] = 0x50;
+            BinaryPrimitives.WriteUInt64LittleEndian(punc.AsSpan(1), PeerId);
+            BinaryPrimitives.WriteUInt32LittleEndian(punc.AsSpan(9), Token);
+            crypto.MyEphPublic.CopyTo(punc, 13); crypto.MyStaticPublic.CopyTo(punc, 45);
+            await Sock.SendToAsync(punc, target);
+            using var deadline = new CancellationTokenSource(Timeout);
+            var reply = new byte[8192];
+            while (true)
+            {
+                var received = await Sock.ReceiveFromAsync(reply, new IPEndPoint(IPAddress.Any, 0), deadline.Token);
+                if (received.ReceivedBytes != 97 || reply[0] != 0x51) continue;
+                Assert.True(crypto.TryPeerKeys(reply.AsSpan(17, 32), reply.AsSpan(49, 32)));
+                Assert.True(crypto.VerifyPeerConfirm(reply.AsSpan(81, 16)));
+                break;
+            }
+            if (confirm)
+            {
+                byte[] hsck = new byte[29]; hsck[0] = 0x57;
+                BinaryPrimitives.WriteUInt64LittleEndian(hsck.AsSpan(1), PeerId);
+                BinaryPrimitives.WriteUInt32LittleEndian(hsck.AsSpan(9), Token);
+                crypto.MyConfirm().CopyTo(hsck, 13);
+                await Sock.SendToAsync(hsck, target);
+                await TestPoll.UntilAsync(Timeout, () => node.Engine.Lookup(PeerId)?.Crypto?.PeerConfirmed == true);
+            }
+        }
+
         /// <summary>Waits for the node's crypto PUNC, derives the same keys, answers PACK.
         /// The node must already be dialing this peer.</summary>
         public async Task ShakeHandsAsync(PinholeNode node, CancellationToken ct = default, uint? advertisedToken = null)
@@ -813,6 +852,91 @@ public class CryptoTests
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "real token"u8),
             new IPEndPoint(IPAddress.Loopback, node.LocalPort));
         Assert.Equal("real token"u8.ToArray(), await got.Task.WaitAsync(Timeout));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WireOracle_ExplicitDialAdoptsAnUnfinishedIncomingHandshakeAndFreshPeerKeys(bool confirmOldKeys)
+    {
+        await using var node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirmOldKeys);
+        ConnState incoming = node.Engine.Lookup(oracle.PeerId)!;
+        Assert.True(incoming.IsIncoming);
+        Assert.False(incoming.RemoteTokenAuthenticated);
+        Assert.False(incoming.Connected.Task.IsCompleted);
+
+        using var deadline = new CancellationTokenSource(Timeout);
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString(), deadline.Token);
+        await oracle.ShakeHandsAsync(node, deadline.Token); // the peer's new connection has new ephemeral keys
+        await using var connected = await dial.WaitAsync(Timeout);
+        Assert.Same(incoming.Public, connected);
+        Assert.Equal(oracle.Identity.PublicKey, incoming.PinnedStaticKey);
+        Assert.True(incoming.RemoteTokenAuthenticated);
+        Assert.True(connected.IsEncrypted);
+    }
+
+    [Fact]
+    public async Task WireOracle_IdempotentDialStillChecksTheRequestedStaticKey()
+    {
+        await using var node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
+        await oracle.ShakeHandsAsync(node);
+        await using var connected = await dial.WaitAsync(Timeout);
+        string wrongPin = new ConnectionString(oracle.PeerId,
+            [new PinholeCandidate(CandidateKind.Direct, oracle.Ep)], staticKey: new NodeIdentity().PublicKey).ToString();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => node.ConnectAsync(wrongPin));
+        Assert.Equal(PinholeConnectionState.Open, connected.State);
+        Assert.Same(connected, await node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString()));
+    }
+
+    [Fact]
+    public async Task WireOracle_UnprovedIncomingKeyCannotBlockAPinnedDial()
+    {
+        await using var node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirm: true, identity: new NodeIdentity());
+        ConnState stranger = node.Engine.Lookup(oracle.PeerId)!;
+        using var deadline = new CancellationTokenSource(Timeout);
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString(), deadline.Token);
+        await oracle.ShakeHandsAsync(node, deadline.Token);
+        await using var connected = await dial.WaitAsync(Timeout);
+        Assert.NotSame(stranger.Public, connected);
+        Assert.Equal(PinholeConnectionState.Closed, stranger.State);
+        Assert.Equal(oracle.Identity.PublicKey, connected.RemoteStaticKey);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WireOracle_LatePunchCannotRecreateAClosedAuthenticatedSession(bool remoteClose)
+    {
+        await using var node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
+        await oracle.ShakeHandsAsync(node);
+        await using var connected = await dial.WaitAsync(Timeout);
+        byte[] latePunch = oracle.CurrentPunch();
+        var target = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
+        if (remoteClose) await oracle.Sock.SendToAsync(oracle.SealFrame(0x56, []), target);
+        else await connected.CloseAsync();
+        await TestPoll.UntilAsync(Timeout, () => connected.State == PinholeConnectionState.Closed);
+        await oracle.Sock.SendToAsync(latePunch, target);
+        await TestPoll.UntilAsync(Timeout, () => Volatile.Read(ref node.Engine.StaleHandshakeDrops) > 0);
+        Assert.Null(node.Engine.Lookup(oracle.PeerId));
+
+        using var deadline = new CancellationTokenSource(Timeout);
+        Task<PinholeConnection> redial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString(), deadline.Token);
+        await oracle.ShakeHandsAsync(node, deadline.Token);
+        await using var fresh = await redial.WaitAsync(Timeout);
+        Assert.NotSame(connected, fresh);
+        Assert.True(fresh.IsEncrypted);
     }
 
     [Theory]

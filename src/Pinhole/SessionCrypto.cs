@@ -528,11 +528,18 @@ internal sealed class ConnectionCrypto
     /// while retried PUNCs of the old one are still in flight, and first-seen-wins would
     /// wedge the two forever. A PACK outranks the stale latch only by carrying this
     /// handshake's confirm MAC — computed from the static key's private half, which no
-    /// substitute holds — so the swap is proof-gated, not heuristic. A confirmed session
-    /// never re-keys; a failing confirm leaves the latch untouched.</summary>
-    public bool TrySupersedeUnconfirmed(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm)
+    /// substitute holds — so the swap is proof-gated, not heuristic. An explicit dial
+    /// may also adopt a key-confirmed incoming husk before authenticated traffic or
+    /// application exposure. Active sessions never re-key; a failing confirm leaves
+    /// the latch untouched.</summary>
+    public bool TrySupersedeUnconfirmed(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm,
+        bool allowUnexposedIncoming = false)
     {
-        if (PeerConfirmed || Keys is null)
+        // An explicit dial may adopt a late incoming PUNC/HSCK from the peer's
+        // closed connection. That state has neither authenticated traffic nor an
+        // exposed application connection. A trial PACK still needs a valid MAC
+        // under the requested static key; active sessions never take this path.
+        if (PeerConfirmed && !allowUnexposedIncoming || Keys is null)
         {
             return false; // nothing stale to replace, or too late to replace it
         }
@@ -541,7 +548,7 @@ internal sealed class ConnectionCrypto
         {
             SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat);
             ReadOnlySpan<byte> expected = MyPeerId < PeerPeerId ? trial.HiConfirm : trial.LoConfirm;
-            if (!confirm.SequenceEqual(expected))
+            if (!CryptographicOperations.FixedTimeEquals(confirm, expected))
             {
                 return false;
             }

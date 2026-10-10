@@ -27,7 +27,7 @@ replace the full acceptance checklist in each GitHub issue.
 | #24: independent security/recovery review | Record and fix all material findings, verify fixes, and complete independent review on the final candidate. The separate AI review stopped before completion; it is not a completed human audit or safety certification. |
 | #25: diagnostics | Complete cause-specific events, reproducible JSON reports, latency distributions/cohorts, redaction and opt-in collection guidance. |
 | #26: real network topology | Run pinned Patchbay/kernel configurations and actual HTTPS/TURN servers, including UDP blocking, failure capture and cleanup. Portable simulation is additional evidence. |
-| #27: bottleneck baselines | Investigate the macOS clean-link collapse without lowering its floor; complete sustained seed distributions, asymmetry/reorder/burst cases and actual TCP competition. |
+| #27: bottleneck baselines | The per-chunk worker dispatch and stale-path retry state are fixed; all six performance jobs pass in subsequent matrices without lowering floors. Complete sustained seed distributions, asymmetry/reorder/burst cases and actual TCP competition. |
 | #28: candidate racing | Verify bounded shared-deadline racing, actual HTTPS/proxy/TLS negative cases, cancellation and authenticated upgrade/fallback. |
 | #29: identity and rediscovery | Audit complete full-key/freshness/provider/privacy/restart requirements against current tests and real infrastructure. Both-direction roaming regression is fixed. |
 | #30: relay failover | Finish independent provider/domain, DNS/TLS/proxy, allocation-change and long-outage evidence; only authenticated definitive TURN errors may condemn allocations. |
@@ -79,3 +79,16 @@ replace the full acceptance checklist in each GitHub issue.
 Use `.github/scripts/verify-connectivity-drafts.sh` for the warning-free solution
 build and both frameworks' separate interop, functional, resource and performance
 processes. Required CI does not silently retry, skip or weaken failed gates.
+
+The complete local verification script passed both frameworks at `76b593d`.
+Its CI matrix (`38032055722`) passed every performance and resource job but failed
+three functional jobs: a late PUNC recreated a closed session before the reverse
+dial, signaling cancellation left a similar retry husk, and a queued local STUN
+fixture missed the probe deadline. The follow-up remembers up to 1024 closed
+handshakes, ignores exact authenticated-session PUNC retries for 60 seconds, and
+arms an unfinished incoming connection with an explicit dial's pins, candidates,
+lookup and punch work. A verified PACK may replace old keys only while that
+adopted connection has no authenticated traffic and has never completed its
+application connection. Idempotent dials also check the caller's static key.
+Six new actual UDP regressions cover those cases; 76 focused .NET 10 checks and
+86 .NET 8 checks pass. The local STUN fixture now starts receiving immediately.

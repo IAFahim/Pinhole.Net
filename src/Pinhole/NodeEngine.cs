@@ -50,6 +50,7 @@ internal sealed class ConnState
     public TcpLink? PendingTcp;              // incoming TCP stranger, not accepted before proof
     public bool IncomingQueued;
     public bool IsIncoming;
+    public bool DialAdoptedIncoming;         // Gate: an explicit dial armed an unfinished incoming handshake
     public bool PeerCandidatesReceived;
     public bool AwaitInitialCandidateExchange;
     public long LastCandidateAnnouncement;
@@ -249,7 +250,11 @@ internal sealed partial class NodeEngine : IDisposable
     private long _noConnDrops;
     // Last handshake line per peer from a removed connection: bounded by the connection
     // table's own peer population, overwritten per close.
-    private readonly ConcurrentDictionary<ulong, string> _lastClosedHandshake = new();
+    private sealed record ClosedHandshake(string Summary, uint RemoteToken, byte[]? PeerEphemeral, long ClosedTicks);
+    private readonly ConcurrentDictionary<ulong, ClosedHandshake> _lastClosedHandshake = new();
+    private readonly object _closedHandshakeGate = new();
+    private readonly Queue<ulong> _closedHandshakeOrder = new();
+    internal long StaleHandshakeDrops;
     private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
@@ -1505,6 +1510,57 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (existing.State is not (PinholeConnectionState.Dead or PinholeConnectionState.Closed))
                 {
+                    bool armIncoming;
+                    lock (existing.Gate)
+                    {
+                        if (existing.State is PinholeConnectionState.Dead or PinholeConnectionState.Closed) continue;
+                        // Idempotence cannot bypass the key supplied by this caller. An
+                        // incoming connection may not yet have a ticket pin of its own.
+                        byte[]? knownStatic = existing.Crypto?.PeerStaticPublic ?? existing.PinnedStaticKey;
+                        if (cs.StaticKey is { } requestedStatic
+                            && (existing.Crypto is null || knownStatic is not null && !knownStatic.AsSpan().SequenceEqual(requestedStatic)))
+                        {
+                            // An unproved stranger cannot reserve the requested peer ID
+                            // and prevent the caller from making a pinned dial.
+                            if (existing.IsIncoming && !existing.RemoteTokenAuthenticated && !existing.Connected.Task.IsCompleted)
+                            {
+                                if (_conns.TryRemove(new KeyValuePair<ulong, ConnState>(cs.PeerId, existing)))
+                                {
+                                    Transition(existing, PinholeConnectionState.Closed);
+                                    existing.Dead.Cancel();
+                                }
+                                continue;
+                            }
+                            throw new InvalidOperationException("existing connection does not match the requested peer static key");
+                        }
+                        if (cs.EndpointKey is { } requestedEndpoint && existing.PinnedEndpointKey is { } knownEndpoint
+                            && !knownEndpoint.AsSpan().SequenceEqual(requestedEndpoint))
+                            throw new InvalidOperationException("existing connection does not match the requested endpoint key");
+
+                        armIncoming = existing.IsIncoming && !existing.Connected.Task.IsCompleted && !existing.DialAdoptedIncoming;
+                        if (armIncoming)
+                        {
+                            existing.DialAdoptedIncoming = true;
+                            existing.PinnedStaticKey = cs.StaticKey;
+                            existing.PinnedEndpointKey = cs.EndpointKey;
+                            existing.SymmetricHint = cs.NatHint == NatHint.Symmetric;
+                        }
+                    }
+                    if (armIncoming)
+                    {
+                        // A late PUNC can create a candidate-less incoming husk just
+                        // before the dial. Reuse its handshake for simultaneous dials,
+                        // but give it the ticket's targets, pin, lookup and punch work.
+                        lock (_gate)
+                            foreach (PinholeCandidate candidate in cs.Candidates)
+                                if (existing.PeerCandidates.Count < ConnectionString.MaxCandidates
+                                    && !existing.PeerCandidates.Any(old => old.Kind == candidate.Kind
+                                        && old.Address.Equals(candidate.Address) && old.RelayUrl == candidate.RelayUrl))
+                                    existing.PeerCandidates.Add(candidate);
+                        if (cs.Candidates.Any(x => x.Kind == CandidateKind.Relay)) _ = WarmRelayForDialAsync(cs, ct);
+                        if (_lookup.Count > 0 && cs.EndpointKey is { } endpoint) _ = ResolveViaLookupAsync(existing, endpoint, ct);
+                        KickPunch(existing);
+                    }
                     return existing; // idempotent dials (and in-flight dials) return the live connection
                 }
 
@@ -1622,12 +1678,29 @@ internal sealed partial class NodeEngine : IDisposable
         return c;
     }
 
+    private void RememberClosedHandshake(ConnState c)
+    {
+        // Record before removal: a delayed retry must not recreate the just-closed
+        // session in the gap between table retirement and writing its tombstone.
+        ClosedHandshake closed;
+        lock (c.Gate)
+            closed = new(LiveHandshakeSummary(c) + $" final={c.State}", c.RemoteToken,
+                c.RemoteTokenAuthenticated ? c.Crypto?.PeerEphPublic?.ToArray() : null, Environment.TickCount64);
+        lock (_closedHandshakeGate)
+        {
+            if (!_lastClosedHandshake.ContainsKey(c.PeerId)) _closedHandshakeOrder.Enqueue(c.PeerId);
+            _lastClosedHandshake[c.PeerId] = closed;
+            while (_lastClosedHandshake.Count > MaxConnections && _closedHandshakeOrder.TryDequeue(out ulong oldest))
+                _lastClosedHandshake.TryRemove(oldest, out _);
+        }
+    }
+
     public async Task CloseAsync(ConnState c)
     {
+        RememberClosedHandshake(c);
         // Identity check: a concurrent re-dial may have replaced this entry, and the
         // loser's close must not tear down the winner's live connection.
         _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
-        _lastClosedHandshake[c.PeerId] = LiveHandshakeSummary(c) + $" final={c.State}";
 
         Span<byte> bye = stackalloc byte[HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead];
         int len = BuildFrame(c, FrameType.Bye, ReadOnlySpan<byte>.Empty, bye);
@@ -2828,6 +2901,16 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
+            if (crypto && _lastClosedHandshake.TryGetValue(BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]), out ClosedHandshake? closed)
+                && Environment.TickCount64 - closed.ClosedTicks < 60_000
+                && closed.PeerEphemeral is { } ephemeral
+                && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == closed.RemoteToken
+                && frame.Slice(HeaderSize + CryptoWire.TokenLength, CryptoWire.EphemeralLength).SequenceEqual(ephemeral))
+            {
+                Interlocked.Increment(ref StaleHandshakeDrops);
+                return; // retry of an authenticated session we already closed; fresh keys still dial normally
+            }
+
             if (TraceEnabled)
             {
                 TraceLine($"stranger punc from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} " +
@@ -2915,6 +2998,7 @@ internal sealed partial class NodeEngine : IDisposable
                 OnHsck(c, frame, arrival);
                 break;
             case FrameType.Bye:
+                RememberClosedHandshake(c);
                 // Remove only this connection's entry: a Bye from a replaced husk must not
                 // tear down the re-dial winner registered under the same peer ID.
                 _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
@@ -2949,17 +3033,16 @@ internal sealed partial class NodeEngine : IDisposable
         bool cryptoPunc = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
 
-        if (cryptoPunc && c.PinnedStaticKey is { } pinned
-            && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
-        {
-            Reject(c, 5);
-            c.Crypto?.CountRejected();
-            return; // an initial/reverse PUNC must honor the same pin as its PACK
-        }
-
         ConnectionCrypto? crypto;
         lock (c.Gate)
         {
+            if (cryptoPunc && c.PinnedStaticKey is { } pinned
+                && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
+            {
+                Reject(c, 5);
+                c.Crypto?.CountRejected();
+                return; // explicit-dial adoption can install a pin while frames arrive
+            }
             if (c.RemoteTokenKnown && c.RemoteToken != token && (c.Crypto is null || c.RemoteTokenAuthenticated))
             {
                 Reject(c, 3, c.RemoteToken, token, arrival);
@@ -3086,19 +3169,16 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 TraceLine($"crypto pack from {c.PeerId:x16} via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
             }
-            if (c.PinnedStaticKey is { } pinned && !body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
-            {
-                // The answering key is not the key the string vouches for: a machine in the
-                // middle, or a stale string. Either way the session is dead on arrival.
-                Reject(c, 5);
-                crypto.CountRejected();
-                HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
-                return;
-            }
-
             bool sendHsck;
             lock (c.Gate)
             {
+                if (c.PinnedStaticKey is { } pinned && !body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
+                {
+                    Reject(c, 5);
+                    crypto.CountRejected();
+                    HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
+                    return;
+                }
                 uint remoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
                 // Confirmation binds the keys, not these token fields. A replayed PACK
                 // with an edited token must not change an authenticated session's token.
@@ -3113,7 +3193,8 @@ internal sealed partial class NodeEngine : IDisposable
                     && !crypto.TrySupersedeUnconfirmed(
                         body[..CryptoWire.EphemeralLength],
                         body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength),
-                        body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
+                        body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength),
+                        allowUnexposedIncoming: c.DialAdoptedIncoming && !c.RemoteTokenAuthenticated && !c.Connected.Task.IsCompleted))
                 {
                     RejectKeys(c, body[..CryptoWire.EphemeralLength]);
                     crypto.CountRejected();
@@ -4289,8 +4370,8 @@ internal sealed partial class NodeEngine : IDisposable
             return LiveHandshakeSummary(c);
         }
 
-        return _lastClosedHandshake.TryGetValue(peerId, out string? last)
-            ? last + " (since closed)"
+        return _lastClosedHandshake.TryGetValue(peerId, out ClosedHandshake? last)
+            ? last.Summary + " (since closed)"
             : "no conn";
     }
 
