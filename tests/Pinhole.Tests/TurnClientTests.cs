@@ -87,6 +87,9 @@ public sealed class FakeTurnServer : IDisposable
     /// error code (e.g. 429 quota, 401 revoked credentials) and no allocation is made.
     /// Counts in <see cref="AllocateRejections"/> so a test can bound retry storms.</summary>
     public int RejectAllocationsWithCode;
+    /// <summary>Test seam: send one altered control response before the genuine response.
+    /// Data indications and unsigned authentication challenges are excluded.</summary>
+    public Func<byte[], byte[]?>? InvalidResponseBeforeReply;
 
     /// <summary>When true (the default), a data indication is only delivered to an
     /// allocation that holds a permission for the SENDER's relayed address — the RFC 5766
@@ -162,14 +165,14 @@ public sealed class FakeTurnServer : IDisposable
     {
         if (attrs.All(a => a.Type != AttrUsername))
         {
-            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized");
+            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized", authenticated: false);
             return;
         }
 
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized");
+            ReplyError(remote, TypeAllocate | ClassError, txid, 401, "Unauthorized", authenticated: false);
             return;
         }
 
@@ -213,7 +216,7 @@ public sealed class FakeTurnServer : IDisposable
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, TypeRefresh | ClassError, txid, 401, "Unauthorized");
+            ReplyError(remote, TypeRefresh | ClassError, txid, 401, "Unauthorized", authenticated: false);
             return;
         }
 
@@ -249,7 +252,7 @@ public sealed class FakeTurnServer : IDisposable
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
-            ReplyError(remote, TypeCreatePerm | ClassError, txid, 401, "Unauthorized");
+            ReplyError(remote, TypeCreatePerm | ClassError, txid, 401, "Unauthorized", authenticated: false);
             return;
         }
 
@@ -385,15 +388,32 @@ public sealed class FakeTurnServer : IDisposable
         return list;
     }
 
-    private void Reply(EndPoint to, byte[] msg) => _main.SendTo(msg, SocketFlags.None, to);
+    private void Reply(EndPoint to, byte[] msg, bool authenticated = true)
+    {
+        if (authenticated && BinaryPrimitives.ReadUInt16BigEndian(msg) != 0x0017)
+        {
+            int offset = msg.Length;
+            byte[] signed = new byte[offset + 24];
+            msg.CopyTo(signed, 0);
+            BinaryPrimitives.WriteUInt16BigEndian(signed.AsSpan(2), (ushort)(signed.Length - 20));
+            BinaryPrimitives.WriteUInt16BigEndian(signed.AsSpan(offset), AttrMessageIntegrity);
+            BinaryPrimitives.WriteUInt16BigEndian(signed.AsSpan(offset + 2), 20);
+            HMACSHA1.HashData(_key, signed.AsSpan(0, offset)).CopyTo(signed, offset + 4);
+            msg = signed;
+            if (InvalidResponseBeforeReply?.Invoke(signed.ToArray()) is { } invalid)
+                _main.SendTo(invalid, SocketFlags.None, to);
+        }
+        _main.SendTo(msg, SocketFlags.None, to);
+    }
 
-    private void ReplyError(EndPoint to, ushort errorType, byte[] txid, int code, string reason)
+    private void ReplyError(EndPoint to, ushort errorType, byte[] txid, int code, string reason,
+        bool authenticated = true)
     {
         byte[] errCode = new byte[4 + reason.Length];
         errCode[2] = (byte)(code / 100);
         errCode[3] = (byte)(code % 100);
         Encoding.ASCII.GetBytes(reason).CopyTo(errCode, 4);
-        Reply(to, Build(errorType, txid, Attr(AttrErrorCode, errCode), Attr(AttrRealm, Utf8(_realm)), Attr(AttrNonce, Utf8(CurrentNonce))));
+        Reply(to, Build(errorType, txid, Attr(AttrErrorCode, errCode), Attr(AttrRealm, Utf8(_realm)), Attr(AttrNonce, Utf8(CurrentNonce))), authenticated);
     }
 
     private static byte[] Build(ushort type, byte[] txid, params byte[][] attrs)
@@ -476,6 +496,77 @@ public sealed class FakeTurnServer : IDisposable
 public sealed class TurnClientTests
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
+
+    [Theory]
+    [InlineData("missing-integrity")]
+    [InlineData("invalid-integrity")]
+    [InlineData("transaction-suffix")]
+    [InlineData("wrong-method")]
+    [InlineData("unsigned-rejection")]
+    [InlineData("attributes-after-integrity")]
+    public async Task Allocate_IgnoresInvalidResponsesAndUnprotectedAttributes(string variant)
+    {
+        using FakeTurnServer server = new();
+        server.InvalidResponseBeforeReply = response =>
+        {
+            const uint cookie = 0x2112A442;
+            int integrity = response.Length - 24;
+            byte[] wrongAddress = new byte[12];
+            wrongAddress[1] = 1;
+            BinaryPrimitives.WriteUInt16BigEndian(wrongAddress.AsSpan(2), (ushort)(5555 ^ (cookie >> 16)));
+            byte[] raw = IPAddress.Parse("203.0.113.200").GetAddressBytes();
+            for (int i = 0; i < 4; i++) wrongAddress[4 + i] = (byte)(raw[i] ^ (cookie >> (24 - i * 8)));
+
+            if (variant == "unsigned-rejection")
+            {
+                byte[] error = new byte[28];
+                response.AsSpan(0, 20).CopyTo(error);
+                BinaryPrimitives.WriteUInt16BigEndian(error, 0x0113);
+                BinaryPrimitives.WriteUInt16BigEndian(error.AsSpan(2), 8);
+                BinaryPrimitives.WriteUInt16BigEndian(error.AsSpan(20), 0x0009);
+                BinaryPrimitives.WriteUInt16BigEndian(error.AsSpan(22), 4);
+                error[26] = 4; error[27] = 37;
+                return error;
+            }
+            if (variant == "attributes-after-integrity")
+            {
+                byte[] appended = new byte[response.Length + 12];
+                response.CopyTo(appended, 0);
+                BinaryPrimitives.WriteUInt16BigEndian(appended.AsSpan(2), (ushort)(appended.Length - 20));
+                BinaryPrimitives.WriteUInt16BigEndian(appended.AsSpan(response.Length), 0x0016);
+                BinaryPrimitives.WriteUInt16BigEndian(appended.AsSpan(response.Length + 2), 8);
+                wrongAddress.AsSpan(0, 8).CopyTo(appended.AsSpan(response.Length + 4));
+                return appended;
+            }
+
+            for (int pos = 20; pos < integrity;)
+            {
+                int length = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(pos + 2));
+                if (BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(pos)) == 0x0016)
+                    wrongAddress.AsSpan(0, 8).CopyTo(response.AsSpan(pos + 4));
+                pos += 4 + ((length + 3) & ~3);
+            }
+            if (variant == "missing-integrity")
+            {
+                response = response[..integrity];
+                BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(2), (ushort)(response.Length - 20));
+                return response;
+            }
+            if (variant == "transaction-suffix") response[19] ^= 1;
+            if (variant == "wrong-method") BinaryPrimitives.WriteUInt16BigEndian(response, 0x0104);
+            byte[] key = MD5.HashData(Encoding.UTF8.GetBytes("user:pinhole-test:pass"));
+            HMACSHA1.HashData(key, response.AsSpan(0, integrity)).CopyTo(response, integrity + 4);
+            if (variant == "invalid-integrity") response[^1] ^= 1;
+            return response;
+        };
+
+        using var stop = new CancellationTokenSource(DefaultTimeout);
+        await using TurnClient client = await TurnClient.AllocateAsync(server.Control, "user", "pass", stop.Token);
+        Assert.NotNull(client.RelayedAddress);
+        Assert.Equal(IPAddress.Loopback, client.RelayedAddress.Address);
+        Assert.NotEqual(5555, client.RelayedAddress.Port);
+        Assert.True(client.IsAlive);
+    }
 
     [Fact]
     public async Task Allocate_ChallengeAuth_And_RelayDataBothWays()

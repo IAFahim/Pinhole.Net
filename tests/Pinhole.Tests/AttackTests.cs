@@ -504,7 +504,7 @@ public sealed class AttackTests
     [Fact]
     public async Task TurnServerThatGrantsNothing_FailsAllocationWithCleanError()
     {
-        var liar = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        using var liar = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         liar.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         Task respond = RespondEmptyTurnAsync(liar);
 
@@ -587,10 +587,28 @@ public sealed class AttackTests
             {
                 EndPoint from = new IPEndPoint(IPAddress.Any, 0);
                 SocketReceiveFromResult result = await liar.ReceiveFromAsync(buf, SocketFlags.None, from).ConfigureAwait(false);
-                var resp = new byte[20];
-                BinaryPrimitives.WriteUInt16BigEndian(resp, round == 0 ? (ushort)0x0111 : (ushort)0x0103);
+                // Challenge the exact Allocate method, then authenticate the empty
+                // success. The property is rejection of a verified grant with no relay
+                // address; unsigned/mismatched replies are independently ignored.
+                byte[] challenge =
+                [
+                    0x00, 0x09, 0x00, 0x04, 0, 0, 4, 1,
+                    0x00, 0x14, 0x00, 0x05, (byte)'e', (byte)'m', (byte)'p', (byte)'t', (byte)'y', 0, 0, 0,
+                    0x00, 0x15, 0x00, 0x01, (byte)'n', 0, 0, 0,
+                ];
+                var resp = new byte[20 + (round == 0 ? challenge.Length : 24)];
+                BinaryPrimitives.WriteUInt16BigEndian(resp, round == 0 ? (ushort)0x0113 : (ushort)0x0103);
+                BinaryPrimitives.WriteUInt16BigEndian(resp.AsSpan(2), (ushort)(resp.Length - 20));
                 BinaryPrimitives.WriteUInt32BigEndian(resp.AsSpan(4), 0x2112A442);
                 buf.AsSpan(8, 12).CopyTo(resp.AsSpan(8));
+                if (round == 0) challenge.CopyTo(resp, 20);
+                else
+                {
+                    BinaryPrimitives.WriteUInt16BigEndian(resp.AsSpan(20), 0x0008);
+                    BinaryPrimitives.WriteUInt16BigEndian(resp.AsSpan(22), 20);
+                    byte[] key = MD5.HashData("u:empty:p"u8);
+                    HMACSHA1.HashData(key, resp.AsSpan(0, 20)).CopyTo(resp, 24);
+                }
                 await liar.SendToAsync(resp, SocketFlags.None, result.RemoteEndPoint).ConfigureAwait(false);
             }
         });

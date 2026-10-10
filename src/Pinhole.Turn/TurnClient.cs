@@ -8,7 +8,7 @@ using System.Text;
 namespace Pinhole.Turn;
 
 /// <summary>The server answered and refused: a definitive error response (437 allocation
-/// mismatch, 401 after re-auth, …) proving the credentials or allocation this client holds
+/// mismatch, 401 after re-auth, …) whose MESSAGE-INTEGRITY proves that the credentials or allocation this client holds
 /// are unusable on that server. Distinct from a timeout or transport fault, which proves
 /// nothing — callers must treat this type as retire-the-client evidence and everything
 /// else as transient.</summary>
@@ -55,7 +55,20 @@ public sealed class TurnClient : IAsyncDisposable
     private readonly Socket _udp;
     private readonly string _username;
     private readonly string _credential;
-    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<byte[]>> _pending = new();
+    private readonly record struct TransactionId(ulong Prefix, uint Suffix)
+    {
+        public static TransactionId Read(ReadOnlySpan<byte> message) => new(
+            BinaryPrimitives.ReadUInt64BigEndian(message[8..]), BinaryPrimitives.ReadUInt32BigEndian(message[16..]));
+    }
+    private sealed class PendingRequest(ushort method, byte[]? integrityKey)
+    {
+        public readonly ushort Method = method;
+        public readonly byte[]? IntegrityKey = integrityKey;
+        public readonly TaskCompletionSource<byte[]> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int IntegrityFailures;
+    }
+    private readonly ConcurrentDictionary<TransactionId, PendingRequest> _pending = new();
+    private readonly object _authGate = new();
     private readonly Dictionary<IPAddress, DateTimeOffset> _permitted = new();
     private readonly CancellationTokenSource _shutdown = new();
     private byte[] _integrityKey = Array.Empty<byte>();
@@ -367,15 +380,26 @@ public sealed class TurnClient : IAsyncDisposable
 
     private async Task<byte[]> Transact(Func<byte[]> build, CancellationToken ct)
     {
-        byte[] resp = await SendAndAwait(build(), ct).ConfigureAwait(false);
+        byte[] resp = await SendAuthenticatedAsync(build, ct).ConfigureAwait(false);
         if (TryAdoptRotatedAuth(resp))
         {
             // 438 stale nonce: the server rotated its nonce; rebuild with the fresh
             // realm/nonce (the builders read the updated fields) and retry once.
-            resp = await SendAndAwait(build(), ct).ConfigureAwait(false);
+            resp = await SendAuthenticatedAsync(build, ct).ConfigureAwait(false);
         }
 
         return resp;
+    }
+
+    private Task<byte[]> SendAuthenticatedAsync(Func<byte[]> build, CancellationToken ct)
+    {
+        byte[] message, key;
+        lock (_authGate)
+        {
+            message = build();
+            key = _integrityKey.ToArray();
+        }
+        return SendAndAwait(message, ct, key);
     }
 
     private bool TryAdoptRotatedAuth(byte[] resp)
@@ -404,29 +428,36 @@ public sealed class TurnClient : IAsyncDisposable
             return false;
         }
 
-        _nonce = nonce;
-        if (realm is not null && realm != _realm)
+        lock (_authGate)
         {
-            _realm = realm;
-            _integrityKey = MD5.HashData(Utf8($"{_username}:{_realm}:{_credential}"));
+            _nonce = nonce;
+            if (realm is not null && realm != _realm)
+            {
+                _realm = realm;
+                _integrityKey = MD5.HashData(Utf8($"{_username}:{_realm}:{_credential}"));
+            }
         }
 
         return true;
     }
 
-    private async Task<byte[]> SendAndAwait(byte[] msg, CancellationToken ct)
+    private async Task<byte[]> SendAndAwait(byte[] msg, CancellationToken ct, byte[]? integrityKey = null)
     {
-        ulong key = BinaryPrimitives.ReadUInt64BigEndian(msg.AsSpan(8));
-        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pending[key] = tcs;
+        TransactionId id = TransactionId.Read(msg);
+        var pending = new PendingRequest(BinaryPrimitives.ReadUInt16BigEndian(msg), integrityKey);
+        if (!_pending.TryAdd(id, pending)) throw new InvalidOperationException("duplicate TURN transaction ID");
         try
         {
             _udp.Send(msg);
-            return await tcs.Task.WaitAsync(TransactTimeout, ct).ConfigureAwait(false);
+            return await pending.Completion.Task.WaitAsync(TransactTimeout, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex) when (Volatile.Read(ref pending.IntegrityFailures) != 0)
+        {
+            throw new CryptographicException("TURN responses failed integrity verification", ex);
         }
         finally
         {
-            _pending.TryRemove(key, out _);
+            _pending.TryRemove(id, out _);
         }
     }
 
@@ -460,7 +491,8 @@ public sealed class TurnClient : IAsyncDisposable
                 return;
             }
 
-            if (n < 20 || BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) != Cookie)
+            if (n < 20 || BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) != Cookie
+                || BinaryPrimitives.ReadUInt16BigEndian(buf.AsSpan(2)) != n - 20 || (n & 3) != 0)
             {
                 continue;
             }
@@ -497,13 +529,61 @@ public sealed class TurnClient : IAsyncDisposable
             }
             else
             {
-                ulong key = BinaryPrimitives.ReadUInt64BigEndian(buf.AsSpan(8));
-                if (_pending.TryGetValue(key, out TaskCompletionSource<byte[]>? tcs))
+                TransactionId id = TransactionId.Read(buf);
+                if (_pending.TryGetValue(id, out PendingRequest? pending)
+                    && (type == (pending.Method | 0x0100) || type == (pending.Method | ClassError)))
                 {
-                    tcs.TrySetResult(buf[..n]);
+                    byte[] response = buf[..n];
+                    if (TryAuthenticateResponse(response, pending, out byte[]? authenticated))
+                        pending.Completion.TrySetResult(authenticated!);
                 }
             }
         }
+    }
+
+    private static bool TryAuthenticateResponse(byte[] response, PendingRequest pending, out byte[]? accepted)
+    {
+        accepted = null;
+        int integrityOffset = -1;
+        for (int pos = 20; pos < response.Length;)
+        {
+            if (response.Length - pos < 4) return false;
+            int length = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(pos + 2));
+            int padded = (length + 3) & ~3;
+            if (padded > response.Length - pos - 4) return false;
+            if (integrityOffset < 0 && BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(pos)) == AttrMessageIntegrity)
+            {
+                if (length != 20) return false;
+                integrityOffset = pos;
+            }
+            pos += 4 + padded;
+        }
+
+        if (integrityOffset >= 0 && pending.IntegrityKey is { } key)
+        {
+            // RFC 8489: the HMAC covers the header through the attribute preceding MI,
+            // with header length adjusted to the end of MI. Attributes after MI cannot
+            // contribute allocation addresses, lifetime, errors, realm, or nonce.
+            byte[] covered = response[..integrityOffset];
+            BinaryPrimitives.WriteUInt16BigEndian(covered.AsSpan(2), (ushort)(integrityOffset + 24 - 20));
+            byte[] expected = HMACSHA1.HashData(key, covered);
+            if (CryptographicOperations.FixedTimeEquals(expected, response.AsSpan(integrityOffset + 4, 20)))
+            {
+                accepted = response[..(integrityOffset + 24)];
+                BinaryPrimitives.WriteUInt16BigEndian(accepted.AsSpan(2), (ushort)(accepted.Length - 20));
+                return true;
+            }
+        }
+        else if (integrityOffset < 0 && (IsError(response, 401) || pending.IntegrityKey is not null && IsError(response, 438))
+            && Attributes(response).Any(a => a.Type == AttrRealm) && Attributes(response).Any(a => a.Type == AttrNonce))
+        {
+            // These bootstrap/stale-nonce challenges are unsigned in the STUN protocol.
+            // They permit a bounded retry, never a definitive allocation condemnation.
+            accepted = response;
+            return true;
+        }
+        Interlocked.Increment(ref pending.IntegrityFailures);
+        return false;
     }
 
     private static bool IsError(byte[] resp, int code)
@@ -544,7 +624,9 @@ public sealed class TurnClient : IAsyncDisposable
             }
         }
 
-        throw new TurnRejectException(code, reason);
+        if (code != StaleNonceCode && Attributes(resp).Any(a => a.Type == AttrMessageIntegrity))
+            throw new TurnRejectException(code, reason);
+        throw new InvalidOperationException($"TURN authentication challenge {code} {reason}");
     }
 
     private static byte[] Message(ushort type, byte[] txid, byte[] attrs)
