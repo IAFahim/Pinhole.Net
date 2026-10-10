@@ -16,6 +16,20 @@ public sealed class BlobsTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
+    [Theory]
+    [InlineData(0, 0, true)]
+    [InlineData(1, 1, true)]
+    [InlineData(1024, 1, true)]
+    [InlineData(1025, 2, true)]
+    [InlineData(long.MaxValue, 9007199254740992, true)]
+    [InlineData(0, 1, false)]
+    [InlineData(1, 0, false)]
+    [InlineData(1025, 1, false)]
+    [InlineData(1024, 2, false)]
+    [InlineData(-1, 0, false)]
+    public void HeadChunkCountMustDescribeTheDeclaredByteLength(long bytes, long chunks, bool valid) =>
+        Assert.Equal(valid, BlobWire.Frame.TryParse(BlobWire.Head(1, bytes, chunks), out _));
+
     private static PinholeOptions Offline() => new()
     {
         StunServers = [],
@@ -1023,5 +1037,77 @@ public sealed class BlobsTests
         {
             DeleteDir(dir);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WireOracle_SelfConsistentChunksWithWrongRootCannotPublishAFile(bool existingTarget)
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] trusted = "retain this verified file"u8.ToArray();
+            byte[] root = Blake3.Hash(trusted);
+            byte[] untrusted = RandomBytes(5000);
+            byte[] psk = RandomNumberGenerator.GetBytes(32);
+            using var oracle = new BlobsOracle();
+            oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            var ticket = new BlobTicket
+            {
+                Kind = BlobKind.File, Root = root, Name = "oracle.bin",
+                ConnectionString = oracle.DialString, PreSharedKey = psk,
+            };
+            string outDir = Path.Combine(dir, "out");
+            Directory.CreateDirectory(outDir);
+            string target = Path.Combine(outDir, ticket.Name);
+            if (existingTarget) await File.WriteAllBytesAsync(target, trusted);
+            using var deadline = new CancellationTokenSource(Timeout);
+            Task serve = oracle.ServeAdversariallyAsync(psk, root, untrusted, deadline.Token);
+            InvalidDataException error = await Assert.ThrowsAsync<InvalidDataException>(() => BlobClient.DownloadAsync(
+                ticket, outDir, options: new BlobDownloadOptions { NodeOptions = Offline() with { EnablePathValidation = false } },
+                ct: deadline.Token));
+            Assert.Contains("root check", error.Message);
+            if (existingTarget) Assert.Equal(trusted, await File.ReadAllBytesAsync(target));
+            else Assert.False(File.Exists(target), "A failed root check must not publish the part file.");
+            Assert.False(Directory.Exists(target + ".pinhole-part"));
+            deadline.Cancel();
+        }
+        finally { DeleteDir(dir); }
+    }
+
+    [Fact]
+    public async Task TruncatedCheckpointRestartsInsteadOfReadingAnAbsentPrefixChunk()
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] data = RandomBytes(5000);
+            byte[] root = Blake3.Hash(data);
+            byte[] psk = RandomNumberGenerator.GetBytes(32);
+            using var oracle = new BlobsOracle();
+            oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            var ticket = new BlobTicket
+            {
+                Kind = BlobKind.File, Root = root, Name = "oracle.bin",
+                ConnectionString = oracle.DialString, PreSharedKey = psk,
+            };
+            string outDir = Path.Combine(dir, "out");
+            string part = Path.Combine(outDir, ticket.Name + ".pinhole-part");
+            Directory.CreateDirectory(part);
+            byte[] state = new byte[56]; "PBPART01"u8.CopyTo(state); root.CopyTo(state, 8);
+            BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(40), data.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(48), 3);
+            await File.WriteAllBytesAsync(Path.Combine(part, "state"), state);
+            await File.WriteAllBytesAsync(Path.Combine(part, "data"), data[..2048]); // the third claimed chunk is absent
+            using var deadline = new CancellationTokenSource(Timeout);
+            Task serve = oracle.ServeAdversariallyAsync(psk, root, data, deadline.Token);
+            BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir, options: new BlobDownloadOptions
+                { NodeOptions = Offline() with { EnablePathValidation = false }, RecoveryTimeout = TimeSpan.Zero }, ct: deadline.Token);
+            Assert.False(result.Resumed);
+            Assert.Equal(data, await File.ReadAllBytesAsync(result.Path));
+            deadline.Cancel();
+        }
+        finally { DeleteDir(dir); }
     }
 }

@@ -52,3 +52,27 @@ These changes follow the response and integrity rules in
 [RFC 8489 sections 9.2.5 and 14.5](https://www.rfc-editor.org/rfc/rfc8489.html).
 A complete independent final-candidate review, real TURN interoperability and the full
 issue checklist still need verification; focused tests do not replace them.
+
+## File completion and checkpoints — subsequent local audit
+
+The local continuation found that `FileSink.Complete()` moved the part file over
+the destination before its caller compared the completed root with the ticket.
+A provider could send internally consistent chunk CVs whose final root differed
+from the ticket: the call failed, but unverified output was already published.
+Actual encrypted UDP regressions reproduced both publication of a new file and
+replacement of an existing trusted file. A third regression reproduced reading
+past a truncated checkpoint that claimed a missing full prefix chunk.
+
+Completion now calculates the root, verifies it, then commits the rename. A root
+mismatch discards the part and preserves the destination. Checkpoint lengths
+include every full prefix chunk; checkpoint data and its temporary state file are
+flushed before an atomic state replacement. File deduplication uses the applied
+prefix and bounded reorder map rather than a whole-file boolean array. The
+download hasher also omits the provider's per-chunk outboard and recursive tree
+retention. Both hashing modes match the independent BouncyCastle oracle, and a
+separate process-resource check streams 32 MiB while retaining at most 512 KiB
+of managed metadata. HEAD chunk counts must match their byte lengths using an
+overflow-safe calculation.
+
+These are additional local findings and fixes, not completion of the interrupted
+independent review. The final candidate still needs that review.

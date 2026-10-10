@@ -26,6 +26,22 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(120);
 
     [Fact]
+    public void DownloadHasherDoesNotRetainAnOutboardForEveryChunk()
+    {
+        var tree = new Blake3.Tree(retainOutboard: false);
+        byte[] buffer = new byte[64 * 1024];
+        new Random(0x34).NextBytes(buffer);
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        long before = GC.GetTotalMemory(false);
+        for (int block = 0; block < 512; block++) tree.Update(buffer); // 32 MiB streamed through one buffer
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        long growth = GC.GetTotalMemory(false) - before;
+        Assert.True(growth <= 512 * 1024, $"streaming root retained {growth / 1024} KiB for 32 MiB of data");
+        GC.KeepAlive(tree);
+        GC.KeepAlive(buffer);
+    }
+
+    [Fact]
     public async Task RepeatedCancelResume_ReturnsEveryReservation()
     {
         string dir = TempDir();

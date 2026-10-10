@@ -37,6 +37,13 @@ public static class Blake3
     /// <summary>Streaming builder: feed bytes, read the root and the chunk-CV outboard.</summary>
     public sealed class Tree
     {
+        private readonly bool _retainOutboard;
+
+        /// <summary>Builds a hash and retains the chunk-CV outboard for serving.</summary>
+        public Tree() : this(retainOutboard: true) { }
+
+        internal Tree(bool retainOutboard) => _retainOutboard = retainOutboard;
+
         private readonly List<byte[]> _chunkCvs = new();
         private readonly List<(uint[] Cv, long Chunks, TreeEntry? L, TreeEntry? R)> _stack = new();
         private readonly byte[] _pending = new byte[ChunkSize];
@@ -50,7 +57,7 @@ public static class Blake3
 
         /// <summary>Chunk count the current input covers, including the not-yet-closed
         /// final chunk (empty input counts as one chunk, per the spec).</summary>
-        public int ChunkCount => _chunkCvs.Count + (_pendingLen > 0 || _totalBytes == 0 ? 1 : 0);
+        public int ChunkCount => checked((int)_chunkCounter + (_pendingLen > 0 || _totalBytes == 0 ? 1 : 0));
 
         /// <summary>The outboard so far: one 32-byte chaining value per closed chunk plus
         /// the pending chunk's, in order — exactly what a provider sends alongside data
@@ -59,6 +66,7 @@ public static class Blake3
         {
             get
             {
+                if (!_retainOutboard) throw new InvalidOperationException("this hash does not retain an outboard");
                 byte[][] cvs = new byte[_chunkCvs.Count + (_pendingLen > 0 ? 1 : 0)][];
                 for (int i = 0; i < _chunkCvs.Count; i++)
                 {
@@ -137,7 +145,7 @@ public static class Blake3
         private void FlushPendingChunk()
         {
             uint[] cv = ChunkCvWords(_pending.AsSpan(0, _pendingLen), (ulong)_chunkCounter, root: false);
-            _chunkCvs.Add(WordsToHash(cv));
+            if (_retainOutboard) _chunkCvs.Add(WordsToHash(cv));
             _stack.Add((cv, 1, null, null));
             _pendingLen = 0;
             _chunkCounter++;
@@ -151,7 +159,8 @@ public static class Blake3
             }
         }
 
-        private static TreeEntry ToEntry((uint[] Cv, long Chunks, TreeEntry? L, TreeEntry? R) e) => new(e.Cv, e.L, e.R);
+        private TreeEntry ToEntry((uint[] Cv, long Chunks, TreeEntry? L, TreeEntry? R) e) =>
+            new(e.Cv, _retainOutboard ? e.L : null, _retainOutboard ? e.R : null);
 
         private sealed record TreeEntry(uint[] Cv, TreeEntry? L, TreeEntry? R);
     }
@@ -160,7 +169,7 @@ public static class Blake3
     /// <c>Blake3Digest</c> over the same bytes.</summary>
     public static byte[] Hash(ReadOnlySpan<byte> data)
     {
-        var tree = new Tree();
+        var tree = new Tree(retainOutboard: false);
         tree.Update(data);
         return tree.RootHash();
     }

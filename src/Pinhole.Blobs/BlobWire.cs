@@ -196,7 +196,8 @@ internal static class BlobWire
                         TotalBytes = BinaryPrimitives.ReadInt64LittleEndian(body),
                         TotalChunks = BinaryPrimitives.ReadInt64LittleEndian(body[8..]),
                     };
-                    return f.TotalBytes >= 0 && f.TotalChunks >= 0; // (0,0) is the empty blob
+                    return f.TotalBytes >= 0 && f.TotalChunks == f.TotalBytes / Blake3.ChunkSize
+                        + (f.TotalBytes % Blake3.ChunkSize == 0 ? 0 : 1); // overflow-safe; only (0,0) is empty
                 case TypeReq:
                     if (body.Length != 10)
                     {

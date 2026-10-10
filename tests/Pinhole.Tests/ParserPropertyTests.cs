@@ -25,15 +25,25 @@ public sealed class ParserPropertyTests
     }
 
     [Property(MaxTest = 200)]
-    public void FrameRoundTrip_Head(ulong stream, long totalBytes, long totalChunks)
+    public void FrameRoundTrip_Head(ulong stream, long totalBytes)
     {
         totalBytes &= long.MaxValue;
-        totalChunks &= long.MaxValue;
+        long totalChunks = totalBytes / Blake3.ChunkSize + (totalBytes % Blake3.ChunkSize == 0 ? 0 : 1);
         Assert.True(BlobWire.Frame.TryParse(BlobWire.Head(stream, totalBytes, totalChunks), out BlobWire.Frame f));
         Assert.Equal(BlobWire.TypeHead, f.Type);
         Assert.Equal(stream, f.Stream);
         Assert.Equal(totalBytes, f.TotalBytes);
         Assert.Equal(totalChunks, f.TotalChunks);
+    }
+
+    [Property(MaxTest = 200)]
+    public void HeadRejectsInconsistentChunkCounts(ulong stream, long totalBytes, long totalChunks)
+    {
+        totalBytes &= long.MaxValue;
+        totalChunks &= long.MaxValue;
+        long required = totalBytes / Blake3.ChunkSize + (totalBytes % Blake3.ChunkSize == 0 ? 0 : 1);
+        if (totalChunks != required)
+            Assert.False(BlobWire.Frame.TryParse(BlobWire.Head(stream, totalBytes, totalChunks), out _));
     }
 
     [Property(MaxTest = 200)]

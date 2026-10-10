@@ -557,8 +557,10 @@ public static class BlobClient
             byte[] root = _sink.Complete();
             if (!root.AsSpan().SequenceEqual(_expectedRoot))
             {
+                _sink.Reject();
                 throw new InvalidDataException("downloaded content failed the root check — the transfer is incomplete or was tampered with");
             }
+            _sink.Commit(); // publishing a file is allowed only after its complete root verifies
 
             return _totalBytes;
         }
@@ -782,6 +784,8 @@ public static class BlobClient
         public abstract void Init(long totalBytes, long totalChunks);
         public abstract bool Apply(long index, byte[] data);
         public abstract byte[] Complete();
+        public virtual void Commit() { }
+        public virtual void Reject() => Abandon();
         public virtual void Checkpoint() { }
         public virtual void Abandon() { }
     }
@@ -802,8 +806,7 @@ public static class BlobClient
         private readonly string _partDir = target + ".pinhole-part";
         private readonly Dictionary<long, byte[]> _reorder = new();
         private FileStream _data = null!;
-        private Blake3.Tree _tree = new();
-        private bool[] _have = Array.Empty<bool>();
+        private readonly Blake3.Tree _tree = new(retainOutboard: false);
         private long _totalBytes;
         private long _totalChunks;
 
@@ -813,7 +816,6 @@ public static class BlobClient
         {
             _totalBytes = totalBytes;
             _totalChunks = totalChunks;
-            _have = new bool[totalChunks];
             Directory.CreateDirectory(_partDir);
 
             long prefix = TryLoadPrefix();
@@ -827,7 +829,6 @@ public static class BlobClient
                 _data.Seek(i * Blake3.ChunkSize, SeekOrigin.Begin);
                 _data.ReadExactly(chunk);
                 _tree.Update(chunk);
-                _have[i] = true;
             }
 
             Applied = prefix;
@@ -835,9 +836,9 @@ public static class BlobClient
 
         public override bool Apply(long index, byte[] data)
         {
-            if (index < Applied || _have[index])
+            if (index < Applied || _reorder.ContainsKey(index) || index >= Applied + ReorderWindow)
             {
-                return false; // duplicate below the applied prefix or already buffered
+                return false; // duplicates and out-of-window chunks never reach disk
             }
 
             _data.Seek(index * Blake3.ChunkSize, SeekOrigin.Begin);
@@ -851,16 +852,10 @@ public static class BlobClient
                     Feed(buffered);
                 }
             }
-            else if (index < Applied + ReorderWindow)
+            else
             {
                 _reorder[index] = data; // ahead of the cursor but inside the window
             }
-            else
-            {
-                return false; // far ahead: dropped, the anchored window re-requests in order
-            }
-
-            _have[index] = true;
             return true;
         }
 
@@ -870,7 +865,9 @@ public static class BlobClient
             Applied++;
         }
 
-        public override byte[] Complete()
+        public override byte[] Complete() => _totalBytes == 0 ? Blake3.Hash([]) : _tree.RootHash();
+
+        public override void Commit()
         {
             _data.SetLength(_totalBytes);
             _data.Flush(flushToDisk: true);
@@ -878,7 +875,12 @@ public static class BlobClient
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(target))!);
             File.Move(Path.Combine(_partDir, "data"), target, overwrite: true);
             Directory.Delete(_partDir, recursive: true);
-            return _totalBytes == 0 ? Blake3.Hash([]) : _tree.RootHash();
+        }
+
+        public override void Reject()
+        {
+            _data.Dispose();
+            Directory.Delete(_partDir, recursive: true);
         }
 
         public override void Abandon()
@@ -900,7 +902,17 @@ public static class BlobClient
             root.CopyTo(state, 8);
             BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(8 + 32), _totalBytes);
             BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(8 + 32 + 8), Applied);
-            File.WriteAllBytes(Path.Combine(_partDir, "state"), state);
+            // A checkpoint may claim only durable data. Replacing a flushed
+            // temporary state file keeps a torn write from destroying the last
+            // usable checkpoint while the downloader is cancelled or crashes.
+            _data.Flush(flushToDisk: true);
+            string temporary = Path.Combine(_partDir, "state.tmp");
+            using (var snapshot = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                snapshot.Write(state);
+                snapshot.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, Path.Combine(_partDir, "state"), overwrite: true);
         }
 
         /// <summary>The resumable prefix: only the contiguous run of applied chunks from
@@ -930,10 +942,10 @@ public static class BlobClient
                     return 0;
                 }
 
-                // The data file must actually hold the claimed prefix, minus the last
-                // (possibly partial) chunk — anything shorter restarts from zero.
+                // prefix is strictly below totalChunks, so every claimed chunk
+                // is full-sized. Anything shorter restarts from zero.
                 long onDisk = new FileInfo(Path.Combine(_partDir, "data")).Length;
-                return onDisk >= (prefix - 1) * Blake3.ChunkSize ? prefix : 0;
+                return onDisk >= prefix * Blake3.ChunkSize ? prefix : 0;
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
             {
@@ -973,7 +985,7 @@ public static class BlobClient
 
         public override byte[] Complete()
         {
-            var tree = new Blake3.Tree();
+            var tree = new Blake3.Tree(retainOutboard: false);
             var mem = new MemoryStream();
             for (long i = 0; i < Applied; i++)
             {

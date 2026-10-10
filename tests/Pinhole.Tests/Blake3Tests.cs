@@ -29,13 +29,18 @@ public sealed class Blake3Tests
         reference.DoFinal(expected, 0);
 
         Assert.Equal(expected, Blake3.Hash(data));
+        var streaming = new Blake3.Tree(retainOutboard: false);
+        streaming.Update(data);
+        Assert.Equal(expected, streaming.RootHash());
     }
 
-    [Fact]
-    public void Root_MatchesAcrossChunkBoundaries_WhenFedPiecewise()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Root_MatchesAcrossChunkBoundaries_WhenFedPiecewise(bool retainOutboard)
     {
         byte[] data = RandomNumberGenerator.GetBytes(10_000);
-        var tree = new Blake3.Tree();
+        var tree = new Blake3.Tree(retainOutboard);
         int pos = 0;
         var rng = new Random(42);
         while (pos < data.Length)
