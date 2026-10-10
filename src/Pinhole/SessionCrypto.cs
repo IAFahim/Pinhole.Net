@@ -523,6 +523,49 @@ internal sealed class ConnectionCrypto
         }
     }
 
+    /// <summary>Latches the peer's handshake keys when a stray frame from their earlier
+    /// connection already occupies the latch: roaming peers re-dial from fresh connections
+    /// while retried PUNCs of the old one are still in flight, and first-seen-wins would
+    /// wedge the two forever. A PACK outranks the stale latch only by carrying this
+    /// handshake's confirm MAC — computed from the static key's private half, which no
+    /// substitute holds — so the swap is proof-gated, not heuristic. A confirmed session
+    /// never re-keys; a failing confirm leaves the latch untouched.</summary>
+    public bool TrySupersedeUnconfirmed(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm)
+    {
+        if (PeerConfirmed || Keys is null)
+        {
+            return false; // nothing stale to replace, or too late to replace it
+        }
+
+        try
+        {
+            SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat);
+            ReadOnlySpan<byte> expected = MyPeerId < PeerPeerId ? trial.HiConfirm : trial.LoConfirm;
+            if (!confirm.SequenceEqual(expected))
+            {
+                return false;
+            }
+
+            PeerEphPublic = eph.ToArray();
+            PeerStaticPublic = stat.ToArray();
+            Keys = trial;
+            bool iAmLo = MyPeerId < PeerPeerId;
+            Send = new FrameSealer(trial, iAmLo, sending: true);
+            Recv = new FrameSealer(trial, iAmLo, sending: false);
+            Interlocked.Increment(ref SupersededLatches);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Times this connection recovered from a stale key latch by verifying the
+    /// genuine handshake's confirm over it. Surfaced in handshake summaries as healing
+    /// evidence.</summary>
+    public long SupersededLatches; // Interlocked
+
     /// <summary>This side's confirm MAC — carried in the PACK/Hsck reply, verified by the peer.</summary>
     public byte[] MyConfirm() => MyPeerId < PeerPeerId ? Keys!.LoConfirm : Keys!.HiConfirm;
 

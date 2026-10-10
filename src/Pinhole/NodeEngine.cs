@@ -3093,7 +3093,11 @@ internal sealed partial class NodeEngine : IDisposable
                 c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
                 c.RemoteTokenKnown = true;
 
-                if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
+                if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength))
+                    && !crypto.TrySupersedeUnconfirmed(
+                        body[..CryptoWire.EphemeralLength],
+                        body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength),
+                        body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
                 {
                     RejectKeys(c, body[..CryptoWire.EphemeralLength]);
                     crypto.CountRejected();
@@ -4320,6 +4324,10 @@ internal sealed partial class NodeEngine : IDisposable
         {
             long[] byKind = c.RejectsByKind;
             line += $" by-kind[{string.Join(",", Enumerable.Range(1, 7).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
+        }
+        if (c.Crypto is { } crypto && Volatile.Read(ref crypto.SupersededLatches) > 0)
+        {
+            line += $" latch-healed={Volatile.Read(ref crypto.SupersededLatches)}";
         }
         return line;
     }
