@@ -1,7 +1,7 @@
 {
   "status": "PASS",
   "framework": "net8.0",
-  "assemblySha256": "902721da19dcbf994e3f5dda688c6399be09ffee26304b00947611751485c9da",
+  "assemblySha256": "16b3dfc086b6a95d34d0182e71e0c1622ac57bf16ba8a26b15551b68d42658c5",
   "rustPeerSha256": "e7c4c66ace3628f36e5fdd4b025043d3bf2ec02f3547b7bee9989b133b7cef33",
   "cargoLockSha256": "448c01ad6deb36bb576d7e89b6cff34457ae20297d81a9f5e52823239cd8dc3a",
   "cases": [
@@ -25,9 +25,9 @@
         "Measurements": {
           "VerifiedEchoes": 101,
           "PayloadBytes": 64,
-          "ConnectToFirstEchoMs": 67.1456,
-          "RttP50Us": 59.4,
-          "RttP95Us": 122.2
+          "ConnectToFirstEchoMs": 62.971,
+          "RttP50Us": 54.3,
+          "RttP95Us": 66
         }
       }
     },
@@ -51,9 +51,9 @@
         "Measurements": {
           "VerifiedEchoes": 101,
           "PayloadBytes": 64,
-          "ConnectToFirstEchoMs": 72.1541,
-          "RttP50Us": 40.5,
-          "RttP95Us": 78.9
+          "ConnectToFirstEchoMs": 59.9757,
+          "RttP50Us": 18.2,
+          "RttP95Us": 54.7
         }
       }
     },

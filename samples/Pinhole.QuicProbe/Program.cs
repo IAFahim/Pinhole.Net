@@ -220,7 +220,21 @@ internal static partial class Probe
         var request = new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256);
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
-        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+        X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+        if (!OperatingSystem.IsWindows())
+            return certificate;
+        // MsQuic's Schannel provider cannot open the ephemeral key behind
+        // CreateSelfSigned: ConfigurationLoadCredential fails with SEC_E_NO_CREDENTIALS
+        // (0x8009030d). A PFX round-trip leaves a persisted, exportable key the
+        // Windows QUIC stack can load; Linux and macOS read the key directly.
+        byte[] pfx = certificate.Export(X509ContentType.Pfx);
+        certificate.Dispose();
+        var storage = X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable;
+#if NET9_0_OR_GREATER
+        return X509CertificateLoader.LoadPkcs12(pfx, (string?)null, storage, null);
+#else
+        return new X509Certificate2(pfx, (string?)null, storage);
+#endif
     }
 
     private sealed class Report
