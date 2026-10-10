@@ -131,6 +131,7 @@ internal sealed class ConnState
     public volatile uint LastRejectWanted, LastRejectGot;
     public long LastRejectKind; // 1=pack-token, 2=pack-length, 3=punc-token, 4=punc-keys, 5=punc-pin, 6=mixed-mode
     public volatile string? LastRejectFrom; // source endpoint of the last token-rejected frame
+    public readonly long[] RejectsByKind = new long[7]; // indexed by the kinds above
     public long LastRttTicks = long.MinValue; // Interlocked
     public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
@@ -2939,8 +2940,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (cryptoPunc && c.PinnedStaticKey is { } pinned
             && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
         {
-            Interlocked.Increment(ref c.HandshakeRejects);
-            Volatile.Write(ref c.LastRejectKind, 5);
+            Reject(c, 5);
             c.Crypto?.CountRejected();
             return; // an initial/reverse PUNC must honor the same pin as its PACK
         }
@@ -2955,11 +2955,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             else if (c.RemoteToken != token)
             {
-                Interlocked.Increment(ref c.HandshakeRejects);
-                Volatile.Write(ref c.LastRejectKind, 3);
-                Volatile.Write(ref c.LastRejectWanted, c.RemoteToken);
-                Volatile.Write(ref c.LastRejectGot, token);
-                Volatile.Write(ref c.LastRejectFrom, arrival.Direct is { } d ? ToEndpoint(d).ToString() : (arrival.Tcp is null ? arrival.Relay?.ToString() : "tcp"));
+                Reject(c, 3, c.RemoteToken, token, arrival);
                 return; // stale frames from an older connection to the same peer ID
             }
 
@@ -2970,8 +2966,7 @@ internal sealed partial class NodeEngine : IDisposable
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
                 if (!c.Crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]))
                 {
-                    Interlocked.Increment(ref c.HandshakeRejects);
-                    Volatile.Write(ref c.LastRejectKind, 4);
+                    Reject(c, 4);
                     c.Crypto.CountRejected();
                     return;
                 }
@@ -2980,8 +2975,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // A plaintext PUNC on a connection that offered crypto, or a crypto PUNC on a
                 // plaintext one: neither is a state any honest peer produces.
-                Interlocked.Increment(ref c.HandshakeRejects);
-                Volatile.Write(ref c.LastRejectKind, 6);
+                Reject(c, 6);
                 c.Crypto?.CountRejected();
                 return;
             }
@@ -3039,17 +3033,12 @@ internal sealed partial class NodeEngine : IDisposable
         // body = [echo of our PUNC token][the responder's own token] (+ keys and confirm in v2)
         if (frame.Length < HeaderSize + CryptoWire.PackLegacyBody)
         {
-            Interlocked.Increment(ref c.HandshakeRejects);
-            Volatile.Write(ref c.LastRejectKind, 2);
+            Reject(c, 2);
             return;
         }
         if (BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
         {
-            Interlocked.Increment(ref c.HandshakeRejects);
-            Volatile.Write(ref c.LastRejectKind, 1);
-            Volatile.Write(ref c.LastRejectWanted, c.Token);
-            Volatile.Write(ref c.LastRejectGot, BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]));
-            Volatile.Write(ref c.LastRejectFrom, arrival.Direct is { } d ? ToEndpoint(d).ToString() : (arrival.Tcp is null ? arrival.Relay?.ToString() : "tcp"));
+            Reject(c, 1, c.Token, BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]), arrival);
             if (TraceEnabled)
             {
                 TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]):x8})");
@@ -3067,7 +3056,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             // We dialed with a key the string vouches for; a plaintext PACK means someone
             // stripped the handshake. Fail the connection — never fall back to plaintext.
-            Interlocked.Increment(ref c.HandshakeRejects);
+            Reject(c, 6);
             c.Crypto.CountRejected();
             HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
             return;
@@ -3091,7 +3080,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // The answering key is not the key the string vouches for: a machine in the
                 // middle, or a stale string. Either way the session is dead on arrival.
-                Interlocked.Increment(ref c.HandshakeRejects);
+                Reject(c, 5);
                 crypto.CountRejected();
                 HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
                 return;
@@ -3106,7 +3095,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength)))
                 {
-                    Interlocked.Increment(ref c.HandshakeRejects);
+                    Reject(c, 4);
                     crypto.CountRejected();
                     if (TraceEnabled)
                     {
@@ -3117,7 +3106,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (!crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
                 {
-                    Interlocked.Increment(ref c.HandshakeRejects);
+                    Reject(c, 4);
                     crypto.CountRejected();
                     HandshakeFailed(c, "handshake confirmation failed: the answering peer does not hold the advertised key");
                     return;
@@ -4284,13 +4273,40 @@ internal sealed partial class NodeEngine : IDisposable
             : "no conn";
     }
 
+    /// <summary>Records one handshake reject for forensics: the running total, the branch,
+    /// and — for token checks — the wanted/got pair plus the frame's source endpoint.</summary>
+    private void Reject(ConnState c, int kind, uint wanted = 0, uint got = 0, in Arrival arrival = default)
+    {
+        Interlocked.Increment(ref c.HandshakeRejects);
+        Interlocked.Increment(ref c.RejectsByKind[kind]);
+        Volatile.Write(ref c.LastRejectKind, kind);
+        if (kind is 1 or 3)
+        {
+            Volatile.Write(ref c.LastRejectWanted, wanted);
+            Volatile.Write(ref c.LastRejectGot, got);
+            Volatile.Write(ref c.LastRejectFrom,
+                arrival.Direct is { } d ? ToEndpoint(d).ToString()
+                : arrival.Tcp is null ? arrival.Relay?.ToString() : "tcp");
+        }
+    }
+
     private static string LiveHandshakeSummary(ConnState c)
     {
-        string line = $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
+        string line = $"self={c.Token:x8} remote={(c.RemoteTokenKnown ? c.RemoteToken.ToString("x8") : "-")} "
+            + $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
             + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
             + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}";
         long kind = Volatile.Read(ref c.LastRejectKind);
-        return kind == 0 ? line : line + RejectSuffix(kind, c);
+        if (kind != 0)
+        {
+            line += RejectSuffix(kind, c);
+        }
+        if (Volatile.Read(ref c.HandshakeRejects) > 0)
+        {
+            long[] byKind = c.RejectsByKind;
+            line += $" by-kind[{string.Join(",", Enumerable.Range(1, 6).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
+        }
+        return line;
     }
 
     private static string RejectSuffix(long kind, ConnState c) => kind switch
