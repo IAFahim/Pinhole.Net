@@ -240,6 +240,9 @@ internal sealed partial class NodeEngine : IDisposable
     private long _recvDatagrams;
     private long _recvLastTick;
     private long _noConnDrops;
+    // Last handshake line per peer from a removed connection: bounded by the connection
+    // table's own peer population, overwritten per close.
+    private readonly ConcurrentDictionary<ulong, string> _lastClosedHandshake = new();
     private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
@@ -1617,6 +1620,7 @@ internal sealed partial class NodeEngine : IDisposable
         // Identity check: a concurrent re-dial may have replaced this entry, and the
         // loser's close must not tear down the winner's live connection.
         _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
+        _lastClosedHandshake[c.PeerId] = LiveHandshakeSummary(c) + $" final={c.State}";
 
         Span<byte> bye = stackalloc byte[HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead];
         int len = BuildFrame(c, FrameType.Bye, ReadOnlySpan<byte>.Empty, bye);
@@ -4244,13 +4248,25 @@ internal sealed partial class NodeEngine : IDisposable
     }
 
     /// <summary>One line naming where a connection's handshake stands — the per-flight
-    /// counts that let stuck-dial forensics say WHICH flight died without tracing.</summary>
-    internal string HandshakeSummary(ulong peerId) =>
-        Lookup(peerId) is { } c
-            ? $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
-              + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
-              + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}"
+    /// counts that let stuck-dial forensics say WHICH flight died without tracing. A
+    /// connection removed at close keeps its last line here, so a timed-out dial's
+    /// post-mortem still names the flight that died instead of "no conn".</summary>
+    internal string HandshakeSummary(ulong peerId)
+    {
+        if (Lookup(peerId) is { } c)
+        {
+            return LiveHandshakeSummary(c);
+        }
+
+        return _lastClosedHandshake.TryGetValue(peerId, out string? last)
+            ? last + " (since closed)"
             : "no conn";
+    }
+
+    private static string LiveHandshakeSummary(ConnState c) =>
+        $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
+        + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "
+        + $"hsck↓{Volatile.Read(ref c.HscksReceived)} rejects={Volatile.Read(ref c.HandshakeRejects)}";
 
     /// <summary>Receive-path liveness for stuck-dial forensics: datagrams the recv loop has
     /// taken, how long ago the last one landed, and how many frames dispatch dropped for
