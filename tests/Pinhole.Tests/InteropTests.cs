@@ -154,6 +154,80 @@ public sealed class InteropTests
         }
     }
 
+    // ------------------------------------------------------------------ datagram interop
+
+    /// <summary>#43: the current tree (TCP sidecar on by default) still speaks plain
+    /// direct UDP datagrams with a 1.9.0 peer in both dial directions — the new
+    /// transport changed nothing on the old wire, and old peers never see a TCP
+    /// frame they cannot parse. Payloads stay within 1.9.0's 1176-byte send ceiling:
+    /// the current tree's 1200-byte guarantee is a same-version property, and the
+    /// old peer's Send API refuses anything larger even though its wire carries it.</summary>
+    [InteropFact]
+    public async Task CurrentDialer_OldEchoServer_ExchangesUdpDatagrams()
+    {
+        string host = EnsureReleaseHost();
+        HostProcess? proc = null;
+        try
+        {
+            proc = StartHost(host, "echo");
+            string ticket = await proc.Ticket.WaitAsync(Budget)
+                ?? throw new InvalidOperationException("echo host exited before printing a ticket");
+            await using var dialer = await PinholeNode.BindAsync(OfflineLoopback());
+            await using var conn = await dialer.ConnectAsync(ticket).WaitAsync(Budget);
+
+            Assert.True(conn.IsEncrypted, "v2 pinned-key handshake must encrypt against a 1.9.0 peer");
+
+            foreach (int size in new[] { 1, 64, 1176 })
+            {
+                byte[] payload = RandomNumberGenerator.GetBytes(size);
+                conn.Send(payload);
+                ReadOnlyMemory<byte>? echo = await conn.ReceiveAsync().AsTask().WaitAsync(Budget);
+                Assert.NotNull(echo);
+                Assert.Equal(payload, echo.Value.ToArray());
+            }
+            Assert.Equal(3, conn.Stats.DatagramsSent);
+            // Path labels follow confirmed traffic; after real datagrams crossed, the
+            // route the current tree selected must be direct UDP — not TCP, not relay.
+            Assert.Equal(PathKind.Direct, conn.Path.Kind);
+            Assert.Equal(DirectTransport.Udp, conn.Path.Transport);
+        }
+        finally
+        {
+            await StopHostAsync(proc);
+        }
+    }
+
+    [InteropFact]
+    public async Task OldDialer_CurrentEchoServer_ExchangesUdpDatagrams()
+    {
+        string host = EnsureReleaseHost();
+        HostProcess? proc = null;
+        try
+        {
+            await using var listener = await PinholeNode.BindAsync(OfflineLoopback());
+            Task<PinholeConnection> accepted = listener.AcceptAsync();
+            proc = StartHost(host, "dial", listener.ConnectionString);
+
+            await using var conn = await accepted.WaitAsync(Budget);
+            Assert.True(conn.IsEncrypted);
+
+            foreach (int size in new[] { 1, 64, 1176 })
+            {
+                byte[] payload = RandomNumberGenerator.GetBytes(size);
+                conn.Send(payload);
+                ReadOnlyMemory<byte>? echo = await conn.ReceiveAsync().AsTask().WaitAsync(Budget);
+                Assert.NotNull(echo);
+                Assert.Equal(payload, echo.Value.ToArray());
+            }
+            Assert.Equal(PathKind.Direct, conn.Path.Kind);
+            Assert.Equal(DirectTransport.Udp, conn.Path.Transport);
+        }
+        finally
+        {
+            await StopHostAsync(proc);
+        }
+    }
+
     // ------------------------------------------------------------------ worktree + build
 
     private static string RepoRoot()
@@ -479,6 +553,7 @@ public sealed class InteropTests
         EnablePortMapping = false,
         EnableLanDiscovery = false,
         EnablePathValidation = false,
+        ReceiveBufferCapacity = 16, // the datagram interop cases use ReceiveAsync
     };
 
     private static void KillQuietly(Process? p)

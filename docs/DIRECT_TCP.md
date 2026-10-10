@@ -2,9 +2,12 @@
 
 This is a local implementation in progress, tracked in
 [#43](https://github.com/IAFahim/Pinhole.Net/issues/43). It has not been released.
-The managed editing profile currently denies local sockets and GitHub access.
-Real socket tests, platform CI, Kotlin parity, commits, and pushes remain pending.
-The full connection-techniques checklist in [#40](https://github.com/IAFahim/Pinhole.Net/issues/40)
+The real-socket suites now execute and pass on Linux (588 checks including the
+IPv4/IPv6 TCP sessions, hardening cases, and 1.9.0 datagram interop in both
+dial directions); the macOS/Windows matrix runs in platform CI. Kotlin dialer
+parity ships in OpusVoice draft PR #4 with device evidence; its listener
+parity and cross-machine production validation remain open. The full
+connection-techniques checklist in [#40](https://github.com/IAFahim/Pinhole.Net/issues/40)
 remains open.
 
 ## Behavior in the draft
@@ -112,19 +115,37 @@ bounded to 64 KiB with DTD/entities refused. Protocol fixtures follow
 
 ## Validation and release gate
 
-Local socket-free checks execute the actual xUnit test methods in process,
-because VSTest's control socket is also denied by this profile. Fixtures cover
-fragmented framing, malformed records, deadlines, existing crypto oracles, lease
-expiry/cancellation/rebind races, independent router byte/SOAP layouts, replayed
-handshakes on another stream, parallel stream selection, bidirectional encrypted
-data, close, UDP preference and TCP-to-UDP recovery. The virtual NAT checks cover
-hairpin, mapping expiry, and IPv4-to-IPv6 roaming. Memory/virtual fixtures do not
-prove OS connect/listen, physical firewall traversal, or Internet NAT success.
+The socket-free fixtures cover fragmented framing, malformed records, deadlines,
+existing crypto oracles, lease expiry/cancellation/rebind races, independent
+router byte/SOAP layouts, replayed handshakes on another stream, parallel stream
+selection, bidirectional encrypted data, close, UDP preference and TCP-to-UDP
+recovery. The virtual NAT checks cover hairpin, mapping expiry, and
+IPv4-to-IPv6 roaming.
 
-Before shipping, run `TcpSessionTests`, `TcpRouterIntegrationTests`, all existing
-functional/resource/performance suites and the Linux/macOS/Windows matrix with
-normal socket permissions. Complete Kotlin transport/mapping integration and
-.NET↔Kotlin TCP interop, evaluate simultaneous-open with actual OS evidence, and
-repeat phone LTE/Wi-Fi tests. These checks are pending, not skipped or reported
-as passing. Do not close #43 or #40 until their remaining acceptance criteria
-are satisfied.
+Executed on real sockets (2026-10-10, Linux, net8.0/net10.0 Release):
+
+- The full suite passed 588 checks, including the IPv4/IPv6 TCP-only session
+  tests over `127.0.0.1` and `::1`.
+- `TcpSocketHardeningTests`: oversized length headers (8193, 65535) close the
+  stream with no session; a substituted ticket key over TCP-only fails with the
+  explicit man-in-the-middle error, never downgrades and never reaches
+  `AcceptAsync`; close/rebind on the same port admits a fresh session after
+  teardown.
+- `TcpSimultaneousOpenTests`: source-bound sockets on `127.0.0.2`/`127.0.0.3`
+  crossed SYNs and carried data both directions with no listener (first
+  crossing after 11 jittered attempts on this host). This records the Linux OS
+  primitive and its retry economics only — macOS needs the CI loopback alias
+  prep, and no NAT-wide simultaneous-open claim is made.
+- Previous-version interop: current↔1.9.0 exchanges encrypted direct UDP
+  datagrams in both dial directions (interop harness `echo`/`dial` modes).
+  Cross-version payload ceiling is 1176 bytes: a 1.9.0 peer's send API refuses
+  more, even though its wire carries the current tree's 1200-byte frames
+  inbound. The current 1200-byte guarantee is a same-version property.
+- Throughput floor: `Pinhole.Bench` measured 463,863 dps of 64-byte datagrams
+  at 0.014 B allocated per datagram — 18.5x the 25,000 dps CI canary floor.
+
+Still pending before ship: the Linux/macOS/Windows CI matrix on these suites
+(running on push), Kotlin listener parity beyond OpusVoice PR #4's dialer,
+.NET↔Kotlin TCP interop on devices, physical firewall/Internet NAT success
+rates, and repeat phone LTE/Wi-Fi tests. Do not close #43 or #40 until their
+remaining acceptance criteria are satisfied.

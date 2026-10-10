@@ -26,9 +26,11 @@ planned, and existing APIs and wire formats remain available.
 **On top, bring your own protocol**: UDP/TCP/QUIC — the app's libraries. We are the bottom layer and nothing else.
 
 Direct TCP support is a [local draft under issue #43](docs/DIRECT_TCP.md).
-It adds an encrypted stream route beneath the same datagram API; real socket,
-platform, and Kotlin interop checks remain pending, so it is not yet a released
-connectivity guarantee.
+It adds an encrypted stream route beneath the same datagram API; the real-socket
+Linux suites, previous-version UDP interop, throughput floors, and a
+source-bound simultaneous-open evaluation now pass, with the macOS/Windows
+matrix in CI and Kotlin/device checks tracked in the issue. It is not yet a
+released connectivity guarantee.
 
 Relay-assisted introduction with direct application traffic is another
 [local draft](docs/RELAY_SIGNALING.md): `RelaySignalingOnly = true` exchanges

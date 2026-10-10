@@ -15,6 +15,7 @@ PinholeOptions OfflineLoopback() => new()
     EnablePortMapping = false,
     EnableLanDiscovery = false,
     EnablePathValidation = false,
+    ReceiveBufferCapacity = 16, // echo/dial modes need ReceiveAsync, which requires a buffer at bind
 };
 
 switch (args[0])
@@ -34,6 +35,40 @@ switch (args[0])
             options: new BlobDownloadOptions { NodeOptions = OfflineLoopback() });
         Console.WriteLine($"OK {result.Bytes}");
         break;
+    }
+    case "echo":
+    {
+        // Old node as the reachable side: prints its connection string, accepts one
+        // peer, and echoes datagrams until killed. Exercises the 1.9.0 datagram API a
+        // game would use, not just the blob layer.
+        await using var node = await PinholeNode.BindAsync(OfflineLoopback());
+        Console.WriteLine("TICKET " + node.ConnectionString);
+        await using var peer = await node.AcceptAsync();
+        Console.WriteLine($"PEER encrypted={peer.IsEncrypted} kind={peer.Path.Kind}");
+        while (true)
+        {
+            ReadOnlyMemory<byte>? received = await peer.ReceiveAsync();
+            if (received is { } payload)
+            {
+                peer.Send(payload.Span);
+            }
+        }
+    }
+    case "dial":
+    {
+        // Old node as the dialer: connects to the current side's connection string,
+        // then echoes datagrams until killed.
+        await using var node = await PinholeNode.BindAsync(OfflineLoopback());
+        await using var peer = await node.ConnectAsync(args[1]);
+        Console.WriteLine($"PEER encrypted={peer.IsEncrypted} kind={peer.Path.Kind}");
+        while (true)
+        {
+            ReadOnlyMemory<byte>? received = await peer.ReceiveAsync();
+            if (received is { } payload)
+            {
+                peer.Send(payload.Span);
+            }
+        }
     }
     default:
         Console.Error.WriteLine($"unknown mode {args[0]}");
