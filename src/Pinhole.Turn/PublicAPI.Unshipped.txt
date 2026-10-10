@@ -15,3 +15,5 @@ Pinhole.Turn.TurnRejectException
 Pinhole.Turn.TurnRejectException.Code.get -> int
 Pinhole.Turn.TurnRejectException.TurnRejectException(int code, string! reason) -> void
 static Pinhole.Turn.TurnClient.AllocateAsync(System.Net.IPEndPoint! server, string! username, string! credential, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.Turn.TurnClient!>!
+static Pinhole.Turn.TurnRestCredentials.Issue(System.ReadOnlySpan<byte> sharedSecret, System.DateTimeOffset? now, System.TimeSpan lifetime, System.ReadOnlySpan<byte> nonce) -> (string! Username, string! Credential)
+Pinhole.Turn.TurnRestCredentials

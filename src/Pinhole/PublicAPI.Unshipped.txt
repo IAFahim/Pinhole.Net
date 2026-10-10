@@ -424,3 +424,44 @@ static Pinhole.NatDetector.InspectAsync(System.Net.IPEndPoint! server, System.Th
 Pinhole.PinholeConnection.PortPredictionProbesSent.get -> long
 Pinhole.PinholeOptions.EnablePortPrediction.get -> bool
 Pinhole.PinholeOptions.EnablePortPrediction.init -> void
+Pinhole.PinholeHostSettings
+Pinhole.PinholeJoinSettings
+Pinhole.PinholeHostSettings.PinholeHostSettings() -> void
+Pinhole.PinholeHostSettings.<Clone>$() -> Pinhole.PinholeHostSettings!
+Pinhole.PinholeHostSettings.Equals(Pinhole.PinholeHostSettings? other) -> bool
+override Pinhole.PinholeHostSettings.Equals(object? obj) -> bool
+override Pinhole.PinholeHostSettings.GetHashCode() -> int
+override Pinhole.PinholeHostSettings.ToString() -> string!
+Pinhole.PinholeHostSettings.NodeOptions.get -> Pinhole.PinholeOptions?
+Pinhole.PinholeHostSettings.NodeOptions.init -> void
+Pinhole.PinholeHostSettings.RendezvousEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.PinholeHostSettings.RendezvousEndpoints.init -> void
+Pinhole.PinholeJoinSettings.PinholeJoinSettings() -> void
+Pinhole.PinholeJoinSettings.<Clone>$() -> Pinhole.PinholeJoinSettings!
+Pinhole.PinholeJoinSettings.Equals(Pinhole.PinholeJoinSettings? other) -> bool
+override Pinhole.PinholeJoinSettings.Equals(object? obj) -> bool
+override Pinhole.PinholeJoinSettings.GetHashCode() -> int
+override Pinhole.PinholeJoinSettings.ToString() -> string!
+Pinhole.PinholeJoinSettings.NodeOptions.get -> Pinhole.PinholeOptions?
+Pinhole.PinholeJoinSettings.NodeOptions.init -> void
+Pinhole.PinholeJoinSettings.PollInterval.get -> System.TimeSpan
+Pinhole.PinholeJoinSettings.PollInterval.init -> void
+Pinhole.PinholeJoinSettings.RendezvousEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
+Pinhole.PinholeJoinSettings.RendezvousEndpoints.init -> void
+Pinhole.PinholeJoinSettings.WaitTimeout.get -> System.TimeSpan
+Pinhole.PinholeJoinSettings.WaitTimeout.init -> void
+static Pinhole.PinholeHostSettings.operator ==(Pinhole.PinholeHostSettings? left, Pinhole.PinholeHostSettings? right) -> bool
+static Pinhole.PinholeHostSettings.operator !=(Pinhole.PinholeHostSettings? left, Pinhole.PinholeHostSettings? right) -> bool
+static Pinhole.PinholeJoinSettings.operator ==(Pinhole.PinholeJoinSettings? left, Pinhole.PinholeJoinSettings? right) -> bool
+static Pinhole.PinholeJoinSettings.operator !=(Pinhole.PinholeJoinSettings? left, Pinhole.PinholeJoinSettings? right) -> bool
+Pinhole.PinholeHost
+Pinhole.PinholeHost.AcceptAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnection!>!
+Pinhole.PinholeHost.Code.get -> string!
+Pinhole.PinholeHost.ConfirmationCode.get -> string!
+Pinhole.PinholeHost.DisposeAsync() -> System.Threading.Tasks.ValueTask
+Pinhole.PinholeHost.FullInvitation.get -> string!
+Pinhole.PinholeSession
+static Pinhole.PinholeSession.HostAsync(Pinhole.PinholeHostSettings! settings, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeHost!>!
+static Pinhole.PinholeSession.JoinAsync(string! code, Pinhole.PinholeJoinSettings! settings, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task<Pinhole.PinholeConnection!>!
+Pinhole.PinholeHostSettings.RefreshInterval.get -> System.TimeSpan
+Pinhole.PinholeHostSettings.RefreshInterval.init -> void

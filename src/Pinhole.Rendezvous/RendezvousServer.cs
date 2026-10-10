@@ -10,18 +10,27 @@ namespace Pinhole.Rendezvous;
 /// an INTRO when the target registers. A registration may attach a signed address record
 /// (base64url, ≤1 KB) which INTROs then carry verbatim — the introducer stores and forwards
 /// records but never validates them; adopters verify signatures against their pinned keys.
-/// Entries are TTL-swept and bounded so memory stays flat.</summary>
+/// Entries are TTL-swept and bounded so memory stays flat.
+///
+/// Host/join code directory (#45): hosts PUTC a short invitation code mapped to a
+/// connection-string record; joiners GETC it. Codes are capabilities — the introducer still
+/// never validates records — and a registration can only be deleted by presenting the
+/// token the server issued at PUT time, so a joiner who knows the code cannot tear down
+/// the host's registration.</summary>
 public sealed class RendezvousServer : IAsyncDisposable
 {
     public const int MaxNodes = 4096;
     public const int MaxWaitersPerTarget = 64;
     public const int MaxRecordLength = 1024;
+    public const int MaxCodes = 4096;
+    public const int MaxCodeLength = 16;
 
     private readonly Socket _udp;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _run;
     private readonly ConcurrentDictionary<ulong, (IPEndPoint Ep, DateTimeOffset Seen, string? Record)> _nodes = new();
     private readonly ConcurrentDictionary<ulong, List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>> _wants = new();
+    private readonly ConcurrentDictionary<string, (string Record, string Token, DateTimeOffset Seen)> _codes = new();
 
     private RendezvousServer(Socket udp, TimeSpan ttl)
     {
@@ -47,6 +56,8 @@ public sealed class RendezvousServer : IAsyncDisposable
     public int NodeCount => _nodes.Count;
 
     public int WantCount => _wants.Count;
+
+    public int CodeCount => _codes.Count;
 
     internal int WaitersFor(ulong target)
     {
@@ -165,6 +176,61 @@ public sealed class RendezvousServer : IAsyncDisposable
                 }
 
                 break;
+            case ["PUTC", var code, var record] when ValidCode(code) && ValidRecord(record):
+                // First registration claims the code and issues its delete/replace token.
+                if (_codes.TryGetValue(code, out _))
+                {
+                    // A live code belongs to whoever claimed it: only the token holder
+                    // may replace the record, so a code holder cannot hijack a host.
+                    await Say(remote, "TokB").ConfigureAwait(false);
+                    break;
+                }
+
+                string token = Token.New();
+                _codes[code] = (record, token, DateTimeOffset.UtcNow);
+                if (_codes.Count > MaxCodes)
+                {
+                    EvictOldestCode();
+                }
+
+                await Say(remote, $"OKCG {token}").ConfigureAwait(false);
+                break;
+            case ["PUTC", var code, var record, var oldToken] when ValidCode(code) && ValidRecord(record):
+                if (!_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) held)
+                    || held.Token != oldToken)
+                {
+                    await Say(remote, "TokB").ConfigureAwait(false);
+                    break;
+                }
+
+                _codes[code] = (record, oldToken, DateTimeOffset.UtcNow); // refresh keeps the token
+                await Say(remote, $"OKCG {oldToken}").ConfigureAwait(false);
+                break;
+            case ["GETC", var code] when ValidCode(code):
+                if (_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) entry2)
+                    && entry2.Seen > DateTimeOffset.UtcNow - _ttl)
+                {
+                    await Say(remote, $"OKCC {entry2.Record}").ConfigureAwait(false);
+                }
+                else
+                {
+                    await Say(remote, "WAITC").ConfigureAwait(false);
+                }
+
+                break;
+            case ["DELC", var delCode, var delToken] when ValidCode(delCode!):
+                if (_codes.TryGetValue(delCode, out (string Record, string Token, DateTimeOffset Seen) current)
+                    && current.Token == delToken)
+                {
+                    _codes.TryRemove(delCode, out _);
+                    await Say(remote, "OKCD").ConfigureAwait(false);
+                }
+                else
+                {
+                    await Say(remote, "TokB").ConfigureAwait(false);
+                }
+
+                break;
         }
     }
 
@@ -204,6 +270,70 @@ public sealed class RendezvousServer : IAsyncDisposable
                     _wants.TryRemove(target, out _);
                 }
             }
+
+            foreach (var (code, (_, _, seen)) in _codes)
+            {
+                if (seen < cutoff)
+                {
+                    _codes.TryRemove(code, out _);
+                }
+            }
+        }
+    }
+
+    private void EvictOldestCode()
+    {
+        string? oldest = null;
+        DateTimeOffset oldestSeen = DateTimeOffset.MaxValue;
+        foreach (var (code, (_, _, seen)) in _codes)
+        {
+            if (seen < oldestSeen)
+            {
+                (oldest, oldestSeen) = (code, seen);
+            }
+        }
+
+        if (oldest is { } evicted)
+        {
+            _codes.TryRemove(evicted, out _);
+        }
+    }
+
+    /// <summary>Codes are ASCII, bounded, and space-free — they key a dictionary and ride
+    /// the space-framed wire. Content is the host's choice; the SDK generates base32.</summary>
+    private static bool ValidCode(string code)
+    {
+        if (code.Length is < 4 or > MaxCodeLength)
+        {
+            return false;
+        }
+
+        foreach (char c in code)
+        {
+            if (!(c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static class Token
+    {
+        public static string New()
+        {
+            Span<byte> raw = stackalloc byte[16];
+            System.Security.Cryptography.RandomNumberGenerator.Fill(raw);
+            System.Span<char> chars = stackalloc char[26];
+            Base64UrlEncode(raw, chars);
+            return new string(chars[..26].TrimEnd('='));
+        }
+
+        private static void Base64UrlEncode(ReadOnlySpan<byte> bytes, Span<char> output)
+        {
+            string s = Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_');
+            s.AsSpan().CopyTo(output);
         }
     }
 

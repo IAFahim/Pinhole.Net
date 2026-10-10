@@ -44,7 +44,18 @@ UDP source sockets retain their own STUN observations and direct paths, allowing
 another active interface to connect when the default route fails. Actual socket,
 platform, VPN/carrier and Kotlin checks remain pending.
 
-**Non-goals, stated loudly**: no delivery guarantees, ordering, or retransmission — a half-baked ARQ is worse than none, so retransmit at the app layer if you care (the engine's internal path validation keeps the *transport* honest, never your protocol alive; the optional keepalive is a NAT heartbeat, not reliability). No signaling transport, storage, or coordination services — anything stateful about your app belongs to your app.
+**Non-goals, stated loudly**: no delivery guarantees, ordering, or retransmission — a half-baked ARQ is worse than none, so retransmit at the app layer if you care (the engine's internal path validation keeps the *transport* honest, never your protocol alive; the optional keepalive is a NAT heartbeat, not reliability). No signaling transport, storage, or coordination services — anything stateful about your app belongs to your app. (The minimal host/join facade below reuses a self-hosted introducer as a code directory; it is still your infrastructure, not ours.)
+
+## Host/join by code (SDK roadmap, unreleased)
+
+The minimal [#45](https://github.com/IAFahim/Pinhole.Net/issues/45) facade is implemented
+additively: `PinholeSession.HostAsync` / `JoinAsync` share a 9-character code through a
+self-hosted `Pinhole.Rendezvous` code directory and return the engine's own encrypted
+connection — UDP/TCP punching, relay fallback, roaming, and cancellation unchanged. The
+WebRTC evaluation for the same roadmap measured SIPSorcery 10.0.17 at ~25 ms RTT floors
+and no peer-to-peer TCP against 5 µs and a working TCP sidecar, so the current backend was
+retained. See [docs/HOST_JOIN.md](docs/HOST_JOIN.md) (trust model, TURN incl. Cloudflare
+ephemeral credentials) and [docs/issues/webrtc-feasibility.md](docs/issues/webrtc-feasibility.md).
 
 ## Install
 
