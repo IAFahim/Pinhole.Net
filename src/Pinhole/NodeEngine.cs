@@ -130,6 +130,7 @@ internal sealed class ConnState
     // these say WHICH check killed them and what the peer actually echoed.
     public volatile uint LastRejectWanted, LastRejectGot;
     public long LastRejectKind; // 1=pack-token, 2=pack-length, 3=punc-token, 4=punc-keys, 5=punc-pin, 6=mixed-mode
+    public volatile string? LastRejectFrom; // source endpoint of the last token-rejected frame
     public long LastRttTicks = long.MinValue; // Interlocked
     public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
@@ -2958,6 +2959,7 @@ internal sealed partial class NodeEngine : IDisposable
                 Volatile.Write(ref c.LastRejectKind, 3);
                 Volatile.Write(ref c.LastRejectWanted, c.RemoteToken);
                 Volatile.Write(ref c.LastRejectGot, token);
+                Volatile.Write(ref c.LastRejectFrom, arrival.Direct is { } d ? ToEndpoint(d).ToString() : (arrival.Tcp is null ? arrival.Relay?.ToString() : "tcp"));
                 return; // stale frames from an older connection to the same peer ID
             }
 
@@ -3047,6 +3049,7 @@ internal sealed partial class NodeEngine : IDisposable
             Volatile.Write(ref c.LastRejectKind, 1);
             Volatile.Write(ref c.LastRejectWanted, c.Token);
             Volatile.Write(ref c.LastRejectGot, BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]));
+            Volatile.Write(ref c.LastRejectFrom, arrival.Direct is { } d ? ToEndpoint(d).ToString() : (arrival.Tcp is null ? arrival.Relay?.ToString() : "tcp"));
             if (TraceEnabled)
             {
                 TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]):x8})");
@@ -4292,9 +4295,9 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static string RejectSuffix(long kind, ConnState c) => kind switch
     {
-        1 => $" last=pack-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8}",
+        1 => $" last=pack-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8} from {Volatile.Read(ref c.LastRejectFrom) ?? "?"}",
         2 => " last=pack-length",
-        3 => $" last=punc-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8}",
+        3 => $" last=punc-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8} from {Volatile.Read(ref c.LastRejectFrom) ?? "?"}",
         4 => " last=punc-keys",
         5 => " last=punc-pin",
         _ => " last=mixed-mode",
