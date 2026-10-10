@@ -367,6 +367,78 @@ public class CryptoTests
         Assert.False(receiver.Open(frames[0], new byte[64], out _)); // refused, not thrown
     }
 
+    [Theory]
+    [InlineData(1UL, 2UL)]
+    [InlineData(2UL, 1UL)]
+    public void UnconfirmedLatch_VerifiedFreshHandshakeReplacesStaleKeys(ulong mine, ulong theirs)
+    {
+        var identity = new NodeIdentity();
+        var peerIdentity = new NodeIdentity();
+        ConnectionCrypto local = ConnectionCrypto.New(identity, mine, theirs);
+        ConnectionCrypto stale = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        ConnectionCrypto current = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        Assert.True(local.TryPeerKeys(stale.MyEphPublic, stale.MyStaticPublic));
+        Assert.True(current.TryPeerKeys(local.MyEphPublic, local.MyStaticPublic));
+        Assert.False(local.VerifyPeerConfirm(current.MyConfirm()));
+
+        Assert.True(local.TrySupersedeUnconfirmed(current.MyEphPublic, current.MyStaticPublic, current.MyConfirm()));
+        Assert.True(local.VerifyPeerConfirm(current.MyConfirm()));
+        Assert.True(current.VerifyPeerConfirm(local.MyConfirm()));
+        Assert.Equal(current.MyEphPublic, local.PeerEphPublic);
+        Assert.Equal(1, local.SupersededLatches);
+    }
+
+    [Theory]
+    [InlineData(1UL, 2UL)]
+    [InlineData(2UL, 1UL)]
+    public void UnconfirmedLatch_FailedProofAndLowOrderKeysLeaveStateUntouched(ulong mine, ulong theirs)
+    {
+        var identity = new NodeIdentity();
+        var peerIdentity = new NodeIdentity();
+        ConnectionCrypto local = ConnectionCrypto.New(identity, mine, theirs);
+        ConnectionCrypto stale = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        ConnectionCrypto current = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        Assert.True(local.TryPeerKeys(stale.MyEphPublic, stale.MyStaticPublic));
+        Assert.True(current.TryPeerKeys(local.MyEphPublic, local.MyStaticPublic));
+        SessionKeys? keys = local.Keys;
+        FrameSealer? send = local.Send;
+        FrameSealer? recv = local.Recv;
+        byte[] invalidConfirm = current.MyConfirm().ToArray();
+        invalidConfirm[0] ^= 1;
+
+        Assert.False(local.TrySupersedeUnconfirmed(current.MyEphPublic, current.MyStaticPublic, invalidConfirm));
+        Assert.False(local.TrySupersedeUnconfirmed(new byte[32], current.MyStaticPublic, current.MyConfirm()));
+        Assert.Same(keys, local.Keys);
+        Assert.Same(send, local.Send);
+        Assert.Same(recv, local.Recv);
+        Assert.Equal(stale.MyEphPublic, local.PeerEphPublic);
+        Assert.Equal(0, local.SupersededLatches);
+    }
+
+    [Theory]
+    [InlineData(1UL, 2UL)]
+    [InlineData(2UL, 1UL)]
+    public void ConfirmedLatch_CannotBeReplacedEvenByAValidFreshHandshake(ulong mine, ulong theirs)
+    {
+        var identity = new NodeIdentity();
+        var peerIdentity = new NodeIdentity();
+        ConnectionCrypto local = ConnectionCrypto.New(identity, mine, theirs);
+        ConnectionCrypto original = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        ConnectionCrypto successor = ConnectionCrypto.New(peerIdentity, theirs, mine);
+        Assert.True(local.TryPeerKeys(original.MyEphPublic, original.MyStaticPublic));
+        Assert.True(original.TryPeerKeys(local.MyEphPublic, local.MyStaticPublic));
+        Assert.True(local.VerifyPeerConfirm(original.MyConfirm()));
+        local.MarkPeerConfirmed();
+        Assert.True(successor.TryPeerKeys(local.MyEphPublic, local.MyStaticPublic));
+        SessionKeys? keys = local.Keys;
+
+        Assert.False(local.TrySupersedeUnconfirmed(successor.MyEphPublic, successor.MyStaticPublic, successor.MyConfirm()));
+        Assert.Same(keys, local.Keys);
+        Assert.Equal(original.MyEphPublic, local.PeerEphPublic);
+        Assert.True(local.VerifyPeerConfirm(original.MyConfirm()));
+        Assert.Equal(0, local.SupersededLatches);
+    }
+
     // ---------------------------------------------------------------- end to end
 
     [Fact]
@@ -587,6 +659,7 @@ public class CryptoTests
         public readonly NodeIdentity Identity = new();
         public const uint Token = 0x11223344;
         private ConnectionCrypto? _crypto;
+        public byte[] HandshakePack { get; private set; } = [];
 
         public IPEndPoint Ep => (IPEndPoint)Sock.LocalEndPoint!;
 
@@ -627,7 +700,11 @@ public class CryptoTests
             _crypto.MyEphPublic.CopyTo(pack.AsSpan(17));
             _crypto.MyStaticPublic.CopyTo(pack.AsSpan(49));
             _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
+            HandshakePack = pack;
             await Sock.SendToAsync(pack, nodeEp, ct);
+            // A plaintext handshake does not prove its source route. Supply fresh sealed
+            // traffic so the node can adopt the oracle's UDP path and complete its dial.
+            await Sock.SendToAsync(SealFrame(0x53, new byte[8]), nodeEp, ct);
         }
 
         /// <summary>Builds one sealed frame exactly the way the engine does.</summary>
@@ -717,6 +794,55 @@ public class CryptoTests
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 2);
         Assert.Equal(1, conn.Stats.DatagramsReceived); // the replay did not double-deliver
+    }
+
+    [Theory]
+    [InlineData("confirmation")]
+    [InlineData("static-key")]
+    [InlineData("ephemeral-key")]
+    [InlineData("peer-token")]
+    [InlineData("downgrade")]
+    [InlineData("replay-from-another-address")]
+    public async Task WireOracle_HandshakeRetriesCannotKillOrRedirectAConfirmedSession(string attack)
+    {
+        await using PinholeNode node = await PinholeNode.BindAsync(Opts());
+        using var oracle = new OraclePeer();
+        oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
+        await oracle.ShakeHandsAsync(node);
+        PinholeConnection conn = await dial.WaitAsync(Timeout);
+        ConnState state = node.Engine.Lookup(oracle.PeerId)!;
+        IPEndPoint? originalRemote = conn.Path.Remote;
+        byte[] frame = oracle.HandshakePack.ToArray();
+        switch (attack)
+        {
+            case "confirmation": frame[81] ^= 1; break;
+            case "static-key": new NodeIdentity().PublicKey.CopyTo(frame.AsSpan(49)); break;
+            case "ephemeral-key": NodeIdentity.NewEphemeral().Public.CopyTo(frame.AsSpan(17)); break;
+            case "peer-token": BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(13), OraclePeer.Token + 1); break;
+            case "downgrade": frame = frame[..17]; break;
+        }
+
+        using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        long rejects = conn.FramesRejected;
+        long packs = Volatile.Read(ref state.PacksReceived);
+        await attacker.SendToAsync(frame, new IPEndPoint(IPAddress.Loopback, node.LocalPort));
+        await TestPoll.UntilAsync(Timeout, () => attack == "replay-from-another-address"
+            ? Volatile.Read(ref state.PacksReceived) > packs : conn.FramesRejected > rejects);
+
+        Assert.Equal(PinholeConnectionState.Open, conn.State);
+        Assert.Equal(originalRemote, conn.Path.Remote);
+        Assert.Equal(OraclePeer.Token, state.RemoteToken);
+        var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        conn.Received += p => got.TrySetResult(p.ToArray());
+        await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "still authenticated"u8),
+            new IPEndPoint(IPAddress.Loopback, node.LocalPort));
+        Assert.Equal("still authenticated"u8.ToArray(), await got.Task.WaitAsync(Timeout));
+        conn.Send("reply"u8);
+        var reply = await oracle.ReceiveSealedAsync(Timeout, wantType: 0x52);
+        Assert.NotNull(reply);
+        Assert.Equal("reply"u8.ToArray(), reply.Value.Body);
     }
 
     [Fact]

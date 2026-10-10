@@ -46,19 +46,19 @@ one frame:
   shown below becomes `[counter u64 LE][ciphertext ‖ GCM tag]`; see
   [Encryption](#encryption-wire-v16).
 
-| Type | Byte | Body after token | Meaning |
+| Type | Byte | Unsealed body after the 9-byte header | Meaning |
 |---|---|---|---|
 | `Punc` | `0x50` | token (u32 LE) | Punch probe; body *is* the dialer's handshake token |
 | `Punc`+ | `0x50` | token + ephemeral (32) + static (32) — 77 B frame | Crypto punch: the dialer's half of the handshake (length discriminates from legacy 13 B) |
 | `Pack` | `0x51` | echo (u32 LE) + responder token (u32 LE) | Punch ack; proves the PUNC was seen and delivers the responder's token |
 | `Pack`+ | `0x51` | echo + token + ephemeral (32) + static (32) + confirm (16) — 97 B frame | Crypto punch ack: the responder's half plus its confirm MAC |
 | `Hsck` | `0x57` | token + confirm (16) — 29 B frame, always plaintext | Third flight: the dialer's confirm MAC; also triggers the responder to re-announce |
-| `Data` | `0x52` | payload (1–1200+ bytes) | Application datagram |
-| `Ping` | `0x53` | nonce (i64 LE) [+ zero padding] | Path probe / RTT / (padded) PMTU probe |
-| `Pong` | `0x54` | echoed nonce (i64 LE) | Reply to Ping, value copied verbatim |
-| `Announce` | `0x55` | count (u8) + candidate TLV stream | Sender's current reachable addresses |
-| `Bye` | `0x56` | — | Clean close |
-| `Predict` (local draft) | `0x58` | Version, kind, round IDs and bounded offers | Authenticated relay-only prediction control; [exact layout](PORT_PREDICTION.md) |
+| `Data` | `0x52` | token + payload (1–1200+ bytes) | Application datagram |
+| `Ping` | `0x53` | token + nonce (i64 LE) [+ zero padding] | Path probe / RTT / (padded) PMTU probe |
+| `Pong` | `0x54` | token + echoed nonce (i64 LE) | Reply to Ping, value copied verbatim |
+| `Announce` | `0x55` | token + count (u8) + candidate TLV stream | Sender's current reachable addresses |
+| `Bye` | `0x56` | token | Clean close |
+| `Predict` (local draft) | `0x58` | token + version, kind, round IDs and bounded offers | Authenticated relay-only prediction control; [exact layout](PORT_PREDICTION.md) |
 
 ### Token authentication
 
@@ -98,14 +98,36 @@ dials converge on one session instead of colliding.
    a substitution kills the connection as a MITM, it never negotiates — and the
    confirm MAC, then sends `Hsck` carrying *its* confirm MAC (29 B frame, the third
    flight). `Hsck` also asks the responder to re-announce (its first sealed announce
-   may have lost the race against the PACK that delivered its keys).
+   may have lost the race against the PACK that delivered its keys). A sealed
+   introduction Ping/Pong or other fresh sealed frame confirms the UDP route;
+   replayable plaintext handshake flights cannot adopt or move it. TCP requires
+   the additional per-stream challenge described above.
+
+An unconfirmed key latch from a stale PUNC may be replaced only by a PACK whose
+confirm MAC verifies under the arriving keys, after checking the pinned static
+key. A confirmed session never replaces its keys or peer token from another
+handshake. Malformed, substituted, or downgraded handshake retries are rejected
+without closing a confirmed session. The confirm MAC covers the key transcript;
+it does not authenticate the PACK's token fields or source address.
 
 Key schedule, all sides identical: transcript = SHA-256 of
 `"pinhole-hs1" ‖ loId LE ‖ hiId LE ‖ eLo ‖ sLo ‖ eHi ‖ sHi`; secret input =
 `DH(e,e) ‖ DH(s_lo,e_hi) ‖ DH(e_lo,s_hi)`; 136 B of HKDF-SHA256
 (salt = transcript, info = `"pinhole-session-v1"`) expand to the lo→hi key,
-hi→lo key, both 4-byte nonce salts, and both 16-byte confirm MACs
-(HMAC of the transcript, truncated).
+hi→lo key, two confirm-MAC keys, and both 4-byte nonce salts:
+
+| OKM byte offsets (inclusive) | Length | Use |
+|---|---|---|
+| 0–31 | 32 | AES-256-GCM key for lo→hi |
+| 32–63 | 32 | AES-256-GCM key for hi→lo |
+| 64–95 | 32 | lo's HMAC-SHA256 confirmation key |
+| 96–127 | 32 | hi's HMAC-SHA256 confirmation key |
+| 128–131 | 4 | lo→hi nonce salt |
+| 132–135 | 4 | hi→lo nonce salt |
+
+Each confirm is the first 16 bytes of HMAC-SHA256 over the transcript hash with
+that role's confirmation key. PACK carries the responder's confirm; HSCK carries
+the dialer's. The independent derivation vectors in `CryptoTests` cover both roles.
 
 ### Sealed frames
 
@@ -235,7 +257,7 @@ object preservation.
 `pinhole1:<base64url>` (unpadded). Three payload versions share the envelope:
 
 ```
-version:u8 (=1)  flags:u8 (=0)  peerId:u64 LE  natHint:u8 (0 unknown, 1 cone, 2 symmetric)
+version:u8 (1/2/3)  flags:u8 (0/1/3)  peerId:u64 LE  natHint:u8 (0 unknown, 1 cone, 2 symmetric)
 candidateCount:u8  candidate TLVs...  [v2: staticKey (32 B)]  [v3: endpointKey (32 B)]
 ```
 

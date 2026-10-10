@@ -128,10 +128,10 @@ internal sealed class ConnState
     public long PuncsSent, PuncsReceived, PacksSent, PacksReceived, HscksReceived, HandshakeRejects;
     // Last reject's branch and tokens (volatile): the counters say HOW MANY answers died;
     // these say WHICH check killed them and what the peer actually echoed.
-    public volatile uint LastRejectWanted, LastRejectGot;
-    public long LastRejectKind; // 1=pack-token, 2=pack-length, 3=punc-token, 4=punc-keys, 5=punc-pin, 6=mixed-mode, 7=pack-confirm
-    public volatile string? LastRejectFrom; // source endpoint of the last token-rejected frame
-    public readonly long[] RejectsByKind = new long[8]; // indexed by the kinds above
+    public uint LastRejectWanted, LastRejectGot; // accessed through Volatile.Read/Write
+    public long LastRejectKind; // 1=pack-echo, 2=pack-length, 3=punc-token, 4=keys, 5=pin, 6=mixed-mode, 7=pack-confirm, 8=pack-peer-token
+    public string? LastRejectFrom; // Volatile.Read/Write: source of the last token-rejected frame
+    public readonly long[] RejectsByKind = new long[9]; // indexed by the kinds above
     public long LastRttTicks = long.MinValue; // Interlocked
     public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
@@ -3089,9 +3089,15 @@ internal sealed partial class NodeEngine : IDisposable
             bool sendHsck;
             lock (c.Gate)
             {
-                // The responder's token rides the same PACK the legacy handshake uses it for.
-                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
-                c.RemoteTokenKnown = true;
+                uint remoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
+                // Confirmation binds the keys, not these token fields. A replayed PACK
+                // with an edited token must not change an authenticated session's token.
+                if (crypto.PeerConfirmed && c.RemoteTokenKnown && remoteToken != c.RemoteToken)
+                {
+                    Reject(c, 8, c.RemoteToken, remoteToken, arrival);
+                    crypto.CountRejected();
+                    return;
+                }
 
                 if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength))
                     && !crypto.TrySupersedeUnconfirmed(
@@ -3116,6 +3122,9 @@ internal sealed partial class NodeEngine : IDisposable
                     return;
                 }
 
+                // Only verified keys may replace a token latched by an earlier PUNC.
+                c.RemoteToken = remoteToken;
+                c.RemoteTokenKnown = true;
                 crypto.MarkPeerConfirmed();
                 sendHsck = !c.HsckSent;
                 c.HsckSent = true;
@@ -3150,12 +3159,9 @@ internal sealed partial class NodeEngine : IDisposable
         }
         else
         {
-            // A crypto PACK that verified its confirm MAC is authenticated evidence: the
-            // answering peer proved possession of the key inside this very frame. The
-            // sealed-evidence gate exists to stop UNauthenticated frames from promoting a
-            // path, not to demand a sealed envelope from a peer still holding the
-            // handshake's plaintext flights.
-            DirectPathConfirmed(c, arrival, sealedEvidence: cryptoPack && c.Crypto is not null);
+            // A confirm MAC can be replayed from another address. The sealed introduction
+            // probe above establishes the UDP route; a plaintext handshake cannot move it.
+            DirectPathConfirmed(c, arrival);
         }
 
         if (!c.Announced)
@@ -3204,15 +3210,16 @@ internal sealed partial class NodeEngine : IDisposable
     /// instead of limping on in plaintext.</summary>
     private void HandshakeFailed(ConnState c, string reason)
     {
-        if (c.State is PinholeConnectionState.Closed)
+        lock (c.Gate)
         {
-            return;
+            // Plaintext handshake retries carry public/replayable information. Invalid
+            // retries may fail an initial dial, but cannot kill a confirmed session.
+            if (c.State is PinholeConnectionState.Closed || c.Crypto is { PeerConfirmed: true }) return;
+            c.Connected.TrySetException(new InvalidOperationException(reason));
+            Telemetry.ConnectionRefused(reason);
+            Transition(c, PinholeConnectionState.Dead);
+            c.Dead.Cancel();
         }
-
-        c.Connected.TrySetException(new InvalidOperationException(reason));
-        Telemetry.ConnectionRefused(reason);
-        Transition(c, PinholeConnectionState.Dead);
-        c.Dead.Cancel();
     }
 
     private void OnData(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -4284,7 +4291,7 @@ internal sealed partial class NodeEngine : IDisposable
         Interlocked.Increment(ref c.HandshakeRejects);
         Interlocked.Increment(ref c.RejectsByKind[kind]);
         Volatile.Write(ref c.LastRejectKind, kind);
-        if (kind is 1 or 3)
+        if (kind is 1 or 3 or 8)
         {
             Volatile.Write(ref c.LastRejectWanted, wanted);
             Volatile.Write(ref c.LastRejectGot, got);
@@ -4323,7 +4330,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (Volatile.Read(ref c.HandshakeRejects) > 0)
         {
             long[] byKind = c.RejectsByKind;
-            line += $" by-kind[{string.Join(",", Enumerable.Range(1, 7).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
+            line += $" by-kind[{string.Join(",", Enumerable.Range(1, byKind.Length - 1).Select(k => $"{k}:{Volatile.Read(ref byKind[k])}"))}]";
         }
         if (c.Crypto is { } crypto && Volatile.Read(ref crypto.SupersededLatches) > 0)
         {
@@ -4341,6 +4348,7 @@ internal sealed partial class NodeEngine : IDisposable
         5 => " last=punc-pin",
         6 => " last=mixed-mode",
         7 => " last=pack-confirm",
+        8 => $" last=pack-peer-token wanted {Volatile.Read(ref c.LastRejectWanted):x8} got {Volatile.Read(ref c.LastRejectGot):x8} from {Volatile.Read(ref c.LastRejectFrom) ?? "?"}",
         _ => "",
     };
 

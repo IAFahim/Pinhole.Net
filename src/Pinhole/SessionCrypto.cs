@@ -550,6 +550,8 @@ internal sealed class ConnectionCrypto
             PeerStaticPublic = stat.ToArray();
             Keys = trial;
             bool iAmLo = MyPeerId < PeerPeerId;
+            Send?.Dispose();
+            Recv?.Dispose();
             Send = new FrameSealer(trial, iAmLo, sending: true);
             Recv = new FrameSealer(trial, iAmLo, sending: false);
             Interlocked.Increment(ref SupersededLatches);
