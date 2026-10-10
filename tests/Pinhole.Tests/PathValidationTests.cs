@@ -76,7 +76,11 @@ public sealed class PathValidationTests
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
         await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
             && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
-        Assert.Equal(PinholeConnectionState.Open, atB.State);
+        // Both ends must settle Open on the direct path before the fault is injected —
+        // under load the relay can briefly carry the session while iroh confirmation
+        // lands, and the premise of this test is a healthy direct path to kill.
+        await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
+            && atB.State == PinholeConnectionState.Open);
 
         // The fault injector only drops packets — no NotifyPathSuspect, no send errors.
         // The engine has to notice on its own within the detection budget.

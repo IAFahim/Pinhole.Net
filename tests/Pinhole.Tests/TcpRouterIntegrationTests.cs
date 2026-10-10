@@ -8,7 +8,10 @@ namespace Pinhole.Tests;
 /// and remain pending in the restricted editing session.</summary>
 public sealed class TcpRouterIntegrationTests
 {
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(10);
+    // Readiness polling, not a performance floor: PCP discovery alone carries an
+    // eight-second budget and mappings serialize per transport, so a busy runner can
+    // legitimately need longer than discovery+mapping+polling stacked together.
+    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(25);
     [Fact]
     public async Task DefaultTcpSidecar_GetsItsOwnMappedCandidateAndReleasesBothProtocols()
     {
