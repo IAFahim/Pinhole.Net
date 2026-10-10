@@ -3598,7 +3598,13 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static void TraceLine(string line)
     {
-        Console.WriteLine("[pinhole] " + line);
+        // Console only for the explicit flag: a file-scoped trace (interop forensics) can be
+        // attached to a live transfer, and one console write per streamed frame would
+        // throttle the very wire under observation.
+        if (Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1")
+        {
+            Console.WriteLine("[pinhole] " + line);
+        }
         if (Environment.GetEnvironmentVariable("PINHOLE_TRACE_FILE") is { Length: > 0 } path)
         {
             try

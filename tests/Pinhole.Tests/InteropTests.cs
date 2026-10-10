@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using Pinhole;
 using Pinhole.Blobs;
 using Xunit;
@@ -30,6 +31,9 @@ public sealed class InteropTests
     private const string ReleaseName = "1.9.0";
 
     private static readonly TimeSpan Budget = TimeSpan.FromMinutes(2);
+    // The release traces each packet. Exceed typical pipe capacities in both
+    // directions so these transfers also guard against an undrained child pipe.
+    private const int TransferBytes = 2 * 1024 * 1024;
     private readonly ITestOutputHelper _output;
 
     public InteropTests(ITestOutputHelper output) => _output = output;
@@ -43,14 +47,14 @@ public sealed class InteropTests
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         EnableEngineTrace(dir);
-        Process? proc = null;
+        HostProcess? proc = null;
         try
         {
             string src = Path.Combine(dir, "asset.bin");
-            byte[] expected = RandomNumberGenerator.GetBytes(300 * 1024);
+            byte[] expected = RandomNumberGenerator.GetBytes(TransferBytes);
             await File.WriteAllBytesAsync(src, expected);
 
-            proc = StartHost(host, $"serve \"{src}\"");
+            proc = StartHost(host, "serve", src);
             BlobTicket ticket = await ReadTicketAsync(proc);
 
             BlobDownloadResult result = await BlobClient.DownloadAsync(ticket,
@@ -63,8 +67,8 @@ public sealed class InteropTests
         }
         finally
         {
+            await StopHostAsync(proc);
             DumpEngineTrace(_output);
-            KillQuietly(proc);
             Directory.Delete(dir, true);
         }
     }
@@ -80,20 +84,20 @@ public sealed class InteropTests
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         EnableEngineTrace(dir);
-        Process? proc = null;
+        HostProcess? proc = null;
         try
         {
             string src = Path.Combine(dir, "asset.bin");
-            byte[] expected = RandomNumberGenerator.GetBytes(192 * 1024);
+            byte[] expected = RandomNumberGenerator.GetBytes(TransferBytes);
             await File.WriteAllBytesAsync(src, expected);
 
             await using BlobServer server = await BlobServer.ServeAsync(src,
                 new BlobServeOptions { NodeOptions = OfflineLoopback() });
             _output.WriteLine("current provider ticket: " + server.Ticket);
 
-            proc = StartHost(host, $"download \"{server.Ticket}\" \"{Path.Combine(dir, "out")}\"");
-            string stderr = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget); // drain the pipe
-            await proc.WaitForExitAsync().WaitAsync(Budget);
+            proc = StartHost(host, "download", server.Ticket.ToString(), Path.Combine(dir, "out"));
+            await proc.Process.WaitForExitAsync().WaitAsync(Budget);
+            string stderr = await proc.Error.WaitAsync(Budget);
             _output.WriteLine("old host exit " + proc.ExitCode + ", stderr:\n" + stderr);
 
             Assert.Equal(0, proc.ExitCode);
@@ -103,7 +107,8 @@ public sealed class InteropTests
         }
         finally
         {
-            KillQuietly(proc);
+            await StopHostAsync(proc);
+            DumpEngineTrace(_output);
             Directory.Delete(dir, true);
         }
     }
@@ -118,7 +123,7 @@ public sealed class InteropTests
         string host = EnsureReleaseHost();
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
-        Process? proc = null;
+        HostProcess? proc = null;
         try
         {
             string src = Path.Combine(dir, "asset.bin");
@@ -133,9 +138,9 @@ public sealed class InteropTests
                     },
                 });
 
-            proc = StartHost(host, $"download \"{server.Ticket}\" \"{Path.Combine(dir, "out")}\"");
-            string stderr = await proc.StandardError.ReadToEndAsync().WaitAsync(Budget);
-            await proc.WaitForExitAsync().WaitAsync(Budget);
+            proc = StartHost(host, "download", server.Ticket.ToString(), Path.Combine(dir, "out"));
+            await proc.Process.WaitForExitAsync().WaitAsync(Budget);
+            string stderr = await proc.Error.WaitAsync(Budget);
             _output.WriteLine("old host exit " + proc.ExitCode + ", stderr:\n" + stderr);
 
             Assert.NotEqual(0, proc.ExitCode);
@@ -143,8 +148,8 @@ public sealed class InteropTests
         }
         finally
         {
+            await StopHostAsync(proc);
             DumpEngineTrace(_output);
-            KillQuietly(proc);
             Directory.Delete(dir, true);
         }
     }
@@ -161,7 +166,7 @@ public sealed class InteropTests
         return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
 
-    private static void Git(string args, string workdir, TimeSpan? budget = null)
+    private static string Git(string args, string workdir, TimeSpan? budget = null)
     {
         using var p = Process.Start(new ProcessStartInfo("git", args)
         {
@@ -169,11 +174,18 @@ public sealed class InteropTests
             RedirectStandardError = true,
             RedirectStandardOutput = true,
         })!;
-        p.WaitForExit(budget ?? TimeSpan.FromMinutes(1));
+        Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(budget ?? TimeSpan.FromMinutes(1)))
+        {
+            KillQuietly(p);
+            throw new TimeoutException($"git {args} did not finish within its budget");
+        }
         if (p.ExitCode != 0)
         {
-            throw new InvalidOperationException($"git {args}: {p.StandardError.ReadToEnd()}");
+            throw new InvalidOperationException($"git {args}: {stderr.GetAwaiter().GetResult()}");
         }
+        return stdout.GetAwaiter().GetResult();
     }
 
     /// <summary>Builds the release worktree + host once per machine; subsequent runs
@@ -185,21 +197,31 @@ public sealed class InteropTests
         string worktree = Path.Combine(Path.GetTempPath(), "pinhole-interop", ReleaseRef);
         string dll = Path.Combine(worktree, "bin", "Release", "net10.0", "InteropHost.dll");
         string marker = dll + ".built";
-        if (File.Exists(marker))
+        string hostSrc = Path.Combine(root, "tests", "Pinhole.Tests", "Interop");
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(File.ReadAllBytes(Path.Combine(hostSrc, "InteropHost.cs")));
+        hash.AppendData(File.ReadAllBytes(Path.Combine(hostSrc, "InteropHost.csproj")));
+        hash.AppendData(File.ReadAllBytes(typeof(InteropTests).Assembly.Location));
+        string fingerprint = ReleaseName + ":" + Convert.ToHexString(hash.GetHashAndReset());
+        if (File.Exists(dll) && File.Exists(marker) && File.ReadAllText(marker) == fingerprint)
         {
             return dll;
         }
 
-        // Stale registrations from interrupted runs are harmless but noisy; prune first.
-        Git("worktree prune", root);
         if (!Directory.Exists(Path.Combine(worktree, "src")))
         {
+            // Prune only when registering a new tree; cached trees need no git writes.
+            Git("worktree prune", root);
             Git($"worktree add --force \"{worktree}\" {ReleaseRef}", root, TimeSpan.FromMinutes(2));
         }
 
-        string hostSrc = Path.Combine(root, "tests", "Pinhole.Tests", "Interop");
         File.Copy(Path.Combine(hostSrc, "InteropHost.cs"), Path.Combine(worktree, "InteropHost.cs"), true);
         File.Copy(Path.Combine(hostSrc, "InteropHost.csproj"), Path.Combine(worktree, "InteropHost.csproj"), true);
+        // Regenerate shims from the immutable release, rather than retaining an older
+        // patch merely because its marker still appears in a cached source file.
+        foreach (string file in new[] { "NodeEngine.cs", "UdpSocket.cs" })
+            File.WriteAllText(Path.Combine(worktree, "src", "Pinhole", file),
+                Git($"show {ReleaseRef}:src/Pinhole/{file}", root));
         PatchReleaseHostRecvLoop(worktree);
         PatchReleaseHostSocket(worktree);
         PatchReleaseHostDispatchDiagnostics(worktree);
@@ -210,11 +232,17 @@ public sealed class InteropTests
             RedirectStandardError = true,
             RedirectStandardOutput = true,
         })!;
-        if (!build.WaitForExit(TimeSpan.FromMinutes(5)) || build.ExitCode != 0)
+        Task<string> buildOutput = build.StandardOutput.ReadToEndAsync();
+        Task<string> buildError = build.StandardError.ReadToEndAsync();
+        if (!build.WaitForExit(TimeSpan.FromMinutes(5)))
         {
-            throw new InvalidOperationException("release host build failed: " + build.StandardError.ReadToEnd());
+            KillQuietly(build);
+            throw new TimeoutException("release host build did not finish within five minutes");
         }
-        File.WriteAllText(marker, ReleaseName);
+        if (build.ExitCode != 0)
+            throw new InvalidOperationException("release host build failed: "
+                + buildOutput.GetAwaiter().GetResult() + buildError.GetAwaiter().GetResult());
+        File.WriteAllText(marker, fingerprint);
         return dll;
     }
 
@@ -278,9 +306,11 @@ public sealed class InteropTests
                             Span<byte> bytes = from.Buffer.Span;
                             ushort port = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(bytes[2..]);
                             uint address = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(bytes[4..]);
-                            new System.Net.IPEndPoint(System.Net.IPAddress.Any.MapToIPv6(), 0).Serialize().Buffer.Span.CopyTo(bytes);
+                            var template = new System.Net.IPEndPoint(System.Net.IPAddress.Any.MapToIPv6(), 0).Serialize();
+                            template.Buffer.Span.CopyTo(bytes);
                             System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(bytes[2..], port);
                             System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(bytes[20..], address);
+                            from.Size = template.Size;
                         }
                         return n;
                     }
@@ -358,29 +388,84 @@ public sealed class InteropTests
         }
     }
 
-    private Process StartHost(string dll, string args)
+    private static HostProcess StartHost(string dll, params string[] args)
     {
-        var p = Process.Start(new ProcessStartInfo("dotnet", $"\"{dll}\" {args}")
+        var start = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        })!;
-        return p;
+        };
+        start.ArgumentList.Add(dll);
+        foreach (string arg in args) start.ArgumentList.Add(arg);
+        return new HostProcess(Process.Start(start)!);
     }
 
-    private async Task<BlobTicket> ReadTicketAsync(Process proc)
+    private async Task<BlobTicket> ReadTicketAsync(HostProcess proc)
     {
-        using var cts = new CancellationTokenSource(Budget);
-        while (await proc.StandardOutput.ReadLineAsync(cts.Token) is { } line)
+        if (await proc.Ticket.WaitAsync(Budget) is { } ticket)
         {
-            _output.WriteLine("host: " + line);
-            if (line.StartsWith("TICKET ", StringComparison.Ordinal))
-            {
-                return BlobTicket.Parse(line[7..]);
-            }
+            _output.WriteLine("host: TICKET " + ticket);
+            return BlobTicket.Parse(ticket);
         }
         throw new InvalidOperationException("host exited before printing a ticket: "
-            + await proc.StandardError.ReadToEndAsync(cts.Token));
+            + await proc.Error.WaitAsync(Budget));
+    }
+
+    private async Task StopHostAsync(HostProcess? proc)
+    {
+        if (proc is null) return;
+        try
+        {
+            KillQuietly(proc.Process);
+            await proc.Process.WaitForExitAsync().WaitAsync(TestBudget.Teardown);
+            await Task.WhenAll(proc.Output, proc.Error).WaitAsync(TestBudget.Teardown);
+            _output.WriteLine("old host stdout:\n" + await proc.Output);
+            _output.WriteLine("old host stderr:\n" + await proc.Error);
+        }
+        finally
+        {
+            proc.Process.Dispose();
+        }
+    }
+
+    // Both pipes must be consumed from launch until exit. The release logs each
+    // received packet: an unread stdout fills the smaller Windows/BSD pipes and
+    // blocks its receive thread, manufacturing an interoperability failure.
+    private sealed class HostProcess
+    {
+        private const int CaptureLimit = 64 * 1024;
+        private readonly TaskCompletionSource<string?> _ticket = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Process Process { get; }
+        public int ExitCode => Process.ExitCode;
+        public Task<string> Output { get; }
+        public Task<string> Error { get; }
+        public Task<string?> Ticket => _ticket.Task;
+
+        public HostProcess(Process process)
+        {
+            Process = process;
+            Output = DrainAsync(process.StandardOutput, captureTicket: true);
+            Error = DrainAsync(process.StandardError, captureTicket: false);
+        }
+
+        private async Task<string> DrainAsync(StreamReader reader, bool captureTicket)
+        {
+            var captured = new StringBuilder();
+            while (await reader.ReadLineAsync() is { } line)
+            {
+                if (captureTicket && line.StartsWith("TICKET ", StringComparison.Ordinal))
+                    _ticket.TrySetResult(line[7..]);
+                if (captured.Length < CaptureLimit)
+                {
+                    int count = Math.Min(line.Length, CaptureLimit - captured.Length);
+                    captured.Append(line.AsSpan(0, count));
+                    if (captured.Length < CaptureLimit) captured.AppendLine();
+                }
+            }
+            if (captureTicket) _ticket.TrySetResult(null);
+            if (captured.Length >= CaptureLimit) captured.AppendLine("\n[remaining output drained without capture]");
+            return captured.ToString();
+        }
     }
 
     private static PinholeOptions OfflineLoopback() => new()

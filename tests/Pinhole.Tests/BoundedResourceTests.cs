@@ -415,8 +415,8 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
     /// <summary>Env-gated soak: <c>PINHOLE_SOAK_MINUTES</c> sets the duration. Mixed
     /// workload — downloads over a shaped link, brief blackouts, cancel-and-resume —
     /// with a per-minute resource sample written to a report file beside the run. The
-    /// scheduled 24h/72h runs use this same harness; the assertions are the budgets
-    /// (budget drained, sockets flat, heap slope bounded), not the duration.</summary>
+    /// scheduled 24h/72h runs use this same harness; exact socket/budget ledgers are
+    /// asserted each cycle, with process samples retained for slope review.</summary>
     [SoakFact]
     public async Task MixedWorkloadSoak()
     {
@@ -428,6 +428,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         string reportPath = Path.Combine(reportDir, "soak-observations.csv");
         var rng = new Random(0x50A0); // fixed seed: a failing soak is reproducible
         var observations = new List<string> { "elapsedSec,heapMiB,threads,handles,liveSockets,budgetUsed,completed,cancelled,errors" };
+        await File.WriteAllLinesAsync(reportPath, observations);
         try
         {
             using VirtualLab lab = new();
@@ -438,12 +439,32 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             await using BlobServer server = await ServeAtAsync(lab, src, "198.51.100.10", 34110);
             Shape(lab, 8_000_000);
 
+            BlobDownloadResult warm = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "warmup"),
+                options: DownOptions(lab, 34020)).WaitAsync(Budget);
+            Assert.Equal(data, await File.ReadAllBytesAsync(warm.Path));
+            int socketsAtRest = lab.Net.LiveSockets;
+
             var sw = Stopwatch.StartNew();
             var deadline = TimeSpan.FromMinutes(minutes);
             int completed = 0, cancelled = 0;
             var errors = new List<string>();
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
 
+            async Task RecordSampleAsync()
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                using var proc = Process.GetCurrentProcess();
+                string row = $"{sw.Elapsed.TotalSeconds:F0},{GC.GetTotalMemory(false) / 1048576.0:F1},"
+                    + $"{proc.Threads.Count},{proc.HandleCount},{lab.Net.LiveSockets},"
+                    + $"{BlobFlowBudget.Shared.UsedBytes},{completed},{cancelled},{errors.Count}";
+                observations.Add(row);
+                // A crash or runner kill must not erase the earlier observations.
+                await File.AppendAllTextAsync(reportPath, row + Environment.NewLine);
+            }
+
+            await RecordSampleAsync();
             long nextSample = 60;
             while (sw.Elapsed < deadline)
             {
@@ -489,19 +510,24 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 catch (Exception ex)
                 {
                     errors.Add($"{sw.Elapsed:mm\\:ss} {ex.GetType().Name}: {ex.Message}");
+                    cts.Cancel();
+                    try { await run.WaitAsync(TestBudget.Teardown); }
+                    catch (Exception cleanup) when (cleanup is OperationCanceledException or TimeoutException or InvalidOperationException) { }
                 }
+
+                if (lab.Net.LiveSockets != socketsAtRest || BlobFlowBudget.Shared.UsedBytes != 0)
+                    await RecordSampleAsync();
+                Assert.Equal(socketsAtRest, lab.Net.LiveSockets);
+                Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);
 
                 if (sw.Elapsed.TotalSeconds >= nextSample)
                 {
                     nextSample += 60;
-                    GC.Collect();
-                    var proc = Process.GetCurrentProcess();
-                    observations.Add($"{sw.Elapsed.TotalSeconds:F0},{GC.GetTotalMemory(false) / 1048576.0:F1}," +
-                                     $"{proc.Threads.Count},{proc.HandleCount},{lab.Net.LiveSockets}," +
-                                     $"{BlobFlowBudget.Shared.UsedBytes},{completed},{cancelled},{errors.Count}");
+                    await RecordSampleAsync();
                 }
             }
 
+            await RecordSampleAsync();
             Assert.Empty(errors);
             Assert.True(completed + cancelled > 0, "the soak ran zero workload cycles");
             Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);

@@ -19,13 +19,14 @@ permissions:
 
 jobs:
   test:
-    name: test-${{ matrix.os }}
+    name: test-${{ matrix.os }}${{ matrix.framework == 'net8.0' && '-net8' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        framework: [net8.0, net10.0]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +35,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Prepare distinct loopback addresses for the TURN lab
         if: runner.os == 'macOS'
         shell: bash
@@ -42,12 +45,14 @@ jobs:
       - name: Run interop suite (its release-host build must not storm the parallel suite)
         run: >
           dotnet test tests/Pinhole.Tests
+          -f ${{ matrix.framework }}
           -c Release --filter "FullyQualifiedName~InteropTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 5m --blame-hang-dump-type mini
       - name: Run test suite
         run: >
           dotnet test tests/Pinhole.Tests
+          -f ${{ matrix.framework }}
           -c Release --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
@@ -55,18 +60,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: testresults-${{ matrix.os }}
+          name: testresults-${{ matrix.os }}-${{ matrix.framework }}
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 
   resources:
-    name: resources-${{ matrix.os }}
+    name: resources-${{ matrix.os }}${{ matrix.framework == 'net8.0' && '-net8' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        framework: [net8.0, net10.0]
     # Collection isolation excludes concurrent test bodies, but cannot stop runtime
     # caches and lingering background work from earlier collections. A fresh testhost
     # makes the process-wide heap gate attributable to these resource scenarios.
@@ -74,10 +80,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Measure resources in a fresh test process
         run: >
           dotnet test tests/Pinhole.Tests -c Release
+          -f ${{ matrix.framework }}
           --filter "FullyQualifiedName~BoundedResourceTests"
           --logger trx --logger "console;verbosity=detailed"
           --blame-hang --blame-hang-timeout 2m --blame-hang-dump-type mini
@@ -85,18 +94,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resources-${{ matrix.os }}
+          name: resources-${{ matrix.os }}-${{ matrix.framework }}
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 
   performance:
-    name: throughput-${{ matrix.os }}
+    name: throughput-${{ matrix.os }}${{ matrix.framework == 'net8.0' && '-net8' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        framework: [net8.0, net10.0]
     # Use a fresh runner for the throughput gates. On macOS the same code measured
     # 107–164 KiB/s after the full suite, versus 929–936 KiB/s for both the previous
     # and current commits on an isolated runner. Keep the absolute floors intact.
@@ -104,10 +114,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Run throughput floors without functional-test workloads
         run: >
           dotnet test tests/Pinhole.Tests -c Release
+          -f ${{ matrix.framework }}
           --filter "Category=Performance"
           --logger trx --logger "console;verbosity=detailed"
           -- xUnit.MaxParallelThreads=1
@@ -115,7 +128,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-${{ matrix.os }}
+          name: performance-${{ matrix.os }}-${{ matrix.framework }}
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 

@@ -79,9 +79,16 @@ public sealed class TelemetryTests
         await using PinholeNode a = await PinholeNode.BindAsync(Opts());
         await using PinholeNode b = await PinholeNode.BindAsync(Opts());
 
-        _ = a.AcceptAsync();
+        Task<PinholeConnection> accept = a.AcceptAsync();
         await using PinholeConnection conn = await b.ConnectAsync(a.ConnectionString).WaitAsync(Timeout);
+        await using PinholeConnection accepted = await accept.WaitAsync(Timeout);
 
+        // MeterListener may hand early callbacks to its queue rather than inline, so the
+        // recordings are given a brief settle window instead of an instant snapshot.
+        await TestPoll.UntilAsync(Timeout,
+            () => meter.Count("pinhole.connection.attempts", Telemetry.OutcomeDialEstablished) > dialBefore
+                && meter.Count("pinhole.connection.attempts", Telemetry.OutcomeAcceptEstablished) > acceptBefore
+                && meter.Recordings("pinhole.connection.establish_duration") > durationsBefore);
         Assert.True(meter.Count("pinhole.connection.attempts", Telemetry.OutcomeDialEstablished) > dialBefore,
             "the dial's established outcome was measured");
         Assert.True(meter.Count("pinhole.connection.attempts", Telemetry.OutcomeAcceptEstablished) > acceptBefore,

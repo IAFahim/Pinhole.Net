@@ -89,7 +89,7 @@ public static class BlobClient
 
         TimeSpan recovery = options?.RecoveryTimeout ?? TimeSpan.FromMinutes(10);
         ArgumentOutOfRangeException.ThrowIfLessThan(recovery, TimeSpan.Zero);
-        long deadline = Environment.TickCount64 + (long)recovery.TotalMilliseconds;
+        var recoveryBudget = new RecoveryBudget(recovery);
         int backoffMs = 500;
 
         // State that legitimately survives a re-dial: the decoded manifest (never fetched
@@ -103,16 +103,34 @@ public static class BlobClient
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (recovery > TimeSpan.Zero && Environment.TickCount64 > deadline)
-            {
-                throw new TimeoutException(
-                    $"the transfer could not be re-established within {recovery.TotalSeconds:0}s of disruptions");
-            }
+            recoveryBudget.Check();
 
             bool dialing = true;
             try
             {
-                await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString, ct).ConfigureAwait(false);
+                // Bound each dial by the remaining shared recovery allowance. Cancelling
+                // the actual dial also removes its pending connection; timing out only
+                // its await would leave an attempt running behind the next retry.
+                PinholeConnection connected;
+                using (var dialStop = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    if (recovery > TimeSpan.Zero)
+                    {
+                        recoveryBudget.Begin();
+                        TimeSpan remaining = recoveryBudget.Remaining;
+                        if (remaining.TotalMilliseconds <= uint.MaxValue - 1) dialStop.CancelAfter(remaining);
+                    }
+                    try
+                    {
+                        connected = await node.ConnectAsync(ticket.ConnectionString, dialStop.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && dialStop.IsCancellationRequested)
+                    {
+                        throw recoveryBudget.Exhausted(ex);
+                    }
+                }
+                await using PinholeConnection conn = connected;
+                recoveryBudget.End();
                 dialing = false;
 
                 // A fresh session per connection: a fresh downloader nonce, and the
@@ -129,7 +147,7 @@ public static class BlobClient
                     StreamDownloader? downloader = null;
                     downloader = new StreamDownloader(conn, sink,
                         v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), new SendCounter(), session,
-                        ticket.Root, options: options);
+                        ticket.Root, recoveryBudget, options: options);
                     long bytes;
                     try
                     {
@@ -148,7 +166,7 @@ public static class BlobClient
                 if (manifest is null)
                 {
                     var manifestSink = new MemorySink();
-                    var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root,
+                    var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root, recoveryBudget,
                         options: options);
                     try
                     {
@@ -180,7 +198,7 @@ public static class BlobClient
                     var sink = new FileSink(SafeJoin(rootDir, entry.Path), entry.Root);
                     StreamDownloader entryDownloader = new(conn, sink,
                         v => progress?.Report(new BlobProgress(verified + v, total, filesDone, entries.Count)), send, session,
-                        entry.Root, entry.Root, options: options);
+                        entry.Root, recoveryBudget, entry.Root, options: options);
                     long bytes;
                     try
                     {
@@ -203,17 +221,18 @@ public static class BlobClient
             }
             catch (Exception ex) when (IsTransportLoss(ex, dialing))
             {
-                if (recovery <= TimeSpan.Zero || Environment.TickCount64 > deadline)
+                if (recovery <= TimeSpan.Zero || recoveryBudget.Remaining <= TimeSpan.Zero)
                 {
-                    throw new TimeoutException(
-                        $"the transfer could not be re-established within {recovery.TotalSeconds:0}s of disruptions", ex);
+                    throw recoveryBudget.Exhausted(ex);
                 }
 
                 // The transport went away mid-transfer (or an attempt stalled past its
                 // own clock): verified checkpoints stay on disk, the pinned provider is
                 // re-dialed through the same ticket — authenticated rediscovery included
                 // — and the next attempt resumes exactly from those checkpoints.
-                await Task.Delay(backoffMs, ct).ConfigureAwait(false);
+                recoveryBudget.Begin();
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(backoffMs, recoveryBudget.Remaining.TotalMilliseconds)), ct)
+                    .ConfigureAwait(false);
                 backoffMs = (int)Math.Min(backoffMs * 2, 5000);
             }
         }
@@ -236,6 +255,42 @@ public static class BlobClient
     {
         private ulong _value;
         public ulong Next() => ++_value;
+    }
+
+    /// <summary>One monotonic allowance shared by every dial, stream, and outage in
+    /// this download. Healthy transfers do not spend it; recovery never resets it.</summary>
+    private sealed class RecoveryBudget(TimeSpan timeout)
+    {
+        private readonly long _limitMs = (long)Math.Ceiling(timeout.TotalMilliseconds);
+        private long _spentMs;
+        private long _sinceMs = -1;
+
+        public TimeSpan Remaining => TimeSpan.FromMilliseconds(Math.Max(0,
+            _limitMs - _spentMs - (_sinceMs < 0 ? 0 : Environment.TickCount64 - _sinceMs)));
+
+        public void Begin(long? since = null)
+        {
+            if (_sinceMs < 0) _sinceMs = since ?? Environment.TickCount64;
+        }
+
+        public void End()
+        {
+            if (_sinceMs < 0) return;
+            _spentMs += Environment.TickCount64 - _sinceMs;
+            _sinceMs = -1;
+            Check();
+        }
+
+        public void Check()
+        {
+            if ((timeout > TimeSpan.Zero || _sinceMs >= 0) && Remaining <= TimeSpan.Zero) throw Exhausted();
+        }
+
+        public long StallLimit(long ordinaryLimitMs) => timeout == TimeSpan.Zero
+            ? ordinaryLimitMs : Math.Min(ordinaryLimitMs, (long)Remaining.TotalMilliseconds);
+
+        public TimeoutException Exhausted(Exception? inner = null) => new(
+            $"the transfer could not be re-established within {timeout.TotalSeconds:0}s of disruptions", inner);
     }
 
     // ---------------------------------------------------------------- stream downloader
@@ -263,6 +318,7 @@ public static class BlobClient
         private readonly BlobController _controller;
         private readonly Dictionary<long, (long SentAtMs, int Retransmits)> _outstanding = new();
         private readonly SendCounter _send;
+        private readonly RecoveryBudget _recovery;
         private long _maxRequested = -1;
         private long _helloSince = -1;
         private long _helloLastTicks;
@@ -278,13 +334,14 @@ public static class BlobClient
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
         public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
-            BlobWire.DownloadSession session, byte[] expectedRoot, byte[]? streamRoot = null,
+            BlobWire.DownloadSession session, byte[] expectedRoot, RecoveryBudget recovery, byte[]? streamRoot = null,
             BlobDownloadOptions? options = null)
         {
             _conn = conn;
             _sink = sink;
             _onVerified = onVerified;
             _send = send;
+            _recovery = recovery;
             _session = session;
             _expectedRoot = expectedRoot;
             _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
@@ -371,12 +428,13 @@ public static class BlobClient
 
                     long now = Environment.TickCount64;
                     bool pathPresent = WatchPath(now);
+                    _recovery.Check();
                     if (!pathPresent)
                     {
                         // The peer has not failed — the route is gone, and the engine is
                         // recovering it. Neither the stall clock nor the first-contact
                         // clock may run down while there is no path to verify progress
-                        // on; the caller's overall recovery deadline bounds the ride.
+                        // on; the shared recovery allowance bounds the ride.
                         _lastVerifiedTicks = now;
                         _helloSince = now;
                     }
@@ -388,8 +446,9 @@ public static class BlobClient
                             _helloSince = now;
                         }
 
-                        if (now - _helloSince > (long)FirstHeadTimeout.TotalMilliseconds)
+                        if (pathPresent && now - _helloSince > _recovery.StallLimit((long)FirstHeadTimeout.TotalMilliseconds))
                         {
+                            _recovery.Begin(_helloSince);
                             throw new TimeoutException("the provider did not answer the ticket");
                         }
 
@@ -398,7 +457,7 @@ public static class BlobClient
                         if (pathPresent && now - _helloLastTicks >= (long)HelloPace.TotalMilliseconds)
                         {
                             _helloLastTicks = now;
-                            BlobWire.SendRidingOutPathlessness(_conn, BlobWire.Hello(_stream, _session.SessionId), CancellationToken.None);
+                            TrySend(BlobWire.Hello(_stream, _session.SessionId));
                         }
                     }
                     else
@@ -522,11 +581,13 @@ public static class BlobClient
             bool present = _conn.State is PinholeConnectionState.Open or PinholeConnectionState.Degraded;
             if (!present)
             {
+                _recovery.Begin(_lastVerifiedTicks);
                 _pathlessSinceMs = _pathlessSinceMs < 0 ? now : _pathlessSinceMs;
                 return false;
             }
 
             long pathlessFor = _pathlessSinceMs >= 0 ? now - _pathlessSinceMs : 0;
+            if (_pathlessSinceMs >= 0) _recovery.End();
             _pathlessSinceMs = -1;
             Pinhole.PinholePath path = _conn.Path;
             // The endpoint itself, not the engine's "since" stamp: a seamless adoption
@@ -658,18 +719,27 @@ public static class BlobClient
 
         private void CheckStall(long now)
         {
-            if (now - _lastVerifiedTicks > (long)StallTimeout.TotalMilliseconds)
+            if (_pathlessSinceMs < 0 && now - _lastVerifiedTicks > _recovery.StallLimit((long)StallTimeout.TotalMilliseconds))
             {
+                _recovery.Begin(_lastVerifiedTicks);
                 throw new TimeoutException($"the download stalled: no chunk verified for {StallTimeout.TotalSeconds:0}s");
             }
         }
 
         private void Send(byte[] plain)
         {
-            // A downloader-side roam flips the connection through Punching mid-transfer;
-            // the ARQ's next frame waits out the transition rather than dying. No token:
-            // disposal closes the connection, which the ride-out treats as terminal.
-            BlobWire.SendRidingOutPathlessness(_conn, _session.Seal(_send.Next(), plain), CancellationToken.None);
+            TrySend(_session.Seal(_send.Next(), plain));
+        }
+
+        private void TrySend(byte[] wire)
+        {
+            try { _conn.Send(wire); }
+            catch (InvalidOperationException) when (_conn.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+            {
+                // The path can disappear between WatchPath and Send. Leave this frame
+                // to the next Hello/request retry so the control loop continues checking
+                // cancellation and the shared deadline instead of blocking in a ride-out.
+            }
         }
     }
 

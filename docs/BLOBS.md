@@ -112,7 +112,12 @@ through the same ticket — authenticated rediscovery included — after a doubl
 survivable). Exhausting it throws `TimeoutException` ("could not be re-established");
 zero disables recovery and surfaces the first transport failure as `TimeoutException`
 naming the dead attempt. The caller's cancellation token is honored promptly even
-mid-blackout.
+mid-blackout. The allowance is shared across all streams, outages, pending dials
+and retry backoff in the call. Healthy transfer time does not spend it. A pending
+dial is cancelled when its remaining allowance expires, and the stream checks the
+allowance even while its ordinary stall clock is paused. With a shorter allowance,
+the first-Head and no-progress attempt limits use the remaining time rather than
+extending recovery to their usual 20 s / 30 s limits.
 
 A re-dial gets a fresh `DownloadSession`: a fresh downloader nonce, and the provider's
 Welcome mints its own fresh nonce — every connection derives a fresh two-sided key and

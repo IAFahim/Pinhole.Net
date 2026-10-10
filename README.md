@@ -49,7 +49,10 @@ dotnet add package Pinhole.Blobs        # verified, encrypted, resumable file tr
 free STUN/TURN catalog), and managed BouncyCastle cryptography. Parameterless `BindAsync()`
 gets the free STUN catalog, public iroh relays, LAN announcements, and signed
 endpoint/direct-address publication by default. `dotnet test` from a fresh
-clone needs no submodules, Rust, or native toolchain — pure C# end to end.
+clone needs no submodules, Rust, or native toolchain — pure C# end to end. Build
+with the .NET 10 SDK and install the .NET 8 runtime as well: tests target both
+supported runtimes. [Testing instructions](docs/TESTING.md) keep interop, functional,
+resource and throughput checks in separate processes.
 
 ## Platforms
 

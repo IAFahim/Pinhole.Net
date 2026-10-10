@@ -21,6 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        framework: [net8.0, net10.0]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     defaults:
@@ -28,43 +29,120 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Prepare distinct loopback addresses for the TURN lab
         if: runner.os == 'macOS'
         run: bash .github/scripts/prepare-macos-loopback.sh
       - name: Build once
-        run: dotnet build tests/Pinhole.Tests -c Release
+        run: dotnet build tests/Pinhole.Tests -c Release -f ${{ matrix.framework }}
+
+      - name: Run previous-version interop separately
+        id: interop
+        continue-on-error: true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "FullyQualifiedName~InteropTests"
+          --logger trx --blame-hang --blame-hang-timeout 5m
+          --blame-hang-dump-type mini > interop.log 2>&1
 
       # Each run continues on error; the verdict comes from the summary step below so
       # one flaky test cannot hide a different one that fails in another shape.
       - name: Run 1 — default parallelism
+        id: run1
         continue-on-error: true
-        run: dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category!=Performance" > run1.log 2>&1 || true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
+          --logger trx --blame-hang --blame-hang-timeout 2m
+          --blame-hang-dump-type mini > run1.log 2>&1
       - name: Run 2 — sequential (ordering flakes)
+        id: run2
         continue-on-error: true
-        run: dotnet test tests/Pinhole.Tests -c Release --no-build -- xUnit.MaxParallelThreads=1 > run2.log 2>&1 || true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
+          --logger trx --blame-hang --blame-hang-timeout 2m
+          --blame-hang-dump-type mini -- xUnit.MaxParallelThreads=1 > run2.log 2>&1
       - name: Run 3 — fresh process repeat
+        id: run3
         continue-on-error: true
-        run: dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category!=Performance" > run3.log 2>&1 || true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "Category!=Performance&FullyQualifiedName!~BoundedResourceTests&FullyQualifiedName!~InteropTests"
+          --logger trx --blame-hang --blame-hang-timeout 2m
+          --blame-hang-dump-type mini > run3.log 2>&1
+
+      - name: Measure resources in a fresh process
+        id: resources
+        continue-on-error: true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "FullyQualifiedName~BoundedResourceTests"
+          --logger trx --blame-hang --blame-hang-timeout 2m
+          --blame-hang-dump-type mini > resources.log 2>&1
+
+      - name: Measure throughput in a fresh process
+        id: performance
+        continue-on-error: true
+        run: >
+          dotnet test tests/Pinhole.Tests -c Release -f ${{ matrix.framework }} --no-build
+          --filter "Category=Performance" --logger trx
+          -- xUnit.MaxParallelThreads=1 > performance.log 2>&1
 
       - name: Collect failures into the summary
+        if: always()
         run: |
           {
-            echo "## Flake hunt — ${{ matrix.os }}"
+            echo "## Flake hunt — ${{ matrix.os }} / ${{ matrix.framework }}"
             echo '```'
-            grep -hE "^  Failed " run1.log run2.log run3.log | sort -u || echo "no failures in any of the three runs"
+            grep -hE "^  Failed |Test Run (Failed|Aborted)|error |Unhandled exception|The active test run was aborted" \
+              interop.log run1.log run2.log run3.log resources.log performance.log 2>/dev/null \
+              | sort -u || echo "no failure lines captured; command outcomes determine the verdict"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           # Also print to stdout: step summaries need a signed-in browser, the
           # plain log is readable via gh/api.
-          grep -hE "^  Failed " run1.log run2.log run3.log | sort -u || true
+          grep -hE "^  Failed |Test Run (Failed|Aborted)|error |Unhandled exception|The active test run was aborted" \
+            interop.log run1.log run2.log run3.log resources.log performance.log 2>/dev/null | sort -u || true
+
+      - name: Upload logs and hang diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-hunt-${{ matrix.os }}-${{ matrix.framework }}
+          path: |
+            interop.log
+            run*.log
+            resources.log
+            performance.log
+            tests/Pinhole.Tests/TestResults/
+          retention-days: 5
 
       - name: Verdict
+        if: always()
+        env:
+          INTEROP_OUTCOME: ${{ steps.interop.outcome }}
+          RUN1_OUTCOME: ${{ steps.run1.outcome }}
+          RUN2_OUTCOME: ${{ steps.run2.outcome }}
+          RUN3_OUTCOME: ${{ steps.run3.outcome }}
+          RESOURCES_OUTCOME: ${{ steps.resources.outcome }}
+          PERFORMANCE_OUTCOME: ${{ steps.performance.outcome }}
         run: |
-          if grep -hE "^  Failed " run1.log run2.log run3.log > /dev/null; then
-            echo "flaky failures found on ${{ matrix.os }}" >&2
+          FAILED=0
+          for check in INTEROP RUN1 RUN2 RUN3 RESOURCES PERFORMANCE; do
+            outcome_name="${check}_OUTCOME"
+            outcome="${!outcome_name}"
+            echo "$check: ${outcome:-not run}"
+            if [ "$outcome" != success ]; then FAILED=1; fi
+          done
+          if [ "$FAILED" != 0 ]; then
+            echo "one or more test commands failed, crashed, timed out, or did not run on ${{ matrix.os }}" >&2
             exit 1
           fi
-          echo "clean: three runs, zero failures on ${{ matrix.os }}"
+          echo "clean: all commands succeeded on ${{ matrix.os }}"

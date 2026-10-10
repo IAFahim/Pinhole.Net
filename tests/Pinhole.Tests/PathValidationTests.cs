@@ -95,13 +95,19 @@ public sealed class PathValidationTests
         Assert.Equal(PathKind.Relay, atA.Path.Kind);
     }
 
-    [Fact]
-    public async Task RestoredUdp_UpgradesTheSameConnectionBackToDirect()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RestoredUdp_UpgradesTheSameConnectionBackToDirect(bool tcpEnabled)
     {
         await using var server = new FakeIrohRelay();
         // Bind to loopback so alternate NIC addresses cannot accidentally reopen the
         // session and hide a failure to promote its ORIGINAL direct address.
-        var options = Opts(server: server) with { Bind = new IPEndPoint(IPAddress.Loopback, 0) };
+        var options = Opts(server: server) with
+        {
+            Bind = new IPEndPoint(IPAddress.Loopback, 0),
+            EnableTcpTransport = tcpEnabled,
+        };
         await using var a = await PinholeNode.BindAsync(options);
         await using var b = await PinholeNode.BindAsync(options);
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
@@ -112,7 +118,9 @@ public sealed class PathValidationTests
         {
             PinholePath pathA = atA.Path, pathB = atB.Path;
             if (atA.State != PinholeConnectionState.Open || atB.State != PinholeConnectionState.Open
-                || pathA.Kind != PathKind.Direct || pathB.Kind != PathKind.Direct || pathA.Remote is null || pathB.Remote is null) return false;
+                || pathA.Kind != PathKind.Direct || pathB.Kind != PathKind.Direct
+                || pathA.Transport != DirectTransport.Udp || pathB.Transport != DirectTransport.Udp
+                || pathA.Remote is null || pathB.Remote is null) return false;
             originalA = pathA.Remote;
             originalB = pathB.Remote;
             return true;
@@ -129,12 +137,16 @@ public sealed class PathValidationTests
         a.Engine.SimulateDirectPathRestore(b.PeerId);
         b.Engine.SimulateDirectPathRestore(a.PeerId);
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
-            && atB.State == PinholeConnectionState.Open);
+            && atB.State == PinholeConnectionState.Open
+            && atA.Path.Transport == DirectTransport.Udp && atB.Path.Transport == DirectTransport.Udp);
         Assert.Equal(PathKind.Direct, atA.Path.Kind);
+        Assert.Equal(PathKind.Direct, atB.Path.Kind);
         Assert.Equal(originalA, a.Engine.Lookup(b.PeerId)!.DirectRemoteEp);
         Assert.Equal(originalB, b.Engine.Lookup(a.PeerId)!.DirectRemoteEp);
         Assert.Same(atA, a.Connections.Single());
+        Assert.Same(atB, b.Connections.Single());
         await AssertExchangeAsync(atB, atA, "back on direct, same object");
+        await AssertExchangeAsync(atA, atB, "back on direct in the other direction");
     }
 
     [Fact]

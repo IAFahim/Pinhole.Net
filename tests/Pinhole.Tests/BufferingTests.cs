@@ -78,19 +78,69 @@ public sealed class BufferingTests
         (PinholeConnection atDialer, Task<PinholeConnection> accept) = await PairAsync(listener, dialer);
         await using PinholeConnection atListener = await accept.WaitAsync(Timeout);
 
-        for (int i = 0; i < 5; i++)
+        var arrivals = Enumerable.Range(0, 5).Select(_ =>
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).ToArray();
+        void Arrived(ReadOnlySpan<byte> payload)
         {
-            atDialer.Send([(byte)('0' + i)]); // the sender is never blocked by a full queue
+            if (payload.Length == 1 && payload[0] is >= (byte)'0' and <= (byte)'4')
+                arrivals[payload[0] - '0'].TrySetResult();
         }
+        atListener.Received += Arrived;
+        try
+        {
+            for (int i = 0; i < arrivals.Length; i++)
+            {
+                atDialer.Send([(byte)('0' + i)]);
+                // The queue is tested in arrival order. UDP sends can reach different
+                // local source sockets and reorder; the callback follows enqueue.
+                await arrivals[i].Task.WaitAsync(Timeout);
+            }
 
-        await Task.Delay(300); // let all five cross
-        Assert.True(atListener.DroppedDatagrams >= 3, $"dropped {atListener.DroppedDatagrams}, expected the three oldest");
+            Assert.Equal(3, atListener.DroppedDatagrams);
 
-        // The newest datagrams are what a reader finds; the queue kept flowing.
-        byte[] third = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
-        byte[] fourth = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
-        Assert.Equal("3"u8.ToArray(), third);
-        Assert.Equal("4"u8.ToArray(), fourth);
+            // The newest datagrams are what a reader finds; the queue kept flowing.
+            byte[] third = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
+            byte[] fourth = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
+            Assert.Equal("3"u8.ToArray(), third);
+            Assert.Equal("4"u8.ToArray(), fourth);
+        }
+        finally { atListener.Received -= Arrived; }
+    }
+
+    [Fact]
+    public async Task WaitingReader_ReceivesWithoutAnOverflowDrop()
+    {
+        var buffer = new DatagramBuffer(1);
+        ValueTask<byte[]?> pending = buffer.ReadAsync(CancellationToken.None);
+        Assert.False(pending.IsCompleted);
+        buffer.Enqueue("delivered directly to the reader"u8);
+
+        Assert.Equal("delivered directly to the reader"u8.ToArray(), await pending);
+        Assert.Equal(0, buffer.Dropped);
+    }
+
+    [Fact]
+    public async Task ConcurrentReaderAndWriter_EveryDatagramIsReceivedOrCountedAsDropped()
+    {
+        var buffer = new DatagramBuffer(2);
+        var readerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<int> reader = Task.Run(async () =>
+        {
+            int received = 0;
+            readerStarted.TrySetResult();
+            while (await buffer.ReadAsync(CancellationToken.None) is not null) received++;
+            return received;
+        });
+        await readerStarted.Task.WaitAsync(Timeout);
+        const int sent = 20_000;
+        try
+        {
+            for (int i = 0; i < sent; i++) buffer.Enqueue("payload"u8);
+        }
+        finally { buffer.Complete(); }
+
+        int received = await reader.WaitAsync(Timeout);
+        Assert.Equal(sent, received + buffer.Dropped);
     }
 
     [Fact]

@@ -307,7 +307,10 @@ public sealed class BlobsTests
                     await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
                         options: new BlobDownloadOptions
                         {
-                            NodeOptions = Offline(),
+                            // The provider is dead when the recovery loop re-dials: a short
+                            // connect budget per attempt keeps worst-case surfacing at
+                            // RecoveryTimeout + one attempt (~14 s), not + the 15 s default.
+                            NodeOptions = Offline() with { ConnectTimeout = TimeSpan.FromSeconds(2) },
                             RecoveryTimeout = TimeSpan.FromSeconds(12), // route loss is ridden out — but not forever
                         });
                     failed.TrySetResult(null!);

@@ -12,7 +12,6 @@ namespace Pinhole;
 internal sealed class DatagramBuffer
 {
     private readonly Channel<byte[]> _channel;
-    private readonly object _gate = new();
     private long _dropped;
 
     public DatagramBuffer(int capacity)
@@ -21,7 +20,7 @@ internal sealed class DatagramBuffer
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
-        });
+        }, _ => Interlocked.Increment(ref _dropped));
     }
 
     public long Dropped => Interlocked.Read(ref _dropped);
@@ -31,15 +30,10 @@ internal sealed class DatagramBuffer
     /// oldest entry when full.</summary>
     public void Enqueue(ReadOnlySpan<byte> payload)
     {
-        lock (_gate)
-        {
-            int before = _channel.Reader.Count;
-            _channel.Writer.TryWrite(payload.ToArray());
-            if (_channel.Reader.Count == before)
-            {
-                _dropped++; // DropOldest kept the count at capacity: one old datagram went away
-            }
-        }
+        // Count actual evictions through the channel's callback. Queue length is
+        // unchanged when a waiting reader takes a new item directly, and a concurrent
+        // reader can change it between snapshots without any overflow at all.
+        _channel.Writer.TryWrite(payload.ToArray());
     }
 
     /// <summary>Next buffered datagram, or null once the queue is drained and completed.

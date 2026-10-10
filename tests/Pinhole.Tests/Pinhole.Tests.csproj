@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFramework>net10.0</TargetFramework>
+		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
@@ -23,7 +23,13 @@
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Blobs/Pinhole.Blobs.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Turn/Pinhole.Turn.csproj" />
-		<ProjectReference Include="../../src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" Condition="'$(TargetFramework)' != 'net8.0'" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+		<!-- The server CLI targets .NET 10. Exercise its unchanged production server
+		     source alongside the .NET 8 client without retargeting the executable. -->
+		<Compile Include="../../src/Pinhole.Rendezvous/RendezvousServer.cs" Link="Helpers/RendezvousServer.cs" />
 	</ItemGroup>
 
 </Project>

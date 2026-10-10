@@ -93,8 +93,10 @@ time (the download simply restarts from zero).
 
 **The budget**: `BlobDownloadOptions.RecoveryTimeout` (default **10 min** —
 chosen so a five-minute outage is survivable) bounds the whole recovery regime:
-pathlessness, per-attempt stalls, and re-dial backoff all ride down the same
-deadline. Exhaustion throws `TimeoutException` saying the transfer "could not
+pathlessness, per-attempt stalls, pending dials and re-dial backoff all spend the
+same allowance across every stream and attempt. Healthy transfer time does not
+spend it. The allowance still expires when a pathless stream pauses its ordinary
+stall clock, and a pending dial is cancelled before retrying. Exhaustion throws `TimeoutException` saying the transfer "could not
 be re-established within Ns". `TimeSpan.Zero` disables recovery: the first
 transport failure surfaces as `TimeoutException` naming the dead attempt.
 Negative values are rejected. When no route is available and none returns

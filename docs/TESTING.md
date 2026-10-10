@@ -15,17 +15,23 @@ bash .github/scripts/prepare-macos-loopback.sh
 This setup uses `sudo ifconfig`; CI runs it automatically. Linux and Windows already
 support binding the 127/8 loopback range.
 
-CI builds the suite in Release. Tests that gate throughput carry the `Performance`
-category and run sequentially after the other tests finish, so independent downloads
-and their timers cannot consume the benchmark's runner capacity:
+CI builds the suite in Release. Previous-version interoperability, functional tests,
+process-wide resource measurements and throughput floors run separately. Throughput
+tests carry the `Performance` category and run sequentially in a fresh test process:
+
+Build with the .NET 10 SDK and install both the .NET 8 and .NET 10 runtimes (installing
+both SDKs also provides them). The script checks both frameworks by default; pass
+`net8.0` or `net10.0` to select one. CI and the flake hunter cover both frameworks on
+Linux, macOS and Windows. Existing .NET 10 CI check names are retained.
 
 ```sh
-dotnet test tests/Pinhole.Tests -c Release --filter "Category!=Performance"
-dotnet test tests/Pinhole.Tests -c Release --no-build --filter "Category=Performance" -- xUnit.MaxParallelThreads=1
+bash .github/scripts/verify-connectivity-drafts.sh
 ```
 
-The flake hunter keeps the same separation: its parallel runs cover the functional
-suite, and its sequential run includes the throughput floors.
+The flake hunter repeats the functional suite with parallel and sequential scheduling,
+then runs resources and throughput in separate fresh processes. Its verdict checks
+every command's outcome, so a crashed, hung or skipped command fails even when no
+ordinary failed-test line was printed. Logs and hang diagnostics are retained.
 
 The clean-link throughput floor times verified chunk arrivals, from the first to the
 last, using a synchronous progress observer. The whole-call duration is logged separately:
@@ -332,13 +338,13 @@ connection-closed detection relied on `Send` throwing rather than an explicit ch
 test asserts the specific counter that would grow if the layer leaked — the flow
 budget's `UsedBytes`, the lab's live-socket ledger (`VirtualNetwork.LiveSockets`,
 incremented at socket construction, decremented exactly once on dispose), and the
-node's connection table. Process heap appears only as a median-per-cycle slope check,
-because parallel tests share the process and their transient garbage is noise, not
-signal.
+node's connection table. Process heap is a coarse end-to-end slope check after warmup,
+with a total-growth cap. Resource tests run in a nonparallel collection and a dedicated
+fresh process so other tests' allocations and background work cannot contaminate it.
 
 | Scenario | Test | Proof |
 |---|---|---|
-| Repeated cancel + resume | `RepeatedCancelResume_ReturnsEveryReservation` | 8 cycles, each cancelled mid-transfer (a synchronous progress callback cancels inside the pump itself — no poll→cancel gap to race completion): budget drains to zero *immediately* after every cancel, socket ledger flat, median heap delta ≈ 0 KiB/cycle, and every attempt leaves an honest checkpoint — the final pass resumes byte-exact |
+| Repeated cancel + resume | `RepeatedCancelResume_ReturnsEveryReservation` | 8 cycles, each cancelled mid-transfer: reservations return immediately, sockets stay flat, heap growth stays below 512 KiB/cycle and 2 MiB total, and every attempt leaves a checkpoint that the final pass resumes byte-exact |
 | Concurrent transfers on one budget | `ConcurrentDownloads_OnOneBudget_AllComplete_AndItDrains` | 12 downloads share a 2 MiB pie (real contention — queued reservations); all finish byte-exact, budget drains to zero, no socket leaks |
 | Provider restart churn | `ProviderRestartChurn_OneCall_LeavesNoDebt` | 4 provider process restarts inside ONE download call: successor nodes bind and dispose repeatedly; budget used = 0 and sockets settled afterward |
 | Failed dials | `FailedDials_LeaveNoConnectionHusks` | 6 sequential + 24 concurrent dials to a dead peer leave `node.Connections` empty — timed-out attempts are reaped, not retained |
@@ -364,8 +370,11 @@ cancel-and-resume cycles — under a fixed RNG seed (0x50A0; a failing soak is
 reproducible by re-running the same duration). Every 60 s it appends a line to
 `$TMPDIR/pinhole-soak/<timestamp>-<id>/soak-observations.csv`:
 `elapsedSec,heapMiB,threads,handles,liveSockets,budgetUsed,completed,cancelled,errors`.
-The file persists pass or fail — it is the evidence the issue asks to attach, not an
-anecdote. Assertions on completion: zero errors, nonzero workload, budget drained.
+The CSV is written after warmup, at each minute and on completion; already-written
+samples survive a process crash or runner kill. Every cycle asserts the original
+socket count and zero flow-budget debt. Completion also requires zero errors and
+nonzero workload. Heap, thread and handle samples support resource review; the
+soak does not replace the dedicated cancellation heap-growth gate.
 
 ### What this does NOT yet cover (open #34 remainder)
 
@@ -389,7 +398,10 @@ anecdote. Assertions on completion: zero errors, nonzero workload, budget draine
   worktree under `$TMPDIR/pinhole-interop/` and runs real-UDP blob transfers both
   directions. Verified on v2 connection strings; the v3 (endpoint-key) ticket is
   refused by the old parser as a clean `FormatException`. Auto-skips on shallow
-  clones — CI needs `fetch-depth: 0`.
+  clones — CI needs `fetch-depth: 0`. Both child output pipes are drained throughout
+  each 2 MiB transfer, so diagnostic output cannot block the old peer's receive
+  thread. Cached hosts rebuild when the harness changes, with runtime shims
+  regenerated from the immutable release source.
 - **Relay allocation debt** — virtual-lab TURN is emulated on loopback; allocation
   counting against a real coturn belongs to the env-gated #26 harness.
 - **Controller starvation at sustained size** — FIXED: scaling the cancel test's
