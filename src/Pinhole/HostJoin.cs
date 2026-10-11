@@ -8,7 +8,7 @@ namespace Pinhole;
 
 /// <summary>Host side of the minimal code-share API (#45 M2): one node, one short code,
 /// one accepted peer. The code maps to the host's full connection string through a
-/// <c>Pinhole.Rendezvous</c> code directory; the underlying transport, tickets, keys,
+/// <c>Pinhole.Rendezvous</c> code directory or HTTPS coordinator; the underlying transport, tickets, keys,
 /// NAT punching, racing, and recovery are exactly the existing engine's.</summary>
 public sealed class PinholeHost : IAsyncDisposable
 {
@@ -29,11 +29,14 @@ public sealed class PinholeHost : IAsyncDisposable
     public string ConfirmationCode { get; }
 
     private readonly PinholeNode _node;
-    private readonly CodeDirectory _directory;
+    private readonly CodeDirectory? _directory;
+    private readonly WorkerCoordinator? _worker;
+    private readonly Task<PinholeConnection>? _workerConnection;
     private readonly string _token;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _keepalive;
     private readonly TimeSpan _refreshInterval;
+    private int _disposed;
 
     internal PinholeHost(PinholeNode node, CodeDirectory directory, string code, string token, TimeSpan refreshInterval)
     {
@@ -47,20 +50,42 @@ public sealed class PinholeHost : IAsyncDisposable
         _keepalive = KeepaliveAsync();
     }
 
+    internal PinholeHost(PinholeNode node, WorkerCoordinator worker, TimeSpan refreshInterval)
+    {
+        _node = node;
+        _worker = worker;
+        _token = string.Empty;
+        Code = worker.Code;
+        _refreshInterval = refreshInterval;
+        string raw = Fingerprint(Encoding.UTF8.GetBytes(node.ConnectionString));
+        ConfirmationCode = $"{raw[..4]}-{raw[4..8]}-{raw[8..12]}-{raw[12..16]}";
+        _workerConnection = worker.ConnectHostAsync(node, _shutdown.Token);
+        _keepalive = KeepaliveAsync();
+    }
+
     /// <summary>Waits for a joiner to complete the pinned-key handshake. The returned
     /// connection is the engine's own <see cref="PinholeConnection"/>: datagrams,
     /// roaming, recovery, and disposal behave exactly as with ticket dials.</summary>
-    public Task<PinholeConnection> AcceptAsync(CancellationToken ct = default) => _node.AcceptAsync(ct);
+    public Task<PinholeConnection> AcceptAsync(CancellationToken ct = default) =>
+        _workerConnection is { } paired ? paired.WaitAsync(ct) : _node.AcceptAsync(ct);
 
     /// <summary>Stops the keepalive, deletes the code from the directory (best effort,
     /// bounded), and disposes the underlying node and its sessions.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _shutdown.Cancel();
         try { await _keepalive.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
-        await _directory.DeleteAsync(Code, _token).ConfigureAwait(false);
+        catch (Exception ex) when (ex is HttpRequestException or IOException) { }
+        if (_worker is { } worker) await worker.DeleteBestEffortAsync().ConfigureAwait(false);
+        else await _directory!.DeleteAsync(Code, _token).ConfigureAwait(false);
         await _node.DisposeAsync().ConfigureAwait(false);
+        if (_workerConnection is { } paired)
+        {
+            try { await paired.ConfigureAwait(false); }
+            catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException or IOException or TimeoutException or InvalidOperationException) { }
+        }
         _shutdown.Dispose();
     }
 
@@ -79,7 +104,14 @@ public sealed class PinholeHost : IAsyncDisposable
                 return;
             }
 
-            await _directory.RefreshAsync(Code, _token, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false);
+            if (_worker is { } worker)
+            {
+                if (_workerConnection?.IsCompleted == true) return;
+                try { await worker.PublishAsync(_node.ConnectionString, _shutdown.Token).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is HttpRequestException or IOException) { }
+                catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested) { }
+            }
+            else await _directory!.RefreshAsync(Code, _token, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false);
         }
     }
 
@@ -129,11 +161,19 @@ public sealed class PinholeHost : IAsyncDisposable
 public sealed record PinholeHostSettings
 {
     /// <summary>Endpoints of <c>Pinhole.Rendezvous</c> introducers that provide the code
-    /// directory. Required — there is no default coordination service.</summary>
-    public required IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; }
+    /// directory. Supply these or <see cref="CoordinatorUrl"/>; there is no default
+    /// coordination service.</summary>
+    public IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; } = [];
+
+    /// <summary>HTTPS URL of a Pinhole Cloudflare coordinator. It supplies room
+    /// pairing and expiring TURN credentials. HTTP is accepted only for loopback
+    /// development. Short codes trust this coordinator to supply the peer's key.</summary>
+    public Uri? CoordinatorUrl { get; init; }
 
     /// <summary>Options for the underlying node. Leave null for the transport defaults
-    /// (free STUN, public relays, discovery). The host's connection string published
+    /// (STUN, relays, discovery). A coordinator supplies its own STUN/TURN defaults.
+    /// Explicit empty <see cref="PinholeOptions.Relays"/> disables relay allocation.
+    /// The host's connection string published
     /// under the code is whatever this node advertises.</summary>
     public PinholeOptions? NodeOptions { get; init; }
 
@@ -147,8 +187,12 @@ public sealed record PinholeHostSettings
 public sealed record PinholeJoinSettings
 {
     /// <summary>Endpoints of <c>Pinhole.Rendezvous</c> introducers that provide the code
-    /// directory. Required — there is no default coordination service.</summary>
-    public required IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; }
+    /// directory. Supply these or <see cref="CoordinatorUrl"/>.</summary>
+    public IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; } = [];
+
+    /// <summary>HTTPS URL of the same Pinhole Cloudflare coordinator used by the
+    /// host. HTTP is accepted only for loopback development.</summary>
+    public Uri? CoordinatorUrl { get; init; }
 
     /// <summary>Node options for the dialer (defaults follow the transport).</summary>
     public PinholeOptions? NodeOptions { get; init; }
@@ -173,6 +217,9 @@ public static class PinholeSession
     public static async Task<PinholeHost> HostAsync(PinholeHostSettings settings, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        if (settings.RefreshInterval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(settings));
+        if (settings.CoordinatorUrl is not null)
+            return await WorkerCoordinator.HostAsync(settings, ct).ConfigureAwait(false);
         var directory = new CodeDirectory(settings.RendezvousEndpoints);
         PinholeNode node = await PinholeNode.BindAsync(WithOptions(settings.NodeOptions), ct).ConfigureAwait(false);
         try
@@ -210,6 +257,8 @@ public static class PinholeSession
     {
         ArgumentNullException.ThrowIfNull(code);
         ArgumentNullException.ThrowIfNull(settings);
+        if (settings.CoordinatorUrl is not null)
+            return await WorkerCoordinator.JoinAsync(code, settings, ct).ConfigureAwait(false);
         var directory = new CodeDirectory(settings.RendezvousEndpoints);
         string? invitation = await directory.ResolveAsync(code, settings.WaitTimeout, settings.PollInterval, ct).ConfigureAwait(false);
         if (invitation is null)

@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pinhole-coordinator",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "PairRoom" },
+      { "name": "BUDGET", "class_name": "PairBudget" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PairRoom", "PairBudget"] }
+  ],
+  "ratelimits": [
+    { "name": "IP_LIMIT", "namespace_id": "31841", "simple": { "limit": 100, "period": 60 } }
+  ],
+  "vars": {
+    "ROOM_TTL_SECONDS": "300",
+    "TURN_TTL_SECONDS": "86400",
+    "DAILY_REQUEST_LIMIT": "40000",
+    "DAILY_ROOM_LIMIT": "200",
+    "TURN_REQUIRED": "true"
+  },
+  "observability": { "enabled": false }
+}

@@ -20,6 +20,7 @@ internal static class Program
                     "  --turn-key FILE: use a private {keyId,keyToken} JSON file\n" +
                     "  --validate-ice FILE: validate that response without network access\n" +
                     "  --auth-check: check Wrangler account access only\n" +
+                    "  --worker URL [--direct|--tcp|--relay]: pair by code through a deployed Worker\n" +
                     "Environment: WRANGLER_BIN, CLOUDFLARE_ACCOUNT_ID, or TURN_KEY_ID + TURN_KEY_API_TOKEN");
                 return 0;
             }
@@ -28,7 +29,8 @@ internal static class Program
             bool fromFile = validate || args is ["--ice-servers", _];
             bool fromKeyFile = args is ["--turn-key", _];
             bool authCheck = args is ["--auth-check"];
-            if (args.Length != 0 && !fromFile && !fromKeyFile && !authCheck)
+            bool workerProbe = args is ["--worker", _] or ["--worker", _, "--direct"] or ["--worker", _, "--tcp"] or ["--worker", _, "--relay"];
+            if (args.Length != 0 && !fromFile && !fromKeyFile && !authCheck && !workerProbe)
                 throw new ProbeFailure("FAIL", "INVALID_ARGUMENTS");
 
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(120));
@@ -37,6 +39,16 @@ internal static class Program
                 stage = value;
                 if (Environment.GetEnvironmentVariable("PINHOLE_CLOUDFLARE_DIAGNOSTICS") == "1")
                     Console.Error.WriteLine($"Cloudflare probe stage: {value}");
+            }
+            if (workerProbe)
+            {
+                string mode = args.Length == 3 ? args[2][2..] : "auto";
+                var paired = await WorkerProbe.RunAsync(new Uri(args[1]), mode, SetStage, deadline.Token);
+                Write(new { status = "PASS", stage = "worker_host_join", coordinator = args[1], mode,
+                    paired.Encrypted, paired.Path, paired.Transport, paired.InvitationHash,
+                    paired.HostReadyMs, paired.JoinAndHandshakeMs, paired.RoundTripsEachDirection,
+                    paired.SendAttempts, paired.RttP50Ms, paired.RttP95Ms, elapsedMs = watch.ElapsedMilliseconds });
+                return 0;
             }
             if (authCheck)
             {
@@ -98,6 +110,7 @@ internal static class Program
                 : ex is JsonException ? stage == "turn_key_file" ? "INVALID_TURN_KEY_JSON" : "INVALID_CREDENTIAL_JSON"
                 : ex is OperationCanceledException ? "DEADLINE_EXCEEDED" : ex.GetType().Name;
             Write(new { status, stage, code, relayTested = false,
+                httpStatus = (ex as HttpRequestException)?.StatusCode is { } http ? (int?)http : null,
                 nativeError = socket?.NativeErrorCode, elapsedMs = watch.ElapsedMilliseconds });
             return status == "BLOCKED" ? 3 : 1;
         }

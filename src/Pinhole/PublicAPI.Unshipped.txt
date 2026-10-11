@@ -434,6 +434,8 @@ override Pinhole.PinholeHostSettings.GetHashCode() -> int
 override Pinhole.PinholeHostSettings.ToString() -> string!
 Pinhole.PinholeHostSettings.NodeOptions.get -> Pinhole.PinholeOptions?
 Pinhole.PinholeHostSettings.NodeOptions.init -> void
+Pinhole.PinholeHostSettings.CoordinatorUrl.get -> System.Uri?
+Pinhole.PinholeHostSettings.CoordinatorUrl.init -> void
 Pinhole.PinholeHostSettings.RendezvousEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!
 Pinhole.PinholeHostSettings.RendezvousEndpoints.init -> void
 Pinhole.PinholeJoinSettings.PinholeJoinSettings() -> void
@@ -444,6 +446,8 @@ override Pinhole.PinholeJoinSettings.GetHashCode() -> int
 override Pinhole.PinholeJoinSettings.ToString() -> string!
 Pinhole.PinholeJoinSettings.NodeOptions.get -> Pinhole.PinholeOptions?
 Pinhole.PinholeJoinSettings.NodeOptions.init -> void
+Pinhole.PinholeJoinSettings.CoordinatorUrl.get -> System.Uri?
+Pinhole.PinholeJoinSettings.CoordinatorUrl.init -> void
 Pinhole.PinholeJoinSettings.PollInterval.get -> System.TimeSpan
 Pinhole.PinholeJoinSettings.PollInterval.init -> void
 Pinhole.PinholeJoinSettings.RendezvousEndpoints.get -> System.Collections.Generic.IReadOnlyList<System.Net.IPEndPoint!>!

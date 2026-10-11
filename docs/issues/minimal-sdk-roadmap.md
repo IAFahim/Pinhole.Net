@@ -107,7 +107,7 @@ As checked on 2026-10-10, Cloudflare lists **1,000 GB of monthly free egress sha
 
 ### M2 — Small host/join facade and coordination
 
-- [ ] Implement only the accepted facade/adapter and code service integration, including deadlines, cancellation, authenticated invites and provider credential handling.
+- [x] Implement the retained-backend facade and coordination adapter, including deadlines, cancellation, pinned invitations and provider credential handling. The HTTPS [Cloudflare Worker](../../infra/cloudflare-worker/README.md) supplies temporary TURN credentials and exchanges both peers' invitations; [live evidence](../evidence/cloudflare-worker-2026-10-11/README.md) covers automatic UDP, forced UDP, direct TCP and forced TURN on .NET 8/10. Short codes trust the coordinator to distribute keys.
 - [ ] Run separate-machine host/join examples without Steam SDK or player login. Existing ticket-based applications still pass their compatibility checks.
 
 ### M3 — Automatic routing and recovery

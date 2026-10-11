@@ -18,6 +18,32 @@ permissions:
   contents: read
 
 jobs:
+  worker:
+    name: cloudflare-worker (offline room and WebSocket tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Install the pinned Worker toolchain
+        working-directory: infra/cloudflare-worker
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test room ownership, admission, budgets and credential handling
+        working-directory: infra/cloudflare-worker
+        run: npm test
+      - name: Check Worker bindings and bundle
+        working-directory: infra/cloudflare-worker
+        run: npm run check
+      - name: Pair real encrypted C# peers through the local Worker on both runtimes
+        run: python3 infra/cloudflare-worker/verify-local.py
+
   test:
     name: test-${{ matrix.os }}${{ matrix.framework == 'net8.0' && '-net8' || '' }}
     runs-on: ${{ matrix.os }}

@@ -64,6 +64,16 @@ or all #34 roaming, relay restart and prolonged-outage workloads.
 
 ## Current implementation and validation
 
+The [Cloudflare Worker host/join adapter](../../infra/cloudflare-worker/README.md)
+is implemented and deployed on 2026-10-11. It supplies expiring per-participant
+TURN credentials, exchanges both pinned invitations through HTTPS/WebSockets,
+and retains the existing transport engine. Eight [live runs](../evidence/cloudflare-worker-2026-10-11/README.md)
+pass on .NET 8/10: automatic routing, forced direct UDP, forced direct TCP and
+forced Cloudflare TURN, each with 48 encrypted byte-exact round trips per direction.
+This is same-computer direct traffic and real provider relay traffic; separate-NAT,
+Worker-backed phone handoffs, TURN TCP/TLS and in-session credential rotation
+remain outside that evidence. The other issue/release gates are unchanged.
+
 The [2026-10-11 physical follow-up](../evidence/phone-trial-2026-10-11/README.md)
 adds Teletalk Wi-Fi → LTE → Wi-Fi continuity through the same encrypted relay
 session: 48 echoes across 50 sends, one connection attempt, no path changes.

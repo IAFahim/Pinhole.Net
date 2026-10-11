@@ -1,0 +1,14 @@
+{
+  "workerVersion": "852104f8-8e6a-4096-945d-b1210a1cd247",
+  "sha256": {
+    "infra/cloudflare-worker/src/index.js": "06203dab6e2f763aa5f10aed132978c2c26d5e0e86cfd0e1ffaf021ddb460c00",
+    "infra/cloudflare-worker/wrangler.jsonc": "14c6f382f7ab5c2013f5b1fd493186de51492168cd2d1ea2db204bd155921e69",
+    "infra/cloudflare-worker/package-lock.json": "30456bf05e1b368c7da6e74a54cc008ad2d9ea0d4e44719f2b46e01561acb913",
+    "src/Pinhole/WorkerCoordinator.cs": "af49898362adc7be7fae19c38fd06eb21b7e66ea0fb735fbdbeb86c117fd2d10",
+    "src/Pinhole/HostJoin.cs": "8e2421ea075921fb6e2a2e01756fa9ea09a92b9245d410cde49e406dec956d19",
+    "samples/Pinhole.CloudflareProbe/bin/Release/net8.0/Pinhole.CloudflareProbe.dll": "1ef911eb11ffc0c9bda3bb112b5efc37aca23642b53b54dc30c091b6c043a642",
+    "samples/Pinhole.CloudflareProbe/bin/Release/net8.0/Pinhole.dll": "4c348a3fb500815d6928b89bdf8eefb61d1ffd487117f98aaa874fb349a38109",
+    "samples/Pinhole.CloudflareProbe/bin/Release/net10.0/Pinhole.CloudflareProbe.dll": "8c9e61b0b87f026ab492fca3bc69907437c8f2e497c01742308c9395445b9301",
+    "samples/Pinhole.CloudflareProbe/bin/Release/net10.0/Pinhole.dll": "1a3529f78a9738812a747553c74685b620acdc2753c736148a46b8717e02c8f3"
+  }
+}

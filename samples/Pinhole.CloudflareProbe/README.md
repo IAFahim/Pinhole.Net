@@ -75,9 +75,29 @@ dotnet run --project samples/Pinhole.CloudflareProbe -f net10.0 -- --auth-check
 dotnet run --project samples/Pinhole.CloudflareProbe -f net10.0 -- --validate-ice /tmp/ice-servers.json
 ```
 
-This tests the real relay using two peers on one computer. Physical NAT traversal,
-phone radio handoffs and a Worker-hosted short-code directory are separate checks.
-The library's current Host/Join directory uses UDP; an HTTP Worker needs an adapter.
+The raw relay probe tests two peers on one computer. Physical NAT traversal and
+phone radio handoffs remain separate checks.
+
+## Worker-backed host/join
+
+The HTTPS adapter now pairs two peers by code and receives temporary credentials
+from the deployed Worker. It needs no account API token on this computer:
+
+```sh
+dotnet run --project samples/Pinhole.CloudflareProbe -c Release -f net10.0 -- --worker https://pinhole-coordinator.fahimmanowarj5.workers.dev
+dotnet run --project samples/Pinhole.CloudflareProbe -c Release -f net10.0 -- --worker https://pinhole-coordinator.fahimmanowarj5.workers.dev --relay
+```
+
+The first command permits automatic direct UDP/TCP and TURN selection. `--relay`
+disables both direct transports and requires the real encrypted TURN path.
+`--direct` disables TCP and TURN allocation and proves direct UDP; `--tcp`
+disables direct UDP and TURN and proves direct TCP. All modes use the actual
+`PinholeSession.HostAsync`/`JoinAsync` API and require 48 byte-exact round trips
+per direction. Reports contain route, timings, send attempts and an invitation
+hash, with no code, management token or credentials.
+
+See the [Worker setup guide](../../infra/cloudflare-worker/README.md) and
+[live Worker evidence](../../docs/evidence/cloudflare-worker-2026-10-11/README.md).
 
 Set `PINHOLE_CLOUDFLARE_DIAGNOSTICS=1` for progress stages and Boolean comparisons
 of the control/data addresses. Diagnostic output contains no credentials, full
