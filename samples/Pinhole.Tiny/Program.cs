@@ -25,22 +25,24 @@ try
     if (args.Length != 0)
     {
         Console.WriteLine("Joining your friend...");
-        connection = node.ConnectAsync(args[0].Trim(), stop.Token);
+        connection = node.ConnectAsync(NormalizeInvitation(args[0]), stop.Token);
     }
     else
     {
-        Console.WriteLine($"Share this invitation: {node.ConnectionString}");
+        // Avoid underscores, which chat apps can consume as formatting when sharing.
+        string share = node.ConnectionString.Replace('-', '+').Replace('_', '/');
+        Console.WriteLine($"Share this invitation: {share}");
         Console.WriteLine("Paste your friend's full pinhole1: invitation and press Enter, or leave this window open for them to join. /quit exits.");
         connection = node.AcceptAsync(accepting.Token);
         pendingInput = Task.Run(Console.ReadLine);
         while (await Task.WhenAny(connection, pendingInput).WaitAsync(stop.Token) != connection)
         {
-            string? invitation = (await pendingInput)?.Trim().Trim('"', '\'');
+            string? invitation = (await pendingInput) is { } line ? NormalizeInvitation(line) : null;
             pendingInput = null;
             if (invitation is null or "/quit") { accepting.Cancel(); return 0; }
-            if (!invitation.StartsWith("pinhole1:", StringComparison.Ordinal))
+            if (!ConnectionString.TryParse(invitation, out _))
             {
-                Console.WriteLine("Paste the full pinhole1: invitation, not the peer ID; or keep waiting for your friend.");
+                Console.WriteLine("Invalid invitation: copy the entire pinhole1: string as plain text; sharing apps may remove characters. Still waiting for your friend...");
                 pendingInput = Task.Run(Console.ReadLine);
                 continue;
             }
@@ -58,3 +60,7 @@ try
 }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
 catch (Exception e) { Console.Error.WriteLine($"Connection failed: {e.Message}"); return 1; }
+
+// The SDK's wire format stays base64url; this console accepts either share spelling.
+static string NormalizeInvitation(string text) =>
+    text.Trim().Trim('"', '\'', '`').Replace('+', '-').Replace('/', '_');

@@ -21,6 +21,13 @@ running. Only one person needs to paste an invitation.
 An invitation is the full string starting with `pinhole1:`, not a numeric peer ID.
 Do not paste a shell command at the invitation prompt.
 
+Tiny prints an invitation using `+` and `/` rather than `-` and `_`, so messaging
+apps cannot consume underscores as formatting. This console normalizes that
+spelling to the SDK's base64url format before connecting and still accepts older
+invitations. Update Tiny on both PCs before exchanging the new spelling.
+Send invitations as plain text or in a code block; copy the entire string without
+editing it. An invalid paste leaves the app running so you can paste again.
+
 **Alternatively, PC B can supply the invitation at startup:**
 
 ```sh
