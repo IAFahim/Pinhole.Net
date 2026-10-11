@@ -1,12 +1,14 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using Pinhole;
 using Pinhole.Providers;
 
-// No arguments: host. One argument: join the friend's full pinhole1: invitation.
+// No arguments: share your invitation, or paste a friend's. One argument: join.
 if (args.Length > 1) { Console.Error.WriteLine("Usage: Pinhole.Tiny [invitation]"); return 1; }
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+Console.InputEncoding = Console.OutputEncoding = Encoding.UTF8;
 
 try
 {
@@ -17,12 +19,41 @@ try
     await using var node = await PinholeNode.BindAsync(new PinholeOptions
     { ReceiveBufferCapacity = 32, StunServers = stun, Relays = [] }, stop.Token);
 
-    if (args.Length == 0) Console.WriteLine($"Share this invitation: {node.ConnectionString}");
-    Console.WriteLine("Waiting for your friend...");
-    await using var peer = args.Length == 0
-        ? await node.AcceptAsync(stop.Token)
-        : await node.ConnectAsync(args[0], stop.Token);
-    await ChatConsole.RunAsync(peer, stop.Token);
+    Task<string?>? pendingInput = null;
+    using var accepting = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+    Task<PinholeConnection> connection;
+    if (args.Length != 0)
+    {
+        Console.WriteLine("Joining your friend...");
+        connection = node.ConnectAsync(args[0].Trim(), stop.Token);
+    }
+    else
+    {
+        Console.WriteLine($"Share this invitation: {node.ConnectionString}");
+        Console.WriteLine("Paste your friend's full pinhole1: invitation and press Enter, or leave this window open for them to join. /quit exits.");
+        connection = node.AcceptAsync(accepting.Token);
+        pendingInput = Task.Run(Console.ReadLine);
+        while (await Task.WhenAny(connection, pendingInput).WaitAsync(stop.Token) != connection)
+        {
+            string? invitation = (await pendingInput)?.Trim().Trim('"', '\'');
+            pendingInput = null;
+            if (invitation is null or "/quit") { accepting.Cancel(); return 0; }
+            if (!invitation.StartsWith("pinhole1:", StringComparison.Ordinal))
+            {
+                Console.WriteLine("Paste the full pinhole1: invitation, not the peer ID; or keep waiting for your friend.");
+                pendingInput = Task.Run(Console.ReadLine);
+                continue;
+            }
+            accepting.Cancel();
+            // If the friend joined as we pasted, keep that already accepted connection.
+            try { await connection; }
+            catch (OperationCanceledException) when (accepting.IsCancellationRequested)
+            { connection = node.ConnectAsync(invitation, stop.Token); }
+            break;
+        }
+    }
+    await using var peer = await connection;
+    await ChatConsole.RunAsync(peer, stop.Token, pendingInput);
     return 0;
 }
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }

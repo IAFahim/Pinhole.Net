@@ -7,20 +7,29 @@ UDP/TCP and public relay fallback are handled by Pinhole.
 Install the [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0),
 then clone/pull this repository on both PCs. Run commands from the repository root.
 
-**PC A — host:**
+**Easiest: start the app without arguments on both PCs:**
 
 ```sh
 dotnet run --project samples/Pinhole.Tiny -c Release
 ```
 
-Copy the entire `pinhole1:...` invitation it prints and send it privately to your
-friend. Leave this process running.
+Each PC prints an invitation and a paste prompt. Copy the entire `pinhole1:...`
+invitation from PC A and send it privately to your friend. Your friend pastes it
+into PC B's running app and presses Enter. PC A accepts automatically; leave it
+running. Only one person needs to paste an invitation.
 
-**PC B — join:**
+An invitation is the full string starting with `pinhole1:`, not a numeric peer ID.
+Do not paste a shell command at the invitation prompt.
+
+**Alternatively, PC B can supply the invitation at startup:**
 
 ```sh
 dotnet run --project samples/Pinhole.Tiny -c Release -- "PASTE_THE_FULL_INVITATION"
 ```
+
+The `--` separates .NET's options from the app's invitation argument. For a
+published Windows executable, use `./Pinhole.Tiny.exe "PASTE_THE_FULL_INVITATION"`
+or just launch the executable and paste at its prompt.
 
 Wait for both terminals to show `Connected`, then type messages and press Enter
 on either PC. `/quit` or Ctrl+C closes the session. Empty lines are ignored;

@@ -4,18 +4,27 @@ using Pinhole;
 // Shared console UI. Both samples use the same Send/Receive API once connected.
 internal static class ChatConsole
 {
-    internal static async Task RunAsync(PinholeConnection peer, CancellationToken ct)
+    internal static async Task RunAsync(PinholeConnection peer, CancellationToken ct,
+        Task<string?>? pendingInput = null)
     {
-        Console.InputEncoding = Console.OutputEncoding = Encoding.UTF8;
+        // Changing InputEncoding replaces Console.In and can discard prefetched lines.
+        if (Console.InputEncoding.CodePage != Encoding.UTF8.CodePage)
+            Console.InputEncoding = Encoding.UTF8;
+        Console.OutputEncoding = Encoding.UTF8;
         Console.WriteLine($"Connected: {peer.Path.Kind} {peer.Path.Transport}, encrypted={peer.IsEncrypted}");
         Console.WriteLine("Type a message and press Enter. /quit or Ctrl+C exits.");
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         Task receiving = ReceiveAsync(peer, stop.Token);
-        Task sending = Task.Run(() =>
+        Task sending = Task.Run(async () =>
         {
             // Console input blocks, so keep it off the receive loop's thread.
-            while (!stop.IsCancellationRequested && Console.ReadLine() is { } line && line != "/quit")
+            // Reuse a read started at the invitation prompt, so it cannot steal a chat line.
+            while (!stop.IsCancellationRequested)
             {
+                string? line = pendingInput is null ? Console.ReadLine()
+                    : await pendingInput.WaitAsync(stop.Token);
+                pendingInput = null;
+                if (line is null or "/quit") break;
                 if (line.Length == 0) continue;
                 if (Encoding.UTF8.GetByteCount(line) > PinholeConnection.MaxPayload)
                 { Console.WriteLine($"Message too long: maximum {PinholeConnection.MaxPayload} UTF-8 bytes."); continue; }
