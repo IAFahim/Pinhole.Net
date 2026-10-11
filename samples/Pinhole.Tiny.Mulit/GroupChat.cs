@@ -1,0 +1,161 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using Pinhole;
+
+internal sealed class GroupChat(PinholeNode node)
+{
+    private readonly ConcurrentDictionary<ulong, PinholeConnection> _peers = new();
+    private readonly ConcurrentDictionary<Task, byte> _readers = new();
+    private readonly HashSet<Guid> _seen = [];
+    private readonly Queue<Guid> _recent = new();
+
+    internal async Task RunAsync(string[] invitations, CancellationToken ct)
+    {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        PrintInvitation();
+        Console.WriteLine($"You: {node.PeerId:x16}");
+        Console.WriteLine("Paste an invitation to add a friend, or type a message to everyone connected.");
+        Console.WriteLine("/join INVITATION, /invite, /peers, /quit. Leave this app open for more friends.");
+        Task accepting = AcceptAsync(stop.Token);
+        try
+        {
+            foreach (string invitation in invitations) await JoinAsync(invitation, stop.Token);
+            while (!stop.IsCancellationRequested)
+            {
+                string? line = await Task.Run(Console.ReadLine).WaitAsync(stop.Token);
+                if (line is null or "/quit") break;
+                line = line.Trim();
+                if (line.Length == 0) continue;
+                if (line == "/invite") { PrintInvitation(); continue; }
+                if (line == "/peers")
+                {
+                    Console.WriteLine($"Connected friends: {_peers.Count}");
+                    foreach (var peer in _peers.Values)
+                        Console.WriteLine($"  {peer.PeerId:x16}: {peer.State}, {peer.Path.Kind} {peer.Path.Transport}");
+                    continue;
+                }
+                if (line.StartsWith("/join ", StringComparison.Ordinal))
+                { await JoinAsync(line[6..], stop.Token); continue; }
+                if (line.Trim('"', '\'', '`').StartsWith("pinhole1:", StringComparison.Ordinal))
+                { await JoinAsync(line, stop.Token); continue; }
+                if (line.StartsWith('/')) { Console.WriteLine("Commands: /join INVITATION, /invite, /peers, /quit."); continue; }
+                if (_peers.IsEmpty) { Console.WriteLine("No friends connected yet. Paste an invitation or share yours."); continue; }
+                var sent = new Message(Guid.NewGuid(), $"{node.PeerId:x16}", line);
+                byte[] data = JsonSerializer.SerializeToUtf8Bytes(sent);
+                if (data.Length > PinholeConnection.MaxPayload)
+                { Console.WriteLine($"Message too long: encoded message must fit {PinholeConnection.MaxPayload} bytes, including its sender and ID."); continue; }
+                Remember(sent.Id);
+                Broadcast(data);
+            }
+        }
+        finally
+        {
+            stop.Cancel();
+            await accepting;
+            await Task.WhenAll(_readers.Keys);
+        }
+    }
+
+    private void PrintInvitation() => Console.WriteLine(
+        $"Share this invitation: {node.ConnectionString.Replace('-', '+').Replace('_', '/')}");
+
+    private async Task JoinAsync(string invitation, CancellationToken ct)
+    {
+        string code = invitation.Trim().Trim('"', '\'', '`').Replace('+', '-').Replace('/', '_');
+        if (!ConnectionString.TryParse(code, out _))
+        { Console.WriteLine("Invalid invitation: copy the full fresh pinhole1: string as plain text. Still listening."); return; }
+        try { Attach(await node.ConnectAsync(code, ct), ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception e) { Console.WriteLine($"Could not join: {e.Message} Still listening."); }
+    }
+
+    private async Task AcceptAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try { Attach(await node.AcceptAsync(ct), ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Incoming connection failed: {e.Message} Still listening.");
+                try { await Task.Delay(250, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            }
+        }
+    }
+
+    private void Attach(PinholeConnection peer, CancellationToken ct)
+    {
+        while (!_peers.TryAdd(peer.PeerId, peer))
+        {
+            if (!_peers.TryGetValue(peer.PeerId, out var existing)) continue;
+            if (!ReferenceEquals(existing, peer))
+            {
+                if (_peers.TryUpdate(peer.PeerId, peer, existing))
+                {
+                    existing.Dispose(); // a fresh session replaces the old closed/dead one
+                    break;
+                }
+                continue;
+            }
+            Console.WriteLine($"Already connected: {peer.PeerId:x16}");
+            return;
+        }
+        Console.WriteLine($"Connected {peer.PeerId:x16}: {peer.Path.Kind} {peer.Path.Transport}, encrypted={peer.IsEncrypted}, friends={_peers.Count}");
+        Task reader = Task.Run(() => ReceiveAsync(peer, ct));
+        _readers.TryAdd(reader, 0);
+        _ = reader.ContinueWith(completed => _readers.TryRemove(completed, out _),
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private async Task ReceiveAsync(PinholeConnection peer, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var data in peer.ReadAllAsync(ct))
+            {
+                if (data.Length > PinholeConnection.MaxPayload) continue;
+                Message? message;
+                try { message = JsonSerializer.Deserialize<Message>(data.Span); }
+                catch (JsonException) { continue; }
+                if (message is not { From: not null, Text: not null } || message.Id == Guid.Empty || !Remember(message.Id)) continue;
+                Console.WriteLine($"[{message.From}] {message.Text}");
+                Broadcast(data.Span, peer.PeerId);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception e) { Console.WriteLine($"Peer {peer.PeerId:x16}: {e.Message}"); }
+        finally
+        {
+            _peers.TryRemove(new KeyValuePair<ulong, PinholeConnection>(peer.PeerId, peer));
+            try { await peer.DisposeAsync(); }
+            catch (Exception e) { Console.WriteLine($"Closing {peer.PeerId:x16}: {e.Message}"); }
+            Console.WriteLine($"Disconnected {peer.PeerId:x16}; friends={_peers.Count}."
+                + (ct.IsCancellationRequested ? "" : " Still listening."));
+        }
+    }
+
+    private void Broadcast(ReadOnlySpan<byte> data, ulong? except = null)
+    {
+        foreach (var peer in _peers.Values)
+        {
+            if (peer.PeerId == except) continue;
+            try { peer.Send(data); }
+            catch (Exception e) { Console.WriteLine($"Send to {peer.PeerId:x16} failed: {e.Message}"); }
+        }
+    }
+
+    // Bound memory and prevent forwarding loops if friends also connect to each other.
+    private bool Remember(Guid id)
+    {
+        lock (_seen)
+        {
+            if (!_seen.Add(id)) return false;
+            _recent.Enqueue(id);
+            if (_recent.Count > 2048) _seen.Remove(_recent.Dequeue());
+            return true;
+        }
+    }
+
+    private sealed record Message(Guid Id, string From, string Text);
+}

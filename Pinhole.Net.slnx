@@ -10,5 +10,6 @@
   <Project Path="samples/Pinhole.Mesh/Pinhole.Mesh.csproj" />
   <Project Path="samples/Pinhole.Send/Pinhole.Send.csproj" />
   <Project Path="samples/Pinhole.Tiny/Pinhole.Tiny.csproj" />
+  <Project Path="samples/Pinhole.Tiny.Mulit/Pinhole.Tiny.Mulit.csproj" />
   <Project Path="tests/Pinhole.Tests/Pinhole.Tests.csproj" />
 </Solution>

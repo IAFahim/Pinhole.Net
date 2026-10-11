@@ -165,6 +165,9 @@ dotnet run --project samples/Pinhole.Tiny -- "<invitation>" # machine B
 dotnet run --project samples/Pinhole.CloudflareChat         # machine A
 dotnet run --project samples/Pinhole.CloudflareChat -- CODE # machine B
 
+# Group chat: several friends paste the same running host's invitation.
+dotnet run --project samples/Pinhole.Tiny.Mulit
+
 # The basic interactive demo — run the same command on both PCs.
 dotnet run --project samples/Pinhole.Demo
 ```
@@ -570,6 +573,7 @@ universal discovery artifact everywhere else.
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — basic interactive chat: prints your connection string, then listens or dials a pasted string
 - `samples/Pinhole.Tiny` — minimal two-PC chat with full invitations, Google STUN and public iroh relays
+- `samples/Pinhole.Tiny.Mulit` — group chat with concurrent connections, message forwarding, and continued listening after friends leave
 - `samples/Pinhole.CloudflareChat` — the same chat with Cloudflare short codes and TURN fallback
 - `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
