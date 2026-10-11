@@ -5,6 +5,7 @@
   <Project Path="src/Pinhole.Turn/Pinhole.Turn.csproj" />
   <Project Path="src/Pinhole.Providers/Pinhole.Providers.csproj" />
   <Project Path="samples/Pinhole.Bench/Pinhole.Bench.csproj" />
+  <Project Path="samples/Pinhole.CloudflareChat/Pinhole.CloudflareChat.csproj" />
   <Project Path="samples/Pinhole.Demo/Pinhole.Demo.csproj" />
   <Project Path="samples/Pinhole.Mesh/Pinhole.Mesh.csproj" />
   <Project Path="samples/Pinhole.Send/Pinhole.Send.csproj" />

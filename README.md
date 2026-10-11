@@ -157,9 +157,13 @@ they do not guarantee a direct route through every NAT or host firewall.
 Or run it with no code at all:
 
 ```bash
-# The 30-line version — samples/Pinhole.Tiny: machine A prints a ticket, B dials it, chat.
+# Plain Pinhole chat: machine A prints an invitation; B joins it.
 dotnet run --project samples/Pinhole.Tiny                   # machine A
-dotnet run --project samples/Pinhole.Tiny <ticket>          # machine B, anywhere on earth
+dotnet run --project samples/Pinhole.Tiny -- "<invitation>" # machine B
+
+# Pinhole + Cloudflare: A prints a short code; B joins it.
+dotnet run --project samples/Pinhole.CloudflareChat         # machine A
+dotnet run --project samples/Pinhole.CloudflareChat -- CODE # machine B
 
 # The basic interactive demo — run the same command on both PCs.
 dotnet run --project samples/Pinhole.Demo
@@ -565,7 +569,8 @@ universal discovery artifact everywhere else.
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — basic interactive chat: prints your connection string, then listens or dials a pasted string
-- `samples/Pinhole.Tiny` — the 30-line chat: the whole library in one file
+- `samples/Pinhole.Tiny` — minimal two-PC chat with full invitations, Google STUN and public iroh relays
+- `samples/Pinhole.CloudflareChat` — the same chat with Cloudflare short codes and TURN fallback
 - `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
 - `samples/Pinhole.Send` — sendme-style CLI: `send <path>` prints a ticket and serves until Ctrl-C, `recv <ticket> [dir]` downloads with console progress
