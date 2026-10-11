@@ -12,6 +12,7 @@ internal sealed class GroupChat(PinholeNode node)
     internal async Task RunAsync(string[] invitations, CancellationToken ct)
     {
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Console.WriteLine("Pinhole.Tiny.Mulit group chat");
         PrintInvitation();
         Console.WriteLine($"You: {node.PeerId:x16}");
         Console.WriteLine("Paste an invitation to add a friend, or type a message to everyone connected.");
@@ -31,7 +32,10 @@ internal sealed class GroupChat(PinholeNode node)
                 {
                     Console.WriteLine($"Connected friends: {_peers.Count}");
                     foreach (var peer in _peers.Values)
-                        Console.WriteLine($"  {peer.PeerId:x16}: {peer.State}, {peer.Path.Kind} {peer.Path.Transport}");
+                    {
+                        var stats = peer.Stats;
+                        Console.WriteLine($"  {peer.PeerId:x16}: {peer.State}, {peer.Path.Kind} {peer.Path.Transport}; sent={stats.DatagramsSent}, received={stats.DatagramsReceived}, send-errors={stats.DatagramsSendFailed}, rejected={peer.FramesRejected}");
+                    }
                     continue;
                 }
                 if (line.StartsWith("/join ", StringComparison.Ordinal))
@@ -45,7 +49,8 @@ internal sealed class GroupChat(PinholeNode node)
                 if (data.Length > PinholeConnection.MaxPayload)
                 { Console.WriteLine($"Message too long: encoded message must fit {PinholeConnection.MaxPayload} bytes, including its sender and ID."); continue; }
                 Remember(sent.Id);
-                Broadcast(data);
+                int queued = Broadcast(data);
+                Console.WriteLine($"Message queued for {queued} directly connected friend(s).");
             }
         }
         finally
@@ -110,6 +115,7 @@ internal sealed class GroupChat(PinholeNode node)
 
     private async Task ReceiveAsync(PinholeConnection peer, CancellationToken ct)
     {
+        bool reportedFormatError = false;
         try
         {
             await foreach (var data in peer.ReadAllAsync(ct))
@@ -117,8 +123,10 @@ internal sealed class GroupChat(PinholeNode node)
                 if (data.Length > PinholeConnection.MaxPayload) continue;
                 Message? message;
                 try { message = JsonSerializer.Deserialize<Message>(data.Span); }
-                catch (JsonException) { continue; }
-                if (message is not { From: not null, Text: not null } || message.Id == Guid.Empty || !Remember(message.Id)) continue;
+                catch (JsonException) { ReportFormatError(); continue; }
+                if (message is not { From: not null, Text: not null } || message.Id == Guid.Empty)
+                { ReportFormatError(); continue; }
+                if (!Remember(message.Id)) continue;
                 Console.WriteLine($"[{message.From}] {message.Text}");
                 Broadcast(data.Span, peer.PeerId);
             }
@@ -133,16 +141,25 @@ internal sealed class GroupChat(PinholeNode node)
             Console.WriteLine($"Disconnected {peer.PeerId:x16}; friends={_peers.Count}."
                 + (ct.IsCancellationRequested ? "" : " Still listening."));
         }
+
+        void ReportFormatError()
+        {
+            if (reportedFormatError) return;
+            reportedFormatError = true;
+            Console.WriteLine($"Unsupported chat format from {peer.PeerId:x16}. Check that every PC runs the current Pinhole.Tiny.Mulit sample.");
+        }
     }
 
-    private void Broadcast(ReadOnlySpan<byte> data, ulong? except = null)
+    private int Broadcast(ReadOnlySpan<byte> data, ulong? except = null)
     {
+        int queued = 0;
         foreach (var peer in _peers.Values)
         {
             if (peer.PeerId == except) continue;
-            try { peer.Send(data); }
+            try { peer.Send(data); queued++; }
             catch (Exception e) { Console.WriteLine($"Send to {peer.PeerId:x16} failed: {e.Message}"); }
         }
+        return queued;
     }
 
     // Bound memory and prevent forwarding loops if friends also connect to each other.
