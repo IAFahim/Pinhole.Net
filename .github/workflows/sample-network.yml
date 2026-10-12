@@ -65,6 +65,18 @@ jobs:
         run: dotnet build Pinhole.Net.slnx -c Release --disable-build-servers -warnaserror
       - name: Build encrypted test signaling
         run: dotnet build .github/scripts/SignalCipher -c Release --disable-build-servers -warnaserror
+      - name: Inspect public DERP authentication on this operating system
+        continue-on-error: true
+        env:
+          PINHOLE_TRACE_FILE: artifacts/network/derp-trace-${{ matrix.index }}.log
+        run: |
+          python -c "from pathlib import Path; Path('artifacts/network').mkdir(parents=True, exist_ok=True)"
+          dotnet run --project samples/Pinhole.TailcatProbe -c Release -f net10.0 -- --all --output artifacts/network/derp-probe-${{ matrix.index }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample-network-diagnostics-${{ matrix.index }}-${{ github.run_attempt }}
+          path: artifacts/network/*
+          retention-days: 5
       - name: Verify each machine's interactive sample flows first
         run: python samples/verify.py --no-build --output artifacts/network/loopback-${{ matrix.index }}.json
       - name: Verify chat and file delivery with the other machines
@@ -76,7 +88,7 @@ jobs:
         if: always()
         with:
           name: sample-network-peer-${{ matrix.index }}-${{ github.run_attempt }}
-          path: artifacts/network/*.json
+          path: artifacts/network/*
           retention-days: 5
 
   cleanup:

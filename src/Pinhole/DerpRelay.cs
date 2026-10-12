@@ -106,7 +106,9 @@ internal sealed class DerpRelay : IKeyedRelay
             catch (Exception ex) when (ex is WebSocketException or HttpRequestException or IOException
                 or OperationCanceledException or InvalidDataException or CryptographicException or JsonException)
             {
-                LastError = ex.Message;
+                LastError = $"{ex.GetType().Name}: {ex.Message}";
+                for (Exception? cause = ex.InnerException; cause is not null; cause = cause.InnerException)
+                    LastError += $" -> {cause.GetType().Name}: {cause.Message}";
             }
             finally
             {

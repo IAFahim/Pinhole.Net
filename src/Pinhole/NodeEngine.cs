@@ -939,6 +939,8 @@ internal sealed partial class NodeEngine : IDisposable
     private void KeyedRelayChanged(IKeyedRelay relay)
     {
         if (_disposed) return;
+        if (TraceEnabled && !relay.IsAlive && relay is DerpRelay { LastError: not null } derp)
+            TraceLine($"DERP {relay.Url.Host}: {derp.LastError}");
         RefreshLocalCandidates();
         foreach (ConnState c in ConnectionsSnapshot())
         {
