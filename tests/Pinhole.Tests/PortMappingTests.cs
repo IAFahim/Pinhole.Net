@@ -23,7 +23,7 @@ public sealed class PortMappingTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,
@@ -155,7 +155,7 @@ public sealed class PortMappingTests
         {
             StunServers = [s1.LocalEndPoint, s2.LocalEndPoint],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false,

@@ -80,9 +80,9 @@ internal sealed class ConnState
     public long LastLookupTicks;           // Gate; cadence for punch-time record lookups
     public long DeadSinceTicks;            // Gate; when the punch budget condemned the connection
     public int PermitInFlight;               // single-flight guard for TURN permission round trips
-    public IrohRelay? Iroh;
-    public byte[]? IrohPeerKey;
-    public bool IrohConfirmed;
+    public IKeyedRelay? PacketRelay;
+    public byte[]? PacketRelayPeerKey;
+    public bool PacketRelayConfirmed;
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
     public DatagramBuffer? Buffer;      // non-null only with ReceiveBufferCapacity > 0
 
@@ -195,6 +195,7 @@ internal sealed partial class NodeEngine : IDisposable
     private readonly Channel<ConnState>? _incoming;
     private readonly List<RelaySlot> _relays = new();
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
+    private readonly Dictionary<Uri, DerpRelay> _derpRelays = new();
     private readonly RelayIdentity? _endpointIdentity; // Ed25519 endpoint key; null = random per-bind peer id only
     private readonly Action<IrohPath, ReadOnlyMemory<byte>>? _rawReceive;
     private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
@@ -304,6 +305,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             lock (_gate)
                 return !_disposed && (_irohRelays.Values.Any(r => r.IsAlive)
+                    || _derpRelays.Values.Any(r => r.IsAlive)
                     || AliveRelayClientsNoLock().Any(c => c.RelayedAddress is not null));
         }
     }
@@ -356,7 +358,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         try
         {
-            await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).WaitAsync(_options.BindProbeBudget, ct).ConfigureAwait(false);
+            await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureKeyedRelaysAsync(ct)).WaitAsync(_options.BindProbeBudget, ct).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -630,6 +632,9 @@ internal sealed partial class NodeEngine : IDisposable
                 _localCandidates.Add(new PinholeCandidate(CandidateKind.IrohRelay,
                     new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: _endpointIdentity.PublicKey));
         }
+        foreach (DerpRelay relay in _derpRelays.Values.Where(r => r.IsAlive))
+            _localCandidates.Add(new PinholeCandidate(CandidateKind.DerpRelay,
+                new IPEndPoint(IPAddress.None, 0), RelayUrl: relay.Url, RelayKey: relay.PublicKey));
     }
 
     private bool SynchronizeMappedLeasesNoLock()
@@ -868,20 +873,38 @@ internal sealed partial class NodeEngine : IDisposable
         lock (_gate)
         {
             if (_irohRelays.TryGetValue(url, out relay!)) return relay;
-            if (_irohRelays.Count >= ConnectionString.MaxCandidates) return null;
+            if (_irohRelays.Count + _derpRelays.Count >= ConnectionString.MaxCandidates) return null;
             relay = new IrohRelay(url, _endpointIdentity, _options.IrohWebSocketFactory);
-            relay.Received += HandleIrohData;
-            relay.Changed += IrohChanged;
+            relay.Received += HandleKeyedRelayData;
+            relay.Changed += KeyedRelayChanged;
             _irohRelays.Add(url, relay);
         }
         _ = relay.StartAsync(_shutdown.Token);
         return relay;
     }
 
-    private async Task EnsureIrohRelaysAsync(CancellationToken ct)
+    private DerpRelay? DerpRelayFor(Uri url)
     {
-        var clients = (_options.IrohRelayUrls ?? _options.ResolvedIrohRelays)
-            .Select(IrohRelayFor).OfType<IrohRelay>().ToArray();
+        if (_identity is null || _rawReceive is not null || _disposed) return null;
+        DerpRelay relay;
+        lock (_gate)
+        {
+            if (_derpRelays.TryGetValue(url, out relay!)) return relay;
+            if (_irohRelays.Count + _derpRelays.Count >= ConnectionString.MaxCandidates) return null;
+            relay = new DerpRelay(url, _identity, _options.DerpWebSocketFactory);
+            relay.Received += HandleKeyedRelayData;
+            relay.Changed += KeyedRelayChanged;
+            _derpRelays.Add(url, relay);
+        }
+        _ = relay.StartAsync(_shutdown.Token);
+        return relay;
+    }
+
+    private async Task EnsureKeyedRelaysAsync(CancellationToken ct)
+    {
+        IKeyedRelay[] clients = (_options.IrohRelayUrls ?? _options.ResolvedIrohRelays)
+            .Select(IrohRelayFor).OfType<IKeyedRelay>()
+            .Concat((_options.DerpRelayUrls ?? _options.ResolvedDerpRelays).Select(DerpRelayFor).OfType<IKeyedRelay>()).ToArray();
         if (clients.Length > 0)
             await Task.WhenAny(clients.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
     }
@@ -913,7 +936,7 @@ internal sealed partial class NodeEngine : IDisposable
         else throw new ArgumentException("invalid iroh path", nameof(path));
     }
 
-    private void IrohChanged(IrohRelay relay)
+    private void KeyedRelayChanged(IKeyedRelay relay)
     {
         if (_disposed) return;
         RefreshLocalCandidates();
@@ -922,15 +945,15 @@ internal sealed partial class NodeEngine : IDisposable
             try
             {
                 if (c.State == PinholeConnectionState.Closed) continue;
-                if (!relay.IsAlive && c.Path == PathKind.Relay && c.Iroh == relay)
+                if (!relay.IsAlive && c.Path == PathKind.Relay && c.PacketRelay == relay)
                     NotifyPathSuspect(c);
                 if (relay.IsAlive)
                 {
                     AnnounceTo(c);
                     PinholeCandidate[] targets;
                     lock (_gate) targets = c.PeerCandidates.ToArray();
-                    foreach (PinholeCandidate target in targets.Where(t => t.Kind == CandidateKind.IrohRelay && t.RelayUrl == relay.Url))
-                        SendViaIroh(c.PuncFrame, target);
+                    foreach (PinholeCandidate target in targets.Where(t => t.Kind == relay.Kind && t.RelayUrl == relay.Url))
+                        SendViaKeyedRelay(c.PuncFrame, target);
                     KickPunch(c);
                 }
             }
@@ -941,7 +964,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    private void HandleIrohData(IrohRelay relay, byte[] source, byte[] frame)
+    private void HandleKeyedRelayData(IKeyedRelay relay, byte[] source, byte[] frame)
     {
         if (_rawReceive is not null)
         {
@@ -954,8 +977,29 @@ internal sealed partial class NodeEngine : IDisposable
         }
         if (_disposed || frame.Length < HeaderSize + 4
             || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Predict) return;
-        ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
-        if (sender != BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1))) return;
+        if (relay.Kind == CandidateKind.IrohRelay)
+        {
+            ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
+            if (sender != BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1))) return;
+        }
+        else
+        {
+            // DERP authenticates the X25519 session identity, whereas iroh authenticates
+            // the Ed25519 endpoint ID. Bind every DERP source to the handshake's static
+            // key; an unrelated authenticated relay client cannot spoof a peer ID.
+            ReadOnlySpan<byte> staticKey;
+            if (frame[0] == (byte)FrameType.Punc && frame.Length == HeaderSize + CryptoWire.PuncCryptoBody)
+                staticKey = frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, 32);
+            else if (frame[0] == (byte)FrameType.Pack && frame.Length == HeaderSize + CryptoWire.PackCryptoBody)
+                staticKey = frame.AsSpan(HeaderSize + 2 * CryptoWire.TokenLength + CryptoWire.EphemeralLength, 32);
+            else
+            {
+                ConnState? c = Lookup(BinaryPrimitives.ReadUInt64LittleEndian(frame.AsSpan(1)));
+                if (c is null) return;
+                lock (c.Gate) staticKey = c.Crypto?.PeerStaticPublic;
+            }
+            if (staticKey.Length != 32 || !staticKey.SequenceEqual(source)) return;
+        }
         try { Dispatch(frame, new Arrival(relay, source)); }
         catch (Exception)
         {
@@ -963,10 +1007,13 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    private void SendViaIroh(ReadOnlySpan<byte> frame, PinholeCandidate candidate)
+    private void SendViaKeyedRelay(ReadOnlySpan<byte> frame, PinholeCandidate candidate)
     {
         if (candidate.RelayUrl is { } url && candidate.RelayKey is { Length: 32 } key)
-            IrohRelayFor(url)?.Send(key, frame);
+        {
+            IKeyedRelay? relay = candidate.Kind == CandidateKind.DerpRelay ? DerpRelayFor(url) : IrohRelayFor(url);
+            relay?.Send(key, frame);
+        }
     }
 
     // Relay client access MUST go through materialized snapshots: an iterator holding
@@ -1487,7 +1534,7 @@ internal sealed partial class NodeEngine : IDisposable
             Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly
-                && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay),
+                && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay),
             // Crypto is attempted exactly when the string vouches for a static key: a v2
             // string's publisher speaks the handshake, a v1 string's does not, so nothing is
             // negotiated on the wire — no downgrade window exists to strip.
@@ -1835,13 +1882,13 @@ internal sealed partial class NodeEngine : IDisposable
                         return;
                     }
 
-                    if (!punchDirects && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay))
+                    if (!punchDirects && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay))
                     {
                         continue;
                     }
 
                     if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)
-                        && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay)) continue;
+                        && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay)) continue;
 
                     // Give ordinary routes (especially same-machine loopback) time to win
                     // before probing LAN-only fallbacks. Once Open, this loop stops.
@@ -1853,9 +1900,9 @@ internal sealed partial class NodeEngine : IDisposable
 
                     try
                     {
-                        if (candidate.Kind == CandidateKind.IrohRelay)
+                        if (candidate.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
                         {
-                            SendViaIroh(c.PuncFrame, candidate);
+                            SendViaKeyedRelay(c.PuncFrame, candidate);
                         }
                         else if (candidate.Kind == CandidateKind.Relay)
                         {
@@ -2525,7 +2572,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (_options.RelaySignalingOnly && frame[0] == (byte)FrameType.Data)
             throw new InvalidOperationException("direct application path is unavailable; relays are signaling-only");
 
-        if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
+        if (c.PacketRelay is { IsAlive: true } iro && c.PacketRelayConfirmed && c.PacketRelayPeerKey is { } key)
         {
             if (!iro.Send(key, frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
             return;
@@ -2822,8 +2869,8 @@ internal sealed partial class NodeEngine : IDisposable
         public readonly bool ViaRelay;
         public readonly SocketAddress? Direct;
         public readonly IPEndPoint? Relay;
-        public readonly IrohRelay? Iroh;
-        public readonly byte[]? IrohPeerKey;
+        public readonly IKeyedRelay? PacketRelay;
+        public readonly byte[]? PacketRelayPeerKey;
         public readonly TcpLink? Tcp;
         public readonly IUdpSocket? UdpSocket;
 
@@ -2849,11 +2896,11 @@ internal sealed partial class NodeEngine : IDisposable
             Relay = relay;
         }
 
-        public Arrival(IrohRelay relay, byte[] key)
+        public Arrival(IKeyedRelay relay, byte[] key)
         {
             ViaRelay = true;
-            Iroh = relay;
-            IrohPeerKey = key;
+            PacketRelay = relay;
+            PacketRelayPeerKey = key;
         }
     }
 
@@ -3567,7 +3614,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (!tcp.Send(frame)) throw new SocketException((int)SocketError.NoBufferSpaceAvailable);
             }
-            else if (arrival.Iroh is { } iro && arrival.IrohPeerKey is { } key)
+            else if (arrival.PacketRelay is { } iro && arrival.PacketRelayPeerKey is { } key)
             {
                 iro.Send(key, frame);
             }
@@ -3677,9 +3724,9 @@ internal sealed partial class NodeEngine : IDisposable
 
             foreach (PinholeCandidate target in targets)
             {
-                if (target.Kind == CandidateKind.IrohRelay)
+                if (target.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
                 {
-                    SendViaIroh(frame, target);
+                    SendViaKeyedRelay(frame, target);
                 }
                 else if (target.Kind == CandidateKind.Relay)
                 {
@@ -3719,7 +3766,7 @@ internal sealed partial class NodeEngine : IDisposable
             return new Arrival(sa, c.DirectUdpSocket);
         }
 
-        if (c.Iroh is { IsAlive: true } iro && c.IrohConfirmed && c.IrohPeerKey is { } key)
+        if (c.PacketRelay is { IsAlive: true } iro && c.PacketRelayConfirmed && c.PacketRelayPeerKey is { } key)
             return new Arrival(iro, key);
         return c.RelayRemote is { } ep ? new Arrival(ep) : default;
     }
@@ -3868,7 +3915,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void RelayPathConfirmed(ConnState c, in Arrival arrival)
     {
-        if (arrival.Iroh is not { } relay)
+        if (arrival.PacketRelay is not { } relay)
         {
             RelayPathConfirmed(c, arrival.Relay!);
             return;
@@ -3878,9 +3925,15 @@ internal sealed partial class NodeEngine : IDisposable
         lock (c.Gate)
         {
             if (c.State == PinholeConnectionState.Closed || c.Connected.Task.IsFaulted) return;
-            c.Iroh = relay;
-            c.IrohPeerKey = arrival.IrohPeerKey;
-            c.IrohConfirmed = true;
+            // Keep the first responsive authenticated leg while it is healthy. Probes
+            // over the other providers still run, but cannot make every packet switch
+            // relay. A disconnected leg can be replaced by either provider immediately.
+            if (c.PacketRelay is not { IsAlive: true } || !c.PacketRelayConfirmed)
+            {
+                c.PacketRelay = relay;
+                c.PacketRelayPeerKey = arrival.PacketRelayPeerKey;
+                c.PacketRelayConfirmed = true;
+            }
             if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
                 && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
             {
@@ -4062,7 +4115,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (c.State == PinholeConnectionState.Open)
             {
-                if (!_options.RelaySignalingOnly && ((c.Iroh is { IsAlive: true } && c.IrohConfirmed) || (c.RelayRemote is not null && c.RelayReady)))
+                if (!_options.RelaySignalingOnly && ((c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed) || (c.RelayRemote is not null && c.RelayReady)))
                 {
                     c.State = PinholeConnectionState.Degraded;
                     c.Path = PathKind.Relay;
@@ -4075,7 +4128,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 c.StateChanged?.Invoke(c.State);
             }
-            else if (c.Iroh is not { IsAlive: true } && !(c.RelayRemote is not null && c.RelayReady))
+            else if (c.PacketRelay is not { IsAlive: true } && !(c.RelayRemote is not null && c.RelayReady))
             {
                 c.State = PinholeConnectionState.Punching;
                 c.Path = PathKind.None;
@@ -4243,7 +4296,7 @@ internal sealed partial class NodeEngine : IDisposable
         _tcpPortMap?.Rebind(_tcp?.ListeningPort ?? 0);
         RefreshInterfaceCandidates(invalidate: true);
         RefreshIPv6Firewall(invalidate: true);
-        await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureIrohRelaysAsync(ct)).ConfigureAwait(false);
+        await Task.WhenAll(ProbeStunAllAsync(ct), EnsureRelaysAsync(ct), EnsureKeyedRelaysAsync(ct)).ConfigureAwait(false);
         RefreshLocalCandidates();
         ReannounceAndRepunch();
     }
@@ -4263,7 +4316,7 @@ internal sealed partial class NodeEngine : IDisposable
                 c.DirectRemoteEp = null;
                 if (c.State == PinholeConnectionState.Open)
                 {
-                    bool relayed = c.Iroh is { IsAlive: true } && c.IrohConfirmed;
+                    bool relayed = c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed;
                     c.State = relayed ? PinholeConnectionState.Degraded : PinholeConnectionState.Punching;
                     c.Path = relayed ? PathKind.Relay : PathKind.None;
                     c.StateChanged?.Invoke(c.State);
@@ -4494,6 +4547,7 @@ internal sealed partial class NodeEngine : IDisposable
             _udp?.Dispose();
             _tcp?.Dispose();
             foreach (IrohRelay relay in _irohRelays.Values) relay.Dispose();
+            foreach (DerpRelay relay in _derpRelays.Values) relay.Dispose();
             foreach (RelaySlot slot in _relays)
             {
                 if (slot.Client is { } client)

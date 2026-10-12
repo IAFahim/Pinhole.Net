@@ -28,6 +28,12 @@ public sealed record PinholeOptions
     /// Null (default) uses the public n0 relays; an empty list disables them.</summary>
     public IReadOnlyList<Uri>? IrohRelayUrls { get; init; }
 
+    /// <summary>Tailcat-compatible DERP HTTPS relays used alongside iroh for introductions
+    /// and encrypted datagram fallback. Null (default) uses Tailcat's free, rate-limited
+    /// public relays; an empty list disables them. Explicit URLs can select your own DERP
+    /// servers. Plaintext nodes do not use DERP. These are best-effort services with no SLA.</summary>
+    public IReadOnlyList<Uri>? DerpRelayUrls { get; init; }
+
     /// <summary>Publish this node through native iroh signed pkarr discovery (default true).
     /// The record binds the endpoint ID to this node's Pinhole static key, so compatible
     /// Android clients can dial by ID or native ticket without dropping peer authentication.
@@ -47,6 +53,7 @@ public sealed record PinholeOptions
     internal HttpMessageHandler? IrohDiscoveryHandler { get; init; }
     internal Func<ILanChannel>? LanChannelFactory { get; init; }
     internal Func<Uri, CancellationToken, Task<WebSocket>>? IrohWebSocketFactory { get; init; }
+    internal Func<Uri, CancellationToken, Task<WebSocket>>? DerpWebSocketFactory { get; init; }
 
     /// <summary>Use relays only for authenticated handshakes, candidate exchange,
     /// path probes and close (default false). Connect/Accept wait for a direct
@@ -235,6 +242,7 @@ public sealed record PinholeOptions
     internal IReadOnlyList<IPEndPoint> ResolvedStun { get; init; } = Array.Empty<IPEndPoint>();
     internal IReadOnlyList<TurnServerConfig> ResolvedRelays { get; init; } = Array.Empty<TurnServerConfig>();
     internal IReadOnlyList<Uri> ResolvedIrohRelays { get; init; } = Array.Empty<Uri>();
+    internal IReadOnlyList<Uri> ResolvedDerpRelays { get; init; } = Array.Empty<Uri>();
 
     // Test seams so port-mapping tests can aim PCP/PMP at an in-process fake gateway and
     // SSDP at an in-process fake IGD instead of the real network, plus a fast lease for
@@ -266,8 +274,18 @@ public sealed record PinholeOptions
         new Uri("https://usw1-1.relay.n0.iroh.link/"),
     ];
 
+    // Tailcat's dedicated public fleet, not the Tailscale VPN relay map.
+    // Source: https://tailcat.dev/derpmap.json (verified 2026-10-12).
+    internal static readonly Uri[] PublicDerpRelays =
+    [
+        new Uri("https://tc304a.ipn.dev/"), // Tokyo
+        new Uri("https://tc303a.ipn.dev/"), // Frankfurt
+        new Uri("https://tc301a.ipn.dev/"), // New York
+        new Uri("https://tc302a.ipn.dev/"), // San Francisco
+    ];
+
     /// <summary>Default options: free STUN for reflexive candidates and the public n0 iroh
-    /// HTTPS relays for introductions and fallback, signed endpoint/direct-address
+    /// and Tailcat DERP HTTPS relays for introductions and fallback, signed endpoint/direct-address
     /// publication, and LAN announcements. No TURN account or native library is needed.
     /// Unreachable infrastructure simply contributes fewer candidates.</summary>
     public static Task<PinholeOptions> DefaultAsync(CancellationToken ct = default) =>
@@ -296,17 +314,32 @@ public sealed record PinholeOptions
             resolvedIroh = PublicIrohRelays;
         }
 
-        if (ReferenceEquals(resolvedStun, options.ResolvedStun) && ReferenceEquals(resolvedIroh, options.ResolvedIrohRelays))
+        IReadOnlyList<Uri> resolvedDerp = options.ResolvedDerpRelays;
+        if (options.DerpRelayUrls is null && resolvedDerp.Count == 0)
+            resolvedDerp = PublicDerpRelays;
+
+        if (ReferenceEquals(resolvedStun, options.ResolvedStun) && ReferenceEquals(resolvedIroh, options.ResolvedIrohRelays)
+            && ReferenceEquals(resolvedDerp, options.ResolvedDerpRelays))
         {
             return options;
         }
 
-        return options with { ResolvedStun = resolvedStun, ResolvedIrohRelays = resolvedIroh };
+        return options with { ResolvedStun = resolvedStun, ResolvedIrohRelays = resolvedIroh, ResolvedDerpRelays = resolvedDerp };
     }
 
     private static void Validate(PinholeOptions options)
     {
         IrohAddress.ValidateRelay(options.IrohDiscoveryUrl);
+        if (options.DerpRelayUrls is { } derpUrls)
+        {
+            if (derpUrls.Count > ConnectionString.MaxCandidates) throw new ArgumentOutOfRangeException(nameof(options), "too many DERP relays");
+            foreach (Uri url in derpUrls)
+            {
+                IrohAddress.ValidateRelay(url);
+                if (url.AbsoluteUri.Length > 64 || url.AbsoluteUri.Any(ch => ch > 127))
+                    throw new ArgumentException("DERP candidate URLs are limited to 64 ASCII bytes", nameof(options));
+            }
+        }
         if (options.PublishIrohAddress && options.Encryption == PinholeEncryption.Disabled)
             throw new ArgumentException("Pinhole iroh discovery requires an encrypted session with a static key", nameof(options));
         if (options.RelaySignalingOnly && options.Encryption != PinholeEncryption.Required)

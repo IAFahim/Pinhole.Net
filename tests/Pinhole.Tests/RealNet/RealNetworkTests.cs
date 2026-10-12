@@ -27,7 +27,7 @@ public sealed class RealNetworkTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [relayUrl],
+        IrohRelayUrls = [relayUrl], DerpRelayUrls = [],
         Listen = listen,
         ConnectTimeout = TimeSpan.FromSeconds(12),
         BindProbeBudget = TimeSpan.FromSeconds(10),
@@ -112,8 +112,12 @@ public sealed class RealNetworkTests
         await using var relayGuard = relay;
         try
         {
-            await using PinholeNode a = await PinholeNode.BindAsync(RealRelayOptions(url, listen: true), ct);
-            await using PinholeNode b = await PinholeNode.BindAsync(RealRelayOptions(url, listen: true), ct);
+            // Ticket filtering alone cannot keep a session relayed: authenticated
+            // announcements teach both peers their direct addresses immediately.
+            PinholeOptions relayOnly = RealRelayOptions(url, listen: true) with
+                { EnableDirectUdp = false, EnableTcpTransport = false };
+            await using PinholeNode a = await PinholeNode.BindAsync(relayOnly, ct);
+            await using PinholeNode b = await PinholeNode.BindAsync(relayOnly, ct);
             await TestPoll.UntilAsync(TestBudget.Bind, () => a.HasRelay && b.HasRelay);
 
             Task<PinholeConnection> accept = a.AcceptAsync(ct);
@@ -297,7 +301,7 @@ public sealed class RealNetworkTests
             {
                 StunServers = [],
                 Relays = [new TurnServerConfig(new IPEndPoint(IPAddress.Loopback, port), user, pass)],
-                IrohRelayUrls = [],
+                IrohRelayUrls = [], DerpRelayUrls = [],
                 Listen = listen,
                 ConnectTimeout = TimeSpan.FromSeconds(12),
                 BindProbeBudget = TimeSpan.FromSeconds(10),

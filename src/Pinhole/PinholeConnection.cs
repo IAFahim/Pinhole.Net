@@ -50,7 +50,7 @@ public enum DirectTransport : byte
 /// <summary>Snapshot of the current path.</summary>
 public sealed record PinholePath(PathKind Kind, IPEndPoint? Remote, DateTimeOffset Since)
 {
-    /// <summary>The HTTPS relay URL when the path uses an iroh relay.</summary>
+    /// <summary>The HTTPS relay URL when the path uses an iroh or DERP relay.</summary>
     public Uri? RelayUrl { get; init; }
     /// <summary>UDP or TCP for a direct path; null for a relay or no path.</summary>
     public DirectTransport? Transport { get; init; } = Kind == PathKind.Direct ? Pinhole.DirectTransport.Udp : null;
@@ -120,7 +120,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         get
         {
             lock (_c.Gate) return _c.Crypto is { PeerConfirmed: true }
-                && (_c.Iroh is { IsAlive: true } && _c.IrohConfirmed || _c.RelayRemote is not null && _c.RelayReady);
+                && (_c.PacketRelay is { IsAlive: true } && _c.PacketRelayConfirmed || _c.RelayRemote is not null && _c.RelayReady);
         }
     }
 
@@ -301,7 +301,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
                 {
                     PathKind.Direct when _c.DirectRemoteEp is { } ep => new PinholePath(PathKind.Direct, ep, _c.PathSince)
                     { Transport = _c.DirectTcp is null ? DirectTransport.Udp : DirectTransport.Tcp },
-                    PathKind.Relay when _c.Iroh is { IsAlive: true } relay && _c.IrohConfirmed => new PinholePath(PathKind.Relay, null, _c.PathSince) { RelayUrl = relay.Url },
+                    PathKind.Relay when _c.PacketRelay is { IsAlive: true } relay && _c.PacketRelayConfirmed => new PinholePath(PathKind.Relay, null, _c.PathSince) { RelayUrl = relay.Url },
                     PathKind.Relay when _c.RelayRemote is { } ep => new PinholePath(PathKind.Relay, ep, _c.PathSince),
                     _ => PinholePath.None,
                 };

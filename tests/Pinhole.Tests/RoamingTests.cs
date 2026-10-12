@@ -12,7 +12,7 @@ public sealed class RoamingTests
     {
         StunServers = [],
         Relays = relays ?? [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(8),
         BindProbeBudget = TimeSpan.FromSeconds(5),
         PublishIrohAddress = false,

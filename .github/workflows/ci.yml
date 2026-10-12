@@ -43,6 +43,13 @@ jobs:
         run: npm run check
       - name: Pair real encrypted C# peers through the local Worker on both runtimes
         run: python3 infra/cloudflare-worker/verify-local.py
+      - name: Upload sample process results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: samples-worker
+          path: artifacts/samples/worker.json
+          retention-days: 5
 
   test:
     name: test-${{ matrix.os }}${{ matrix.framework == 'net8.0' && '-net8' || '' }}
@@ -169,31 +176,33 @@ jobs:
           path: tests/Pinhole.Tests/TestResults/
           retention-days: 5
 
-  mesh-local:
-    name: mesh-smoke (3 nodes, one machine)
-    runs-on: ubuntu-latest
+  samples:
+    name: samples-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
-      - name: Publish once
-        run: dotnet publish samples/Pinhole.Mesh -c Release -o meshbin
-      - name: Run three strangers over a filesystem signaling channel
-        run: |
-          export MESH_SIGNAL_DIR="$RUNNER_TEMP/signal"
-          export MESH_DEADLINE_MS=90000
-          mkdir -p "$MESH_SIGNAL_DIR"
-          for i in 0 1 2; do
-            MESH_LINGER=$([ "$i" = 0 ] && echo 1 || echo "") \
-              dotnet meshbin/pinhole-mesh.dll node $i 3 > "$RUNNER_TEMP/node$i.log" 2>&1 &
-          done
-          FAIL=0
-          for i in 0 1 2; do wait %$((i+1)) || FAIL=1; done
-          echo "--- node logs ---"
-          cat "$RUNNER_TEMP"/node*.log
-          exit $FAIL
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Verify runnable chats, join retry, group forwarding, files, codes and mesh guests
+        run: python samples/verify.py --output artifacts/samples/loopback.json
+      - name: Upload sample process results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: samples-${{ matrix.os }}
+          path: artifacts/samples/loopback.json
+          retention-days: 5
 
   bench:
     name: bench-canary

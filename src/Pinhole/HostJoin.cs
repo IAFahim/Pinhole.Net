@@ -347,7 +347,7 @@ internal sealed class CodeDirectory
                 try
                 {
                     byte[] invitation = Base64Url.Decode(record);
-                    if (invitation.Length is > 0 and <= 2048)
+                    if (invitation.Length is > 0 and <= ConnectionString.MaxEncodedLength)
                     {
                         return Encoding.UTF8.GetString(invitation);
                     }
@@ -374,7 +374,7 @@ internal sealed class CodeDirectory
             await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, ToWire(server), deadline.Token).ConfigureAwait(false);
         }
 
-        byte[] buffer = new byte[2048];
+        byte[] buffer = new byte[(ConnectionString.MaxEncodedLength * 4 + 2) / 3 + 128];
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
         while (!deadline.IsCancellationRequested)
         {

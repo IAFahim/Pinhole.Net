@@ -10,7 +10,7 @@ Direct UDP, direct TCP, NAT punching and automatic routing remain requirements.
 WebRTC is a candidate to compare with the working transport; the host/join API is
 planned, and existing APIs and wire formats remain available.
 
-- **Free infrastructure.** Google/Cloudflare STUN and n0's public iroh HTTPS relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
+- **Free infrastructure.** Google/Cloudflare STUN, n0's public iroh HTTPS relays, and Tailcat's free, rate-limited DERP relays by default; standard TURN servers can be added with your own credentials. Consumed as protocols from pure C#.
 - **Router mappings, iroh-style.** PCP / NAT-PMP / UPnP port mapping is attempted at bind — a granted mapping is advertised as a candidate and hard home NATs become directly punchable. NAT classification (cone vs symmetric) is derived automatically from the STUN observations.
 - **LAN IPv6 fallback by default.** Link-local candidates supplement routable addresses, with probes on each eligible local Wi-Fi/Ethernet interface. Mobile and tunnel interfaces are excluded from link-local probing.
 - **Discovery enabled by default.** Nodes announce `_pinhole._udp.local` on the LAN and publish signed native iroh records with direct addresses and relay URLs. `DiscoverLanPeersAsync` finds nearby peers; `ConnectIrohAsync` resolves a shared endpoint ID. A `pinhole1:` connection string also carries the peer's keys and candidates, so it can be dialed without a discovery lookup.
@@ -70,7 +70,7 @@ dotnet add package Pinhole.Blobs        # verified, encrypted, resumable file tr
 
 `Pinhole.Net` pulls in `Pinhole.Turn` (RFC 5766 relay client), `Pinhole.Providers` (the
 free STUN/TURN catalog), and managed BouncyCastle cryptography. Parameterless `BindAsync()`
-gets the free STUN catalog, public iroh relays, LAN announcements, and signed
+gets the free STUN catalog, public iroh and Tailcat DERP relays, LAN announcements, and signed
 endpoint/direct-address publication by default. `dotnet test` from a fresh
 clone needs no submodules, Rust, or native toolchain — pure C# end to end. Build
 with the .NET 10 SDK and install the .NET 8 runtime as well: tests target both
@@ -108,7 +108,7 @@ using Pinhole;
 
 // ---------- PC A (listener) ----------
 await using PinholeNode a = await PinholeNode.BindAsync();
-// binds UDP and registers with public iroh HTTPS relays as the standing fallback,
+// binds UDP and registers with public iroh and Tailcat DERP relays as the standing fallback,
 // probes free STUN, announces on the LAN, and publishes signed direct/relay addresses.
 
 string cs = a.ConnectionString;
@@ -172,10 +172,12 @@ dotnet run --project samples/Pinhole.Tiny.Mulit
 dotnet run --project samples/Pinhole.Demo
 ```
 
-The demo prints your own connection string first. One person presses Enter to listen;
-the other pastes the listener's string. Type messages after it says `Connected`, or
-`/quit` to exit. Run the updated build on both PCs and share fresh strings so they include
-the new HTTPS relay candidates. A code pasted without the `pinhole1:` prefix is accepted.
+Tiny and Demo both print an invitation and accept incoming peers automatically.
+One person pastes the other's full invitation. Type messages after both say
+`Connected`, or `/quit` to exit. A failed paste or timed-out join leaves the app
+listening so you can retry. Run the current build on both PCs and share fresh
+invitations. For a group, everyone must run Tiny.Mulit; its group message format
+differs from the plain chat. See the [sample verification guide](samples/README.md).
 
 ## Moving files: Pinhole.Blobs
 
@@ -296,7 +298,7 @@ conn.StateChanged += state => Console.WriteLine($"{DateTime.Now:T} -> {state}");
 Console.WriteLine(conn.State);            // PinholeConnectionState.Open
 Console.WriteLine(conn.Path.Kind);        // Direct or Relay
 Console.WriteLine(conn.Path.Remote);      // the peer endpoint in use right now
-Console.WriteLine(conn.Path.RelayUrl);    // HTTPS relay URL when using an iroh relay
+Console.WriteLine(conn.Path.RelayUrl);    // HTTPS relay URL when using iroh or DERP
 Console.WriteLine(conn.Path.Since);       // when this path became the one
 ```
 
@@ -423,8 +425,9 @@ allows the connection; real socket/router and Kotlin checks remain pending.
 
 ### Configuration
 
-Parameterless `BindAsync()` probes free STUN and connects to n0's public iroh relays over
-HTTPS WebSockets. The managed C# relay client implements iroh's signed challenge and
+Parameterless `BindAsync()` probes free STUN and connects to n0's public iroh relays and
+[Tailcat's public DERP fleet](https://github.com/tailscale/tailcat) over HTTPS WebSockets.
+The managed C# iroh client implements the signed challenge and
 datagram framing; BouncyCastle supplies Ed25519 and BLAKE3. Relays introduce peers and
 carry Pinhole datagrams while both sides punch UDP, then remain available for fallback
 and reconnect automatically after a disconnect. This is the iroh relay transport with
@@ -433,13 +436,26 @@ iroh application endpoints. `IrohTransport` provides the separate native-address
 API described in [IROH_CONNECTIVITY.md](docs/IROH_CONNECTIVITY.md). Pinhole session payloads are end-to-end encrypted between the two
 peers; the relay (like any relay) sees only ciphertext frames.
 
+The managed DERP v2 adapter supplies another introduction and fallback provider,
+without a Tailscale account, Go runtime, or native dependency. The first responsive
+authenticated relay path stays selected while healthy; an outage re-punches through
+the other candidates on the same connection. Direct UDP/TCP still takes priority.
+DERP addresses also travel in signed Pinhole discovery records, so `ConnectIrohAsync`
+can use them when dialing by endpoint ID.
+
+Tailcat's relays are [free, rate-limited, and best effort](https://github.com/tailscale/tailcat#stability),
+with no availability or throughput guarantee. Pinhole honors their advertised byte
+limits. This adapter carries Pinhole sessions; it does not dial `tc...` addresses or
+implement Tailcat's WireGuard/magicsock tunnels. See [TAILCAT_RELAYS.md](docs/TAILCAT_RELAYS.md)
+for configuration, compatibility, and the public-service probe.
+
 Everything is overridable — and every infrastructure setting is tri-state: `null`
 (default) takes the free defaults, an empty list disables that provider, explicit
 entries replace the defaults. Customizing one setting never silently drops the rest,
 so there is no need to fetch `DefaultAsync` first anymore:
 
 ```csharp
-// A scalar tweak only — free STUN and the public iroh relays stay enabled:
+// A scalar tweak only — free STUN, iroh and Tailcat DERP relays stay enabled:
 var node = await PinholeNode.BindAsync(new PinholeOptions
 {
     ConnectTimeout = TimeSpan.FromSeconds(30),
@@ -454,6 +470,8 @@ var node = await PinholeNode.BindAsync(new PinholeOptions
 
     // Or replace the public iroh relays with your own:
     // IrohRelayUrls = [new Uri("https://relay.example.com/")],
+    // DerpRelayUrls = [new Uri("https://derp.example.com/")],
+    // DerpRelayUrls = [],          // disable Tailcat independently of iroh
 
     StunServers = null,             // null = free catalog; [] = no reflexive stage
     Listen = true,                  // accept strangers dialing your string
@@ -482,6 +500,7 @@ var local = await PinholeNode.BindAsync(new PinholeOptions
     StunServers = [],
     Relays = [],
     IrohRelayUrls = [],
+    DerpRelayUrls = [],
 });
 ```
 
@@ -572,9 +591,10 @@ universal discovery artifact everywhere else.
 - `src/Pinhole.Providers` — catalog of all free endpoints: Google/Cloudflare/Metered/OpenRelay/Twilio STUN+TURN presets
 - `src/Pinhole.Rendezvous` — optional rendezvous/introducer server (single binary, deployable anywhere a UDP port is open)
 - `samples/Pinhole.Demo` — basic interactive chat: prints your connection string, then listens or dials a pasted string
-- `samples/Pinhole.Tiny` — minimal two-PC chat with full invitations, Google STUN and public iroh relays
+- `samples/Pinhole.Tiny` — minimal two-PC chat with full invitations, free STUN and public iroh/Tailcat DERP relays
 - `samples/Pinhole.Tiny.Mulit` — group chat with concurrent connections, message forwarding, and continued listening after friends leave
 - `samples/Pinhole.CloudflareChat` — the same chat with Cloudflare short codes and TURN fallback
+- `samples/Pinhole.CodeShare` — two-process greeting exchange using a UDP directory or HTTPS coordinator
 - `samples/Pinhole.Bench` — non-interactive throughput/allocation canary: two loopback nodes, no stdin, no infrastructure — what CI runs
 - `samples/Pinhole.Mesh` — multi-machine canary harness: strangers discover each other over a signaling channel, connect with connection strings, verify, repeat
 - `samples/Pinhole.Send` — sendme-style CLI: `send <path>` prints a ticket and serves until Ctrl-C, `recv <ticket> [dir]` downloads with console progress
@@ -586,6 +606,7 @@ universal discovery artifact everywhere else.
 git clone https://github.com/IAFahim/Pinhole.Net
 cd Pinhole.Net
 dotnet test tests/Pinhole.Tests        # self-contained: no network, no cargo, nothing native
+python3 samples/verify.py             # real sample processes, isolated loopback
 dotnet run --project samples/Pinhole.Bench -c Release   # throughput/allocation canary (offline)
 ```
 

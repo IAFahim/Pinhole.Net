@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
+    <Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
   </ItemGroup>
 </Project>

@@ -20,7 +20,7 @@ public sealed class AttackTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         Listen = true,
         ConnectTimeout = TimeSpan.FromSeconds(8),
         PublishIrohAddress = false,
@@ -491,7 +491,7 @@ public sealed class AttackTests
             Bind = new IPEndPoint(IPAddress.Loopback, port),
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,

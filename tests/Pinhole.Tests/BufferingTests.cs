@@ -15,7 +15,7 @@ public sealed class BufferingTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         ReceiveBufferCapacity = capacity,
         PublishIrohAddress = false,
         EnableLanDiscovery = false,

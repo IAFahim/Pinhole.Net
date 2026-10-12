@@ -547,7 +547,7 @@ public sealed class InteropTests
         Bind = new IPEndPoint(IPAddress.Loopback, 0),
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,

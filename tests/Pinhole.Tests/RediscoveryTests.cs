@@ -40,7 +40,7 @@ public sealed class RediscoveryTests
         RendezvousEndpoints = rendezvous ?? [],
         LookupProviders = providers,
         StunServers = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,

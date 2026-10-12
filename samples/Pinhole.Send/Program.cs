@@ -1,47 +1,53 @@
 // sendme, the Pinhole edition: one ticket moves a file or a whole directory between
 // machines — chunk-verified while streaming, encrypted end to end, resumable across
-// restarts, and it connects anywhere the two machines can reach the internet.
+// restarts, using direct UDP/TCP or the configured relay fallback.
 //   dotnet run --project samples/Pinhole.Send -- send ~/photos.tar       # prints a ticket, serves until Ctrl-C
 //   dotnet run --project samples/Pinhole.Send -- recv <ticket> ~/dl      # downloads into ~/dl
 using System.Diagnostics;
 using Pinhole.Blobs;
 
-switch (args)
+using var stop = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+try
 {
-    case ["send", string path]:
-        await Send(path, encrypt: true);
-        return 0;
-    case ["send", string path, "--plain"]:
-        await Send(path, encrypt: false);
-        return 0;
-    case ["recv", string ticket]:
-        return await Recv(ticket, ".");
-    case ["recv", string ticket, string dir]:
-        return await Recv(ticket, dir);
-    default:
-        Console.WriteLine("""
+    switch (args)
+    {
+        case ["send", string path]:
+            await Send(path, encrypt: true, stop.Token);
+            return 0;
+        case ["send", string path, "--plain"]:
+            await Send(path, encrypt: false, stop.Token);
+            return 0;
+        case ["recv", string ticket]:
+            return await Recv(ticket, ".", stop.Token);
+        case ["recv", string ticket, string dir]:
+            return await Recv(ticket, dir, stop.Token);
+        default:
+            Console.WriteLine("""
             usage:
               send <path> [--plain]   serve a file or directory until Ctrl-C, printing its ticket
               recv <ticket> [dir]     download the ticket's content into dir (default: current)
             """);
-        return 1;
+            return 1;
+    }
 }
+catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
+catch (Exception e) { Console.Error.WriteLine($"Transfer failed: {e.Message}"); return 1; }
 
-static async Task Send(string path, bool encrypt)
+static async Task Send(string path, bool encrypt, CancellationToken ct)
 {
-    using var exit = new CancellationTokenSource();
-    Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Cancel(); };
-
-    await using var server = await BlobServer.ServeAsync(path, new BlobServeOptions { Encrypt = encrypt });
+    Console.WriteLine("Preparing the file and connecting...");
+    await using var server = await BlobServer.ServeAsync(path,
+        new BlobServeOptions { Encrypt = encrypt, NodeOptions = SampleNetwork.Options() }, ct);
     Console.WriteLine("ticket (hand this to the receiver):");
-    Console.WriteLine("  " + server.Ticket);
+    Console.WriteLine("  " + SampleNetwork.ShareInvitation(server.Ticket.ToString()));
     Console.WriteLine();
     Console.WriteLine($"serving {Path.GetFileName(path)} until Ctrl-C…");
     try
     {
         while (true)
         {
-            await Task.Delay(TimeSpan.FromSeconds(2), exit.Token);
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
             Console.WriteLine($"  connections: {server.ConnectionsAccepted}, chunks served: {server.ChunksServed}");
         }
     }
@@ -50,7 +56,7 @@ static async Task Send(string path, bool encrypt)
     }
 }
 
-static async Task<int> Recv(string ticketText, string dir)
+static async Task<int> Recv(string ticketText, string dir, CancellationToken ct)
 {
     var gate = new object();
     var watch = Stopwatch.StartNew();
@@ -67,8 +73,10 @@ static async Task<int> Recv(string ticketText, string dir)
     BlobDownloadResult result;
     try
     {
-        result = await BlobClient.DownloadAsync(BlobTicket.Parse(ticketText), dir, progress);
+        result = await BlobClient.DownloadAsync(BlobTicket.Parse(SampleNetwork.NormalizeInvitation(ticketText)), dir,
+            progress, new BlobDownloadOptions { NodeOptions = SampleNetwork.Options() }, ct);
     }
+    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
     catch (Exception ex)
     {
         Console.Error.WriteLine($"download failed: {ex.Message}");

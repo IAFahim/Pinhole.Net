@@ -1,8 +1,5 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
 using Pinhole;
-using Pinhole.Providers;
 
 // Everyone runs this sample. Paste a friend's invitation; keep accepting others.
 Console.InputEncoding = Console.OutputEncoding = Encoding.UTF8;
@@ -11,13 +8,10 @@ Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
 
 try
 {
-    IPEndPoint[] stun = [];
-    try { stun = await StunServers.GoogleAsync(stop.Token); }
-    catch (SocketException) { }
-    await using var node = await PinholeNode.BindAsync(new PinholeOptions
-    { ReceiveBufferCapacity = 64, StunServers = stun, Relays = [] }, stop.Token);
+    Console.WriteLine("Starting Pinhole.Tiny.Mulit...");
+    await using var node = await PinholeNode.BindAsync(SampleNetwork.Options(), stop.Token);
 
-    // One node, many encrypted connections. Direct UDP/TCP or public iroh fallback.
+    // One node, many encrypted connections. Direct UDP/TCP or iroh/DERP fallback.
     await new GroupChat(node).RunAsync(args, stop.Token);
     return 0;
 }

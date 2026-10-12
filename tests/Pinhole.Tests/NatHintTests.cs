@@ -37,7 +37,7 @@ public sealed class NatHintTests
         {
             StunServers = stun,
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false,

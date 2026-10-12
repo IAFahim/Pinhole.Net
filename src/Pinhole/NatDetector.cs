@@ -41,7 +41,7 @@ public static class NatDetector
         await using var node = await PinholeNode.BindAsync(new PinholeOptions
         {
             Bind = new(server.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any, 0),
-            StunServers = [], Relays = [], IrohRelayUrls = [], Listen = false, PublishIrohAddress = false,
+            StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [], Listen = false, PublishIrohAddress = false,
             Encryption = PinholeEncryption.Disabled, EnableTcpTransport = false, EnableInterfaceCandidates = false,
             EnablePortMapping = false, EnableLanDiscovery = false, EnableNetworkWatch = false,
             EnablePathValidation = false, EnablePmtud = false, StunRefreshInterval = TimeSpan.Zero,

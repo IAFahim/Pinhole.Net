@@ -16,7 +16,7 @@ public sealed class HostJoinTests
     private static PinholeOptions OfflineNode() => new()
     {
         Bind = new IPEndPoint(IPAddress.Loopback, 0),
-        StunServers = [], Relays = [], IrohRelayUrls = [],
+        StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false, EnableNetworkWatch = false, EnablePortMapping = false,
         EnableLanDiscovery = false, ReceiveBufferCapacity = 16,
         ConnectTimeout = TimeSpan.FromSeconds(8),
@@ -35,6 +35,43 @@ public sealed class HostJoinTests
         WaitTimeout = TimeSpan.FromSeconds(10),
         PollInterval = TimeSpan.FromMilliseconds(200),
     };
+
+    [Fact]
+    public async Task BothDefaultRelayFleets_HostAndJoinByCode_WithAnInvitationLargerThanTheOldDirectoryLimit()
+    {
+        await using var server = RendezvousServer.Start();
+        var iroh = PinholeOptions.PublicIrohRelays.ToDictionary(url => url.Host, _ => new InMemoryIrohRelay());
+        var derp = PinholeOptions.PublicDerpRelays.ToDictionary(url => url.Host, url => new InMemoryDerpRelay(url.Host));
+        try
+        {
+            PinholeOptions options = OfflineNode() with
+            {
+                IrohRelayUrls = null, DerpRelayUrls = null,
+                IrohWebSocketFactory = (uri, ct) => iroh[uri.Host].ConnectAsync(new Uri("wss://relay.example.test/relay"), ct),
+                DerpWebSocketFactory = (uri, ct) => derp[uri.Host].ConnectAsync(uri, ct),
+                EnableDirectUdp = false, EnableTcpTransport = false,
+            };
+            await using var host = await PinholeSession.HostAsync(HostSettings(server) with { NodeOptions = options }).WaitAsync(Timeout);
+            string invitation = host.FullInvitation;
+            Assert.True(Base64Url.Encode(Encoding.UTF8.GetBytes(invitation)).Length > RendezvousServer.MaxRecordLength);
+            var candidates = ConnectionString.Parse(invitation).Candidates;
+            Assert.Equal(4, candidates.Count(c => c.Kind == CandidateKind.IrohRelay));
+            Assert.Equal(4, candidates.Count(c => c.Kind == CandidateKind.DerpRelay));
+            Task<PinholeConnection> accepting = host.AcceptAsync();
+            await using var joined = await PinholeSession.JoinAsync(host.Code, JoinSettings(server) with { NodeOptions = options }).WaitAsync(Timeout);
+            await using var accepted = await accepting.WaitAsync(Timeout);
+            Assert.True(joined.IsEncrypted && accepted.IsEncrypted);
+            Assert.Equal(PathKind.Relay, joined.Path.Kind);
+            joined.Send("both default relay fleets fit invitation codes"u8);
+            Assert.Equal("both default relay fleets fit invitation codes"u8.ToArray(),
+                (await accepted.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
+        }
+        finally
+        {
+            foreach (var relay in iroh.Values) relay.Dispose();
+            foreach (var relay in derp.Values) relay.Dispose();
+        }
+    }
 
     [Fact]
     public async Task HostAndJoinByCode_ExchangesDatagramsBothWays()
@@ -187,7 +224,7 @@ public sealed class HostJoinTests
             }
         }
 
-        string huge = new string('A', RendezvousServer.MaxRecordLength + 1);
+        string huge = new string('A', RendezvousServer.MaxCodeRecordLength + 1);
         Assert.Equal(string.Empty, await Roundtrip($"PUTC ABCDEFG {huge}")); // ignored, no reply
         Assert.Equal(string.Empty, await Roundtrip("PUTC has space and invalid {A}"));
         Assert.StartsWith("OKCG ", await Roundtrip("PUTC ABCDEFG AAAAAAAA"));

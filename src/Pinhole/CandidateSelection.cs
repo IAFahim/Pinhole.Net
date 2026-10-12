@@ -22,9 +22,10 @@ internal static class CandidateSelection
         Endpoint(CandidateKind.Reflexive, mapped); Endpoint(CandidateKind.Reflexive, tcpMapped);
         PinholeCandidate[] turn = candidates.Where(c => c.Kind == CandidateKind.Relay).ToArray();
         PinholeCandidate[] iroh = candidates.Where(c => c.Kind == CandidateKind.IrohRelay).ToArray();
-        // Keep both provider types even when one has many configured allocations.
-        Keep(turn.FirstOrDefault()); Keep(iroh.FirstOrDefault());
-        foreach (PinholeCandidate candidate in iroh.Skip(1).Concat(turn.Skip(1)).Take(Math.Max(0, 8 - chosen.Count(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay))))
+        PinholeCandidate[] derp = candidates.Where(c => c.Kind == CandidateKind.DerpRelay).ToArray();
+        // Keep every provider type even when one has many configured allocations.
+        Keep(turn.FirstOrDefault()); Keep(iroh.FirstOrDefault()); Keep(derp.FirstOrDefault());
+        foreach (PinholeCandidate candidate in iroh.Skip(1).Concat(derp.Skip(1)).Concat(turn.Skip(1)).Take(Math.Max(0, 8 - chosen.Count(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay))))
             Keep(candidate);
         foreach (PinholeCandidate candidate in candidates.Where(c => c.Kind == CandidateKind.Direct && !IPAddress.IsLoopback(c.Address.Address)
             && !c.Address.Address.IsIPv6LinkLocal).DistinctBy(c => c.Address.AddressFamily)) Keep(candidate);

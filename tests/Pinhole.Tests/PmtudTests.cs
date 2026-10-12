@@ -15,7 +15,7 @@ public sealed class PmtudTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,

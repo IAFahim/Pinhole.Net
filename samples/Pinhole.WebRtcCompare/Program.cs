@@ -146,7 +146,7 @@ async Task RunPinholeAsync(string tag)
     var options = new PinholeOptions
     {
         Bind = new IPEndPoint(IPAddress.Loopback, 0),
-        StunServers = [], Relays = [], IrohRelayUrls = [],
+        StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false, EnableNetworkWatch = false, EnablePortMapping = false,
         EnableLanDiscovery = false, EnablePathValidation = false, ReceiveBufferCapacity = 4096,
     };

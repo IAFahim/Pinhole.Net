@@ -8,7 +8,7 @@ public sealed class ConsumerApiTests
 
     private static PinholeOptions Options(bool listen = true) => new()
     {
-        StunServers = [], Relays = [], IrohRelayUrls = [],
+        StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         Listen = listen, EnableNetworkWatch = false, EnablePortMapping = false,

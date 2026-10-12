@@ -1,0 +1,94 @@
+name: Sample network
+
+# Public-service checks use real independent machines. Keep the deterministic
+# smoke suite in CI; run this fleet check explicitly on a verification branch.
+on:
+  push:
+    branches: ['verify/**']
+  workflow_dispatch:
+
+concurrency:
+  group: sample-network-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  SAMPLE_SIGNAL_BRANCH: sample-signal/${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create an isolated encrypted signaling branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$SAMPLE_SIGNAL_BRANCH" -f "sha=$GITHUB_SHA"
+      - name: Create the per-run signal key
+        run: python3 -c "import secrets; from pathlib import Path; Path('key.bin').write_bytes(secrets.token_bytes(32))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample-network-key-${{ github.run_attempt }}
+          path: key.bin
+          retention-days: 1
+
+  peers:
+    needs: prepare
+    name: sample-peer-${{ matrix.index }}-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {index: 0, os: ubuntu-latest}
+          - {index: 1, os: windows-latest}
+          - {index: 2, os: macos-latest}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sample-network-key-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sample-key
+      - name: Build the actual runnable samples
+        run: dotnet build Pinhole.Net.slnx -c Release --disable-build-servers -warnaserror
+      - name: Build encrypted test signaling
+        run: dotnet build .github/scripts/SignalCipher -c Release --disable-build-servers -warnaserror
+      - name: Verify each machine's interactive sample flows first
+        run: python samples/verify.py --no-build --output artifacts/network/loopback-${{ matrix.index }}.json
+      - name: Verify chat and file delivery with the other machines
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SAMPLE_KEY_FILE: ${{ runner.temp }}/sample-key/key.bin
+        run: python samples/verify-remote.py --index ${{ matrix.index }} --output artifacts/network/peer-${{ matrix.index }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sample-network-peer-${{ matrix.index }}-${{ github.run_attempt }}
+          path: artifacts/network/*.json
+          retention-days: 5
+
+  cleanup:
+    needs: [prepare, peers]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Remove the signal branch and per-run key artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$SAMPLE_SIGNAL_BRANCH" || true
+          KEY=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "sample-network-key-${{ github.run_attempt }}") | .id')
+          if [ -n "$KEY" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$KEY"; fi

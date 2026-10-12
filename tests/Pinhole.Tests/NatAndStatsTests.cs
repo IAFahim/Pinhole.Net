@@ -60,7 +60,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -70,7 +70,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -101,7 +101,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -111,7 +111,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -142,7 +142,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -152,7 +152,7 @@ public sealed class NatDetectorTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             ConnectTimeout = TimeSpan.FromSeconds(2),
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
@@ -181,7 +181,7 @@ public sealed class PathStatsTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         ConnectTimeout = TimeSpan.FromSeconds(8),
         PublishIrohAddress = false,
         EnableLanDiscovery = false,

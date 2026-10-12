@@ -19,7 +19,7 @@ public sealed class TcpRouterIntegrationTests
         using var gateway = new FakeGateway();
         var node = await PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], IrohRelayUrls = [], PublishIrohAddress = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], PublishIrohAddress = false,
             EnableLanDiscovery = false, EnableNetworkWatch = false,
             GatewayOverride = [gateway.Endpoint], PortMappingLease = TimeSpan.FromSeconds(30),
         });

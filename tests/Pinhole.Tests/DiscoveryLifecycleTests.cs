@@ -17,7 +17,7 @@ public sealed class DiscoveryLifecycleTests
         int attempts = 0;
         var network = new PinholeOptions
         {
-            StunServers = [], Relays = [], IrohRelayUrls = [], PublishIrohAddress = false,
+            StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [], PublishIrohAddress = false,
             EnableNetworkWatch = false, EnablePortMapping = false, EnableLanDiscovery = false,
             UdpSocketFactory = _ => { attempts++; throw original; },
         };
@@ -47,7 +47,7 @@ public sealed class DiscoveryLifecycleTests
         using var cancelled = new CancellationTokenSource();
         var network = new PinholeOptions
         {
-            Bind = new IPEndPoint(IPAddress.Loopback, port), StunServers = [], IrohRelayUrls = [],
+            Bind = new IPEndPoint(IPAddress.Loopback, port), StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [],
             EnableNetworkWatch = false, EnablePortMapping = false, EnableLanDiscovery = false,
             IrohDiscoveryHandler = service,
         };

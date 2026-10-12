@@ -20,6 +20,7 @@ every session is additionally encrypted and peer-authenticated (below).
 | Direct UDP | Primary dual-mode socket plus up to four source-bound interface sockets (local draft) | The goal — hole-punched, zero-alloc, MTU-sized datagrams |
 | Direct TCP (local draft, #43) | A bounded, version-negotiated TCP sidecar with fresh encrypted stream proof | When UDP has not opened and a candidate accepts TCP; [release gate](DIRECT_TCP.md) remains pending |
 | iroh HTTPS relay | WebSocket speaking the [iroh relay v1/v2 framing](#iroh-relay-transport) | Introduction + standing fallback; reconnects with capped exponential backoff |
+| Tailcat DERP HTTPS relay | WebSocket speaking [DERP v2](#derp-relay-transport) | Additional encrypted introduction + fallback; respects server rate limits |
 | TURN relay | RFC 5766 allocate/permission/send+data indications | Optional fallback when credentials are supplied |
 
 All transports carry the same frame format below; only the encapsulation differs.
@@ -218,10 +219,12 @@ the receiving interface, never to the announcing device's interface index.
 
 `Announce` bodies and connection strings share one candidate encoding. Each
 candidate is: endpoint (address-length byte `4`/`16`, raw address bytes, port u16
-BE), kind byte (`1` direct, `2` reflexive, `3` TURN relay, `4` iroh relay), then per
+BE), kind byte (`1` direct, `2` reflexive, `3` TURN relay, `4` iroh relay, `5` DERP relay), then per
 kind: TURN adds relay-server endpoint + two length-prefixed ASCII strings (username,
 credential, ≤64 bytes each); iroh adds a length-prefixed ASCII URL (HTTPS, ≤64
 bytes) + a 32-byte Ed25519 public relay identity key.
+DERP uses the same URL/key layout with the peer's X25519 session static key.
+Older parsers that reject kind `5` require DERP to be disabled in shared tickets.
 
 Kind `2` (reflexive) covers both truths that make a public endpoint reachable:
 STUN-observed mappings and endpoints granted by [router port mapping](#router-port-mapping).
@@ -357,6 +360,33 @@ capped exponential backoff: ~1 s first, doubling per consecutive failure to 30 s
 ±10% jitter, reset on the first successful authentication — an outage never turns
 into a synchronized retry storm. TURN allocation retries follow the same idea
 (30 s ±20%).
+
+## DERP relay transport
+
+Managed [DERP v2](https://github.com/tailscale/tailscale/blob/main/derp/derp.go)
+over `wss://<relay>/derp`, negotiating the `derp` WebSocket subprotocol. DERP is
+a byte stream across WebSocket messages; each frame has a type byte, body
+length u32 BE, and body. Message boundaries may split or combine frames.
+
+1. Server sends `0x01`: the eight-byte `DERP🔑` magic and its 32-byte X25519 key.
+2. Client sends `0x02`: its 32-byte static key, a 24-byte nonce, and NaCl-box
+   encrypted JSON declaring version `2`, `CanAckPings=true`, and `AppName=pinhole`.
+3. Server sends `0x03`: a nonce and authenticated NaCl-box server info, including
+   optional `TokenBucketBytesPerSecond` / `TokenBucketBytesBurst` limits.
+
+NaCl box uses X25519, HSalsa20 with zero input, then XSalsa20/Poly1305.
+`0x04` sends a destination key plus Pinhole datagram; `0x05` receives a source
+key plus datagram. The authenticated source must equal the static key in
+Punc/Pack, or the established peer's static key for subsequent frames.
+Pinhole's existing session MACs and sealed datagrams still verify independently.
+`0x12` pings receive `0x13` pongs. `0x06` is a keepalive; unhealthy connections
+and `0x15` restart requests trigger reconnection with the same capped backoff
+as iroh. Server byte limits include the five-byte DERP header and destination
+key; exhausted budgets drop datagrams without changing connection state.
+
+Signed Pinhole pkarr records can include `pinhole-derp=<URL>` TXT values.
+`ConnectIrohAsync` combines these with the record's signed Pinhole session key
+to obtain DERP candidates. Native iroh ticket encoding is unchanged.
 
 ## Constants
 

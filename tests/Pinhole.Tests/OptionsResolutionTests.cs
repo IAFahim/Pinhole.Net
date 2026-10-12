@@ -33,6 +33,8 @@ public sealed class OptionsResolutionTests
 
         Assert.Equal(PinholeOptions.PublicIrohRelays, def.ResolvedIrohRelays);
         Assert.Equal(PinholeOptions.PublicIrohRelays, customized.ResolvedIrohRelays);
+        Assert.Equal(PinholeOptions.PublicDerpRelays, def.ResolvedDerpRelays);
+        Assert.Equal(PinholeOptions.PublicDerpRelays, customized.ResolvedDerpRelays);
         Assert.Equal(catalog, def.ResolvedStun);
         Assert.Equal(catalog, customized.ResolvedStun);
         Assert.Equal(TimeSpan.FromSeconds(30), customized.ConnectTimeout); // scalar kept
@@ -51,6 +53,20 @@ public sealed class OptionsResolutionTests
         Assert.True(def.EnableInterfaceCandidates);
         Assert.True(def.EnablePortPrediction);
         Assert.True(customized.EnablePortPrediction);
+    }
+
+    [Fact]
+    public async Task DerpDefaults_CanBeDisabledOrReplacedIndependentlyOfIroh()
+    {
+        PinholeOptions disabled = await PinholeOptions.ResolveAsync(new PinholeOptions { StunServers = [], DerpRelayUrls = [] });
+        Assert.Empty(disabled.DerpRelayUrls!);
+        Assert.Equal(PinholeOptions.PublicIrohRelays, disabled.ResolvedIrohRelays);
+        Uri mine = new("https://my-derp.example.test/");
+        PinholeOptions replaced = await PinholeOptions.ResolveAsync(new PinholeOptions { StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [mine] });
+        Assert.Equal(mine, Assert.Single(replaced.DerpRelayUrls!));
+        Assert.Empty(replaced.ResolvedDerpRelays);
+        await Assert.ThrowsAsync<ArgumentException>(() => PinholeOptions.ResolveAsync(new PinholeOptions
+            { StunServers = [], DerpRelayUrls = [new("http://public.example.test/")] }));
     }
 
     [Fact]
@@ -82,7 +98,7 @@ public sealed class OptionsResolutionTests
     {
         var options = new PinholeOptions
         {
-            StunServers = [], IrohRelayUrls = [], Encryption = PinholeEncryption.Disabled,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], Encryption = PinholeEncryption.Disabled,
             EnableNetworkWatch = false, EnablePortMapping = false, EnableLanDiscovery = false,
         };
         await Assert.ThrowsAsync<ArgumentException>(() => PinholeNode.BindAsync(options));
@@ -99,7 +115,7 @@ public sealed class OptionsResolutionTests
         {
             StunServers = [mine.LocalEndPoint],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -120,7 +136,7 @@ public sealed class OptionsResolutionTests
         {
             StunServers = [stun.LocalEndPoint],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -129,7 +145,7 @@ public sealed class OptionsResolutionTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -149,7 +165,7 @@ public sealed class OptionsResolutionTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -183,15 +199,15 @@ public sealed class OptionsResolutionTests
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], Relays = [], IrohRelayUrls = [], ReceiveBufferCapacity = -1,
+            StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [], ReceiveBufferCapacity = -1,
         }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], Relays = [], IrohRelayUrls = [], ReceiveBufferCapacity = 65537,
+            StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [], ReceiveBufferCapacity = 65537,
         }));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], Relays = [], IrohRelayUrls = [], PathValidationIdle = TimeSpan.FromMilliseconds(1),
+            StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [], PathValidationIdle = TimeSpan.FromMilliseconds(1),
         }));
     }
 }

@@ -22,6 +22,9 @@ public sealed class RendezvousServer : IAsyncDisposable
     public const int MaxNodes = 4096;
     public const int MaxWaitersPerTarget = 64;
     public const int MaxRecordLength = 1024;
+    // A code holds a whole connection string, then base64url wraps it again.
+    // Keep the peer-ID lookup's smaller record bound separate from invitations.
+    public const int MaxCodeRecordLength = 12 * 1024;
     public const int MaxCodes = 4096;
     public const int MaxCodeLength = 16;
 
@@ -74,7 +77,7 @@ public sealed class RendezvousServer : IAsyncDisposable
 
     private async Task ReceiveLoop()
     {
-        byte[] buffer = new byte[2048];
+        byte[] buffer = new byte[MaxCodeRecordLength + 128];
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
         while (!_shutdown.IsCancellationRequested)
         {
@@ -176,7 +179,7 @@ public sealed class RendezvousServer : IAsyncDisposable
                 }
 
                 break;
-            case ["PUTC", var code, var record] when ValidCode(code) && ValidRecord(record):
+            case ["PUTC", var code, var record] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
                 // First registration claims the code and issues its delete/replace token.
                 if (_codes.TryGetValue(code, out _))
                 {
@@ -195,7 +198,7 @@ public sealed class RendezvousServer : IAsyncDisposable
 
                 await Say(remote, $"OKCG {token}").ConfigureAwait(false);
                 break;
-            case ["PUTC", var code, var record, var oldToken] when ValidCode(code) && ValidRecord(record):
+            case ["PUTC", var code, var record, var oldToken] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
                 if (!_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) held)
                     || held.Token != oldToken)
                 {
@@ -365,9 +368,9 @@ public sealed class RendezvousServer : IAsyncDisposable
 
     /// <summary>Records are opaque here, but not arbitrary: base64url of bounded length, so a
     /// hostile registration cannot bloat memory or smuggle spaces into the ASCII framing.</summary>
-    private static bool ValidRecord(string record)
+    private static bool ValidRecord(string record, int maxLength = MaxRecordLength)
     {
-        if (record.Length is < 1 or > MaxRecordLength)
+        if (record.Length < 1 || record.Length > maxLength)
         {
             return false;
         }

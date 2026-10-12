@@ -2,8 +2,8 @@
 
 Same chat API as [Pinhole.Tiny](../Pinhole.Tiny/README.md), with a nine-character
 join code. The configured Cloudflare Worker exchanges both invitations and issues
-temporary TURN credentials. Pinhole handles encrypted direct UDP/TCP or Cloudflare
-TURN fallback. Players need no Cloudflare login or API token.
+temporary TURN credentials. Pinhole handles encrypted direct UDP/TCP, Cloudflare
+TURN or Tailcat DERP fallback. Players need no Cloudflare login or API token.
 
 Install the [.NET 10 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/10.0),
 then clone/pull this repository on both PCs. Run commands from the repository root.
@@ -44,8 +44,9 @@ export PINHOLE_COORDINATOR=https://YOUR-WORKER.workers.dev
 The development coordinator permits 200 room-creation attempts/day and 40,000
 room requests/day. Start a fresh host for each friend; one code admits one joiner.
 An unmatched room stays alive while its host runs, for up to 24 hours. Relay
-credentials also expire after 24 hours. Current TURN access uses UDP, so this
-mode does not promise relay connectivity where all UDP is blocked. See
+credentials also expire after 24 hours. TURN access uses UDP; the additional
+Tailcat fallback uses HTTPS. Availability still depends on the coordinator and
+the reachable relay services. See
 [Worker setup and limits](../../infra/cloudflare-worker/README.md).
 
 ## Give friends an executable instead
@@ -69,3 +70,6 @@ repo. From PowerShell in that folder:
 Replace the project with `samples/Pinhole.Tiny` to publish the plain example.
 For Linux or macOS, use the corresponding runtime ID (`linux-x64`, `osx-x64`
 or `osx-arm64`) and run `./Pinhole.CloudflareChat [code]`.
+
+The [sample verification guide](../README.md) explains local Worker checks and
+how to select a single relay provider while diagnosing connectivity.

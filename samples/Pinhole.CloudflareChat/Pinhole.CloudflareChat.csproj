@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
     <Compile Include="../ChatConsole.cs" Link="ChatConsole.cs" />
+    <Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
   </ItemGroup>
 </Project>

@@ -9,13 +9,13 @@ name: Mesh
 # rounds. Everyone shuts down at the 5-minute deadline; node 0 accepts guest joins until
 # then, so any machine (e.g. a dev PC) can join the live session with the connection string
 # printed in the job summary. Dispatch with force_relay=true to strip the direct candidates
-# from all tickets and prove the relay-only chain.
+# from all tickets, disable direct transports, and prove the relay-only chain.
 
 on:
   workflow_dispatch:
     inputs:
       force_relay:
-        description: 'Force every connection onto the TURN relay path (no direct candidates in tickets)'
+        description: 'Force every connection onto HTTPS/TURN relays (disable direct UDP/TCP)'
         type: boolean
         default: false
   schedule:

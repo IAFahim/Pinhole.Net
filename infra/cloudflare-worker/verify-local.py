@@ -43,6 +43,12 @@ with tempfile.TemporaryFile(mode="w+") as log:
                     or report["roundTripsEachDirection"] != 48:
                 raise AssertionError("Local Worker did not carry the expected encrypted session")
             print(framework, result.stdout.strip(), flush=True)
+        # Exercise the actual friend-facing console programs, not just the SDK
+        # probe. Loopback disables STUN, public relays and discovery in these apps.
+        subprocess.run([
+            "python3", "samples/verify.py", "--network", "loopback",
+            "--worker", "http://127.0.0.1:8788", "--only", "cloudflare", "code-worker",
+            "--output", "artifacts/samples/worker.json"], cwd=root, check=True, timeout=180)
         time.sleep(0.2)
         log.seek(0)
         if log.read().count("101 Switching Protocols") < len(frameworks):

@@ -101,11 +101,16 @@ Wire additions (space-framed ASCII, same style as REG/WANT):
 - `GETC <code>` → `OKCC <b64url-record>` or `WAITC` when absent/expired.
 - `DELC <code> <token>` → deletes, `OKCD`; wrong token `TokB`.
 
-Bounds mirror the introducer's: ≤4096 codes, records ≤1 KiB base64url,
+Bounds: ≤4096 codes, code records ≤12 KiB base64url,
 codes 4–16 ASCII chars, TTL sweep, oldest-eviction at capacity. The
 directory stores and forwards records without validating them — the
 authentication always happens in the dialer's handshake, never at the
 coordinator. Nothing about the existing REG/WANT/INTRO protocol changed.
+Peer-ID lookup records retain their 1 KiB limit. Code records carry a whole
+connection string wrapped in base64url, so the larger bound accommodates
+both default HTTPS relay fleets. The SDK validates decoded invitations against
+the connection string's 8192-character limit. Upgrade the code-directory server
+when enabling the new DERP defaults; older servers retain the smaller limit.
 
 Self-hosting is one command on any UDP-reachable machine; there is no
 default public directory. Operator duties are the same as any UDP service:

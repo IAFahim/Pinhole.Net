@@ -209,7 +209,7 @@ public sealed class LanDiscoveryTests
         var options = new PinholeOptions
         {
             Bind = new IPEndPoint(IPAddress.IPv6Loopback, 0),
-            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], EnableNetworkWatch = false,
             EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
             ReceiveBufferCapacity = 4,
         };
@@ -317,7 +317,7 @@ public sealed class LanDiscoveryTests
         browserSide.Group = announcerSide.Local;
         await using var node = await PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], EnableNetworkWatch = false,
             EnablePortMapping = false, PublishIrohAddress = false,
             LanChannelFactory = () => announcerSide,
         });
@@ -330,7 +330,7 @@ public sealed class LanDiscoveryTests
 
         await using var dialer = await PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], EnableNetworkWatch = false,
             EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
         });
         Task<PinholeConnection> incoming = node.AcceptAsync();
@@ -347,7 +347,7 @@ public sealed class LanDiscoveryTests
         int created = 0;
         await using var node = await PinholeNode.BindAsync(new PinholeOptions
         {
-            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], EnableNetworkWatch = false,
             EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
             LanChannelFactory = () => { Interlocked.Increment(ref created); return new DirectChannel(); },
         });
@@ -363,7 +363,7 @@ public sealed class LanDiscoveryTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             EnableNetworkWatch = false,
             EnablePortMapping = false,
             PublishIrohAddress = false,
@@ -373,7 +373,7 @@ public sealed class LanDiscoveryTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             EnableNetworkWatch = false,
             EnablePortMapping = false,
             PublishIrohAddress = false,

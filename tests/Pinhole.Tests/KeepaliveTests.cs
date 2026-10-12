@@ -14,7 +14,7 @@ public sealed class KeepaliveTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,

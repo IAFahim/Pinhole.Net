@@ -34,7 +34,7 @@ public sealed class BlobsTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = [],
+        IrohRelayUrls = [], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,
@@ -791,7 +791,7 @@ public sealed class BlobsTests
             {
                 StunServers = [],
                 Relays = [],
-                IrohRelayUrls = [relay.Url],
+                IrohRelayUrls = [relay.Url], DerpRelayUrls = [],
                 PublishIrohAddress = false,
                 EnableLanDiscovery = false,
                 EnableNetworkWatch = false,

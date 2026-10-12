@@ -1,4 +1,7 @@
 #nullable enable
+Pinhole.CandidateKind.DerpRelay = 5 -> Pinhole.CandidateKind
+Pinhole.PinholeOptions.DerpRelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>?
+Pinhole.PinholeOptions.DerpRelayUrls.init -> void
 Pinhole.PinholeOptions.EnableInterfaceCandidates.get -> bool
 Pinhole.PinholeOptions.EnableInterfaceCandidates.init -> void
 Pinhole.PinholeNode.InterfaceCandidates.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeInterfaceCandidates!>!

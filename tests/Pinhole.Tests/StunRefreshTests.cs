@@ -20,7 +20,7 @@ public sealed class StunRefreshTests
         {
             StunServers = [stun.LocalEndPoint],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -35,7 +35,7 @@ public sealed class StunRefreshTests
         {
             StunServers = [],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
@@ -140,7 +140,7 @@ public sealed class StunRefreshTests
         {
             StunServers = [stun.LocalEndPoint],
             Relays = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             StunRefreshInterval = TimeSpan.FromMilliseconds(50),
         }));
     }
