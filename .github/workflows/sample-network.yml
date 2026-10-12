@@ -5,6 +5,7 @@ name: Sample network
 on:
   push:
     branches: ['verify/**']
+    paths-ignore: ['docs/**']
   workflow_dispatch:
 
 concurrency:

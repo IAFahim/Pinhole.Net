@@ -3783,6 +3783,11 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static readonly object TraceGate = new();
 
+    internal static void TraceTransport(string message)
+    {
+        if (TraceEnabled) TraceLine(message);
+    }
+
     private static void TraceLine(string line)
     {
         // Console only for the explicit flag: a file-scoped trace (interop forensics) can be
