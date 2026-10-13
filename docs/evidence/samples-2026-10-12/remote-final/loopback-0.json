@@ -1,0 +1,107 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "tiny",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "5b2ecd03cd3c4b632bbb44fee237b016bc0094c48b8d838c4e9169ecba782de4",
+        "84928c8c06cef0d737a894e14ab678d530e05ecb4c8e795d3507619371367975",
+        "028187db5cf0903d1313aa309079404fd322a8f1e5fecae49d43719c6801bfec"
+      ],
+      "connections": [
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True"
+      ],
+      "seconds": 0.53
+    },
+    {
+      "case": "demo",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "fd487ebc317389f56e1eb8051aadb14782d2dd402a12378fa69b783428a0201e",
+        "036b6682a02f57ffdfbdb81c903b5b85c12dc54ba5ea9f48d639a20650617d62"
+      ],
+      "connections": [
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True"
+      ],
+      "seconds": 0.25
+    },
+    {
+      "case": "retry",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "1101d40d04a3633d43ec5190ab00e6befded9ff2205b6ba9b816ae023f0df12b",
+        "ecba07aabe44724dfe2fdb32de0019d34628d7417994e5380512089fa906c85e"
+      ],
+      "connections": [
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True"
+      ],
+      "seconds": 15.38
+    },
+    {
+      "case": "group",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "d98ee0fe3b6566aa4fd25213c0e42269af7cd4b46a95457c0f49da87182f1ea6"
+      ],
+      "connections": [
+        "Connected 98f8e8bb15e1faee: Direct Udp, encrypted=True, friends=1",
+        "Connected 98f8e8bb15e1faee: Direct Udp, encrypted=True, friends=1",
+        "Connected 0ae1e7a58b4439e0: Direct Udp, encrypted=True, friends=1",
+        "Connected 98f8e8bb15e1faee: Direct Udp, encrypted=True, friends=1"
+      ],
+      "seconds": 0.64
+    },
+    {
+      "case": "send",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "66c10a7a61c9708f7f9b08d051e0b79ce580e1ca8d782dacbc4515539f700d99",
+        "049c9cd7329245e3b43af157f953ee24795072b6f37a485477bae7296ca34813"
+      ],
+      "connections": [],
+      "seconds": 0.82
+    },
+    {
+      "case": "codeshare",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [
+        "peer connected via Direct/Udp, encrypted=True",
+        "connected via Direct/Udp, encrypted=True"
+      ],
+      "seconds": 0.28
+    },
+    {
+      "case": "mesh",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [
+        "27bac09703e7ca7fce0979e2fba1be77a9bc2aa7d8807f80bc02b13c7ded114f"
+      ],
+      "connections": [
+        "[guest] connected via Direct Udp, encrypted=True"
+      ],
+      "seconds": 27.06
+    },
+    {
+      "case": "errors",
+      "network": "loopback",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [],
+      "seconds": 0.04
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "tiny",
+      "network": "tcp",
+      "status": "PASS",
+      "invitationSha256": [
+        "4bcaa30ae593ce7793971762b25ea6f8f24e61382f5600d7626a0f62c402dbbd",
+        "065df00abd316a70dde10a80a2af87e53c0a38dacdcd064802abd45f16d1223f",
+        "57ef37db55f8958fc93cb1db62493c781e8abfdda4c024dd7779be1721081b37"
+      ],
+      "connections": [
+        "Connected: Direct Tcp, encrypted=True",
+        "Connected: Direct Tcp, encrypted=True",
+        "Connected: Direct Tcp, encrypted=True",
+        "Connected: Direct Tcp, encrypted=True"
+      ],
+      "seconds": 2.98
+    },
+    {
+      "case": "demo",
+      "network": "tcp",
+      "status": "PASS",
+      "invitationSha256": [
+        "993000d09e0ff237102ed0b3f96b36ed9e1c6d940c6710511c191162d1a73bb7",
+        "7908fa867786966f92820242951e3a3f347ed5dced061abd95ef22d363a32b2c"
+      ],
+      "connections": [
+        "Connected: Direct Tcp, encrypted=True",
+        "Connected: Direct Tcp, encrypted=True"
+      ],
+      "seconds": 1.49
+    },
+    {
+      "case": "group",
+      "network": "tcp",
+      "status": "PASS",
+      "invitationSha256": [
+        "48378d419a87428b410023da66feecbfd6e2dfdf078862075b53ae407b3f6bb8"
+      ],
+      "connections": [
+        "Connected 6b22044088ee43ea: Direct Tcp, encrypted=True, friends=1",
+        "Connected 6b22044088ee43ea: Direct Tcp, encrypted=True, friends=1",
+        "Connected 22a44e01adf70d56: Direct Tcp, encrypted=True, friends=1",
+        "Connected 6b22044088ee43ea: Direct Tcp, encrypted=True, friends=1"
+      ],
+      "seconds": 4.33
+    },
+    {
+      "case": "send",
+      "network": "tcp",
+      "status": "PASS",
+      "invitationSha256": [
+        "64278f325de9d03fe72b8c9c0e796dd12f42589c78ee4ca2b86d52829d6db885",
+        "b58e923d6a9a9950365f0718287d49f99ed514774ce9c29a577bd896526343d1"
+      ],
+      "connections": [],
+      "seconds": 4.55
+    },
+    {
+      "case": "codeshare",
+      "network": "tcp",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [
+        "peer connected via Direct/Tcp, encrypted=True",
+        "connected via Direct/Tcp, encrypted=True"
+      ],
+      "seconds": 1.51
+    }
+  ]
+}

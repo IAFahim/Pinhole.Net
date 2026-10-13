@@ -1,0 +1,87 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "tiny",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [
+        "c6ce85731ba8bfaaa7672af1df6ae7727e5cf2b35a77c4bd68fafb25a49e822d",
+        "96a600e99c282fcb4d416196a9d7aefcca9f75e644794be5ad4a0ea790ea19af",
+        "c6809b751116899b3f4aa5e464c5bc143e3bd2fea48be0f930f033e10b377f14"
+      ],
+      "connections": [
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True"
+      ],
+      "seconds": 11.55
+    },
+    {
+      "case": "demo",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [
+        "5feaa4e9f1c921b8d89abc263b0e669c93acb31e279ade74fadcbdf077431dbe",
+        "4fee708548553f7cf8bf54219b0046a05322af61b1ef1bc8b702edd790d7cb38"
+      ],
+      "connections": [
+        "Connected: Direct Udp, encrypted=True",
+        "Connected: Direct Udp, encrypted=True"
+      ],
+      "seconds": 5.72
+    },
+    {
+      "case": "group",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [
+        "752cbd1e67b9ea783130fc76b08fc8482d87e94f2524b3fbf8f5fcf15a931867"
+      ],
+      "connections": [
+        "Connected 0e6da6cf248f916c: Direct Udp, encrypted=True, friends=1",
+        "Connected 0e6da6cf248f916c: Direct Udp, encrypted=True, friends=1",
+        "Connected ac342c83231a8ac7: Direct Udp, encrypted=True, friends=1",
+        "Connected 0e6da6cf248f916c: Direct Udp, encrypted=True, friends=1"
+      ],
+      "seconds": 11.65
+    },
+    {
+      "case": "send",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [
+        "f50880bd8405773e0f82d41bdf059b8bc5e866bb5c5256e4143b41cad9197c53",
+        "8f2ba760ad374ae6e1926cd2912e15db26c18ada615d3c13dfb74ac752b176f6"
+      ],
+      "connections": [],
+      "seconds": 14.66
+    },
+    {
+      "case": "codeshare",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [
+        "peer connected via Direct/Udp, encrypted=True",
+        "connected via Direct/Udp, encrypted=True"
+      ],
+      "seconds": 6.34
+    },
+    {
+      "case": "mesh",
+      "network": "auto",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [],
+      "seconds": 30.07
+    }
+  ],
+  "initialHarnessFailures": [
+    "group"
+  ],
+  "rerunCases": [
+    "group"
+  ]
+}

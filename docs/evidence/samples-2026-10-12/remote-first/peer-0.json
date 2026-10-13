@@ -1,0 +1,87 @@
+{
+  "status": "FAIL",
+  "index": 0,
+  "os": "Linux",
+  "commit": "d24407504b299cc42ed3124b081e379dcfaf4a93",
+  "machineSha256": "c278f5569b1072258c3e6b724dc2cdf19ce3d90cb7c151458c15414d2e7b492d",
+  "cases": [
+    {
+      "case": "chat",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [
+        "a9bfd7963dca3bda87e182f849032fb7b8a85bdba883d4718a524ff555874e1b"
+      ],
+      "seconds": 15.52
+    },
+    {
+      "case": "group",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected d89413b2f2882ae9: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "e76d1115131a98b4e984e616eebc97620e4eb9bf9b76da741b1fe7c9aca85178"
+      ],
+      "seconds": 48.61
+    },
+    {
+      "case": "send",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [],
+      "invitationSha256": [
+        "6ca90610370366ce1ea13e103ce9d0a8c2da7c17839ed6cb47a9aaa95499c9b3"
+      ],
+      "seconds": 12.11
+    },
+    {
+      "case": "chat",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [
+        "550dea14d777dd68f22a7d5d4a5b41148597d50228766bae3745914215709706"
+      ],
+      "seconds": 9.46
+    },
+    {
+      "case": "group",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected ba7be59613568ca3: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "f41c35d17ff1d0c44d71e59c204975e1e44713fc5d8d7ee882f7f087eecea740"
+      ],
+      "seconds": 38.75
+    },
+    {
+      "case": "send",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [],
+      "invitationSha256": [
+        "e7c1011f2eec51a59c185edf6ee3fa79cfbf857ec0f982ea98fc53e7bca64de0"
+      ],
+      "seconds": 9.36
+    },
+    {
+      "status": "FAIL",
+      "error": "Pinhole.Tiny: missing '^Connected(?: [0-9a-f]{16})?:' (exit=None)\nStarting Pinhole.Tiny...\nShare this invitation: <invitation redacted>\nPaste your friend's full pinhole1: invitation and press Enter, or leave this window open for them to join. /quit exits."
+    }
+  ]
+}

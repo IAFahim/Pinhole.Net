@@ -1,0 +1,47 @@
+{
+  "capturedAtUtc": "2026-10-13T08:45:26.96111+00:00",
+  "framework": ".NET 10.0.12",
+  "scope": "same-host peers, public DERP TLS/WebSockets, direct UDP/TCP and all other relays disabled; no NAT or phone claim",
+  "results": [
+    {
+      "relay": "https://tc304a.ipn.dev/",
+      "status": "PASS",
+      "encrypted": true,
+      "path": "DERP",
+      "connectMs": 491.04,
+      "echoes": 3,
+      "rttP50Ms": 318.35,
+      "listenerTicketSha256": "7a74da77c307232f02be99079a126dfa671f48a8ad180e9756e04a3e7ef6208d"
+    },
+    {
+      "relay": "https://tc303a.ipn.dev/",
+      "status": "PASS",
+      "encrypted": true,
+      "path": "DERP",
+      "connectMs": 279.53,
+      "echoes": 3,
+      "rttP50Ms": 186.3,
+      "listenerTicketSha256": "949eb6fa2dcf55845714b5226f9c864d46df8bb0d635bd394a63aeba7de7e51f"
+    },
+    {
+      "relay": "https://tc301a.ipn.dev/",
+      "status": "PASS",
+      "encrypted": true,
+      "path": "DERP",
+      "connectMs": 24.28,
+      "echoes": 3,
+      "rttP50Ms": 15.58,
+      "listenerTicketSha256": "b36e8f11fa4aac58629aaa8ff59807693a11fbffe17819d7e27b052681e23ae5"
+    },
+    {
+      "relay": "https://tc302a.ipn.dev/",
+      "status": "PASS",
+      "encrypted": true,
+      "path": "DERP",
+      "connectMs": 195.52,
+      "echoes": 3,
+      "rttP50Ms": 130.25,
+      "listenerTicketSha256": "075d3f8adca9e88a1b966f61a8b906941e9f0c85f708a703b99994b0f69f39a2"
+    }
+  ]
+}

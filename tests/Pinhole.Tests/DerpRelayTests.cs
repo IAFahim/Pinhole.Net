@@ -199,6 +199,10 @@ public sealed class DerpRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
+        // Drain the authenticated handshake lane before recording counters;
+        // a legitimate late punch is not a spoofed relay delivery.
+        await Exchange(atA, atB, "prime the listener's authenticated relay lane");
+        await Exchange(atB, atA, "prime the dialer's authenticated relay lane");
         var stranger = new NodeIdentity();
         using var attacker = new DerpRelay(relay.Url, stranger, relay.ConnectAsync);
         await attacker.StartAsync().WaitAsync(Timeout);

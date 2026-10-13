@@ -1,0 +1,89 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "tiny",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [
+        "91a17c600d09bc12d11eb476446704012ef11cda8039b2fd87c7185e5fda44ef",
+        "186b4cd27e26621d964abcdda930bb2fd4e1c8ec768988c523cb4438f074bf58",
+        "8c55ad21fb38ab5c182906538f9828a11d854887445016f6ee603bc8ba924e69"
+      ],
+      "connections": [
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True",
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True",
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True",
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "seconds": 2.33
+    },
+    {
+      "case": "demo",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [
+        "0f2871f1e469c58b830d02e8a61ad47c5b74bddbbd1c4d41aaa8309287846b04",
+        "d8952da7bc1758c22f63a4bc7b54afc6e78d7c967cbe8a1729bf9b5d6fd6ec65"
+      ],
+      "connections": [
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True",
+        "Connected: Relay aps1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "seconds": 1.13
+    },
+    {
+      "case": "group",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [
+        "8153c11fca9fa84613117163bd093ff1093d7f028f11afe9a783e5bc07986030"
+      ],
+      "connections": [
+        "Connected 192d09a4fb686817: Relay aps1-1.relay.n0.iroh.link, encrypted=True, friends=1",
+        "Connected 192d09a4fb686817: Relay aps1-1.relay.n0.iroh.link, encrypted=True, friends=1",
+        "Connected 565ffc660ba4a677: Relay aps1-1.relay.n0.iroh.link, encrypted=True, friends=1",
+        "Connected 192d09a4fb686817: Relay aps1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "seconds": 2.6
+    },
+    {
+      "case": "send",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [
+        "3d7fac1a0a16ff8762f7bb2433fce05e157c3b950886f2b526fa4aa9f9d068b6",
+        "8ebcdb52d29609dd69f6e096aacbc9180dff184dfcfa0face7a024f63cb9a87b"
+      ],
+      "connections": [],
+      "seconds": 3.9
+    },
+    {
+      "case": "codeshare",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [
+        "peer connected via Relay/, encrypted=True",
+        "connected via Relay/, encrypted=True"
+      ],
+      "seconds": 1.12
+    },
+    {
+      "case": "mesh",
+      "network": "iroh",
+      "status": "PASS",
+      "invitationSha256": [
+        "99ec97b24a88142b9a3983898c3630e57321e6b817047f41a26ac31fd35bfca2"
+      ],
+      "connections": [
+        "[guest] connected via Relay aps1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "seconds": 28.72
+    }
+  ],
+  "initialHarnessFailures": [],
+  "rerunCases": [
+    "mesh"
+  ]
+}

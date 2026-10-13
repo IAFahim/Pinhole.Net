@@ -42,8 +42,7 @@ public sealed class DerpTlsTests
     }
 
     [Theory]
-    [InlineData(SslProtocols.Tls12)]
-    [InlineData(SslProtocols.Tls13)]
+    [MemberData(nameof(NativeServerProtocols))]
     public async Task ManagedTls_ConcurrentReadAndWrite_HandlesRecordsAndCanceledReads(SslProtocols version)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
@@ -71,8 +70,20 @@ public sealed class DerpTlsTests
             await tls.WriteAsync(response.AsMemory(0, 1), deadline.Token);
         }, deadline.Token);
 
-        await using Stream client = await DerpTls.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
-            deadline.Token, trusted);
+        Stream connection;
+        try
+        {
+            connection = await DerpTls.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
+                deadline.Token, trusted);
+        }
+        catch
+        {
+            // Report a server fixture failure instead of hiding it behind the
+            // client's EOF/handshake error.
+            await server;
+            throw;
+        }
+        await using Stream client = connection;
         byte[] received = new byte[response.Length];
         Task pendingRead = client.ReadExactlyAsync(received, deadline.Token).AsTask();
         await client.WriteAsync(request, deadline.Token);
@@ -85,6 +96,18 @@ public sealed class DerpTlsTests
         await client.ReadExactlyAsync(received.AsMemory(0, 1), deadline.Token);
         Assert.Equal(response[0], received[0]);
         await server;
+    }
+
+    public static IEnumerable<object[]> NativeServerProtocols
+    {
+        get
+        {
+            yield return [SslProtocols.Tls12];
+            // .NET's macOS SslStream backend cannot serve TLS 1.3. The managed
+            // client supports it; the independent TLS 1.3 server test runs on
+            // Windows/Linux and the public Go DERP fleet exercises it too.
+            if (!OperatingSystem.IsMacOS()) yield return [SslProtocols.Tls13];
+        }
     }
 
     private static byte[] Metadata()
@@ -129,7 +152,19 @@ public sealed class DerpTlsTests
                 new OidCollection { new Oid(serverUsage ? "1.3.6.1.5.5.7.3.1" : "1.3.6.1.5.5.7.3.2") }, true));
             using var publicLeaf = request.Create(Root, DateTimeOffset.UtcNow.AddHours(-1),
                 DateTimeOffset.UtcNow.AddHours(1), RandomNumberGenerator.GetBytes(16));
-            return publicLeaf.CopyWithPrivateKey(key);
+            using var withKey = publicLeaf.CopyWithPrivateKey(key);
+            // Schannel server credentials need an imported private key, rather
+            // than the ephemeral key attached by CopyWithPrivateKey.
+            byte[] encoded = withKey.Export(X509ContentType.Pkcs12);
+            try
+            {
+#if NET9_0_OR_GREATER
+                return X509CertificateLoader.LoadPkcs12(encoded, null);
+#else
+                return new X509Certificate2(encoded);
+#endif
+            }
+            finally { CryptographicOperations.ZeroMemory(encoded); }
         }
 
         internal X509Chain Trust()
