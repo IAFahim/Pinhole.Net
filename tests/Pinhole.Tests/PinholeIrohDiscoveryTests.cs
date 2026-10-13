@@ -9,7 +9,7 @@ public sealed class PinholeIrohDiscoveryTests
 {
     private static PinholeOptions Options(HttpMessageHandler handler) => new()
     {
-        Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], IrohRelayUrls = [],
+        Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [],
         EnableNetworkWatch = false, EnablePortMapping = false, StunRefreshInterval = TimeSpan.Zero,
         EnableLanDiscovery = false,
         IdentityKeySeed = RandomNumberGenerator.GetBytes(32), ReceiveBufferCapacity = 32,
@@ -43,6 +43,34 @@ public sealed class PinholeIrohDiscoveryTests
         IrohAddress record = IrohDiscovery.ParsePayload(address.Key, payload, out _);
         Assert.Contains(new IPEndPoint(IPAddress.Loopback, listener.LocalPort), record.DirectAddresses);
         Assert.Equal(PinholeNode.IrohProtocolPrefix + Convert.ToHexString(listener.StaticPublicKey!).ToLowerInvariant(), record.UserData);
+    }
+
+    [Fact]
+    public async Task SignedEndpointIdDiscovery_CanConnectThroughDerp_WithIrohAndDirectPathsDisabled()
+    {
+        using var service = new MemoryPkarr();
+        using var relay = new InMemoryDerpRelay();
+        PinholeOptions options = Options(service) with
+        {
+            DerpRelayUrls = [relay.Url], DerpWebSocketFactory = relay.ConnectAsync,
+            EnableDirectUdp = false, EnableTcpTransport = false, PublishDirectIrohAddresses = false,
+        };
+        await using var listener = await PinholeNode.BindAsync(options);
+        await using var dialer = await PinholeNode.BindAsync(options with
+            { PublishIrohAddress = false, IdentityKeySeed = RandomNumberGenerator.GetBytes(32) });
+        var record = IrohDiscovery.ParsePayload(listener.IrohAddress.Key, service.Records.Values.Single(), out _);
+        Assert.Empty(record.DirectAddresses);
+        Assert.Empty(record.RelayUrls);
+        Assert.Equal(relay.Url, Assert.Single(record.DerpRelayUrls));
+        Task<PinholeConnection> incoming = listener.AcceptAsync();
+        using PinholeConnection outgoing = await dialer.ConnectIrohAsync(listener.IrohAddress.EndpointId);
+        using PinholeConnection accepted = await incoming.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(outgoing.IsEncrypted);
+        Assert.Equal(PathKind.Relay, outgoing.Path.Kind);
+        Assert.Equal(relay.Url, outgoing.Path.RelayUrl);
+        outgoing.Send("signed endpoint lookup over DERP"u8);
+        Assert.Equal("signed endpoint lookup over DERP"u8.ToArray(),
+            (await accepted.ReceiveAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)))!.Value.ToArray());
     }
 
     [Fact]
@@ -88,6 +116,31 @@ public sealed class PinholeIrohDiscoveryTests
         Assert.Equal(address.RelayUrls, record.RelayUrls);
         Assert.True(record.DirectAddresses.Count < address.DirectAddresses.Count);
         Assert.All(routable, ep => Assert.Contains(ep, record.DirectAddresses));
+    }
+
+    [Fact]
+    public async Task BothDefaultRelayFleets_FitSignedDiscovery_WhenDirectAddressesOverflow()
+    {
+        using var service = new MemoryPkarr();
+        using var http = new HttpClient(service, disposeHandler: false);
+        var identity = new RelayIdentity();
+        var discovery = new IrohDiscovery(http, new Uri("http://127.0.0.1/pkarr"));
+        IPEndPoint[] direct = Enumerable.Range(1, 24)
+            .Select(i => new IPEndPoint(IPAddress.Parse($"2001:db8:2222:3333:4444:5555:6666:{i:x}"), 65535)).ToArray();
+        var address = new IrohAddress(Convert.ToHexString(identity.PublicKey), direct, PinholeOptions.PublicIrohRelays)
+        {
+            UserData = PinholeNode.IrohProtocolPrefix + new string('a', 64),
+            DerpRelayUrls = PinholeOptions.PublicDerpRelays,
+        };
+        await discovery.PublishAsync(address, identity, CancellationToken.None);
+        byte[] payload = service.Records.Values.Single();
+        Assert.InRange(payload.Length, 84, IrohDiscovery.MaxPayloadSize);
+        var record = IrohDiscovery.ParsePayload(identity.PublicKey, payload, out _);
+        Assert.Equal(address.RelayUrls, record.RelayUrls);
+        Assert.Equal(address.DerpRelayUrls, record.DerpRelayUrls);
+        Assert.Equal(address.UserData, record.UserData);
+        Assert.NotEmpty(record.DirectAddresses);
+        Assert.True(record.DirectAddresses.Count < direct.Length);
     }
 
     [Fact]

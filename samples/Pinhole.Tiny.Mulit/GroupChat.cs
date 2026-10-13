@@ -62,11 +62,11 @@ internal sealed class GroupChat(PinholeNode node)
     }
 
     private void PrintInvitation() => Console.WriteLine(
-        $"Share this invitation: {node.ConnectionString.Replace('-', '+').Replace('_', '/')}");
+        $"Share this invitation: {SampleNetwork.ShareInvitation(node.ConnectionString)}");
 
     private async Task JoinAsync(string invitation, CancellationToken ct)
     {
-        string code = invitation.Trim().Trim('"', '\'', '`').Replace('+', '-').Replace('/', '_');
+        string code = SampleNetwork.NormalizeInvitation(invitation);
         if (!ConnectionString.TryParse(code, out _))
         { Console.WriteLine("Invalid invitation: copy the full fresh pinhole1: string as plain text. Still listening."); return; }
         try { Attach(await node.ConnectAsync(code, ct), ct); }
@@ -106,7 +106,7 @@ internal sealed class GroupChat(PinholeNode node)
             Console.WriteLine($"Already connected: {peer.PeerId:x16}");
             return;
         }
-        Console.WriteLine($"Connected {peer.PeerId:x16}: {peer.Path.Kind} {peer.Path.Transport}, encrypted={peer.IsEncrypted}, friends={_peers.Count}");
+        Console.WriteLine($"Connected {peer.PeerId:x16}: {SampleNetwork.Describe(peer)}, encrypted={peer.IsEncrypted}, friends={_peers.Count}");
         Task reader = Task.Run(() => ReceiveAsync(peer, ct));
         _readers.TryAdd(reader, 0);
         _ = reader.ContinueWith(completed => _readers.TryRemove(completed, out _),

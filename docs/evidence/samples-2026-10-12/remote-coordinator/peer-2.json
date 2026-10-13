@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "index": 2,
+  "os": "Darwin",
+  "commit": "bf45e2c0b5e4dbc9363f2f17108d752e5a46161f",
+  "machineSha256": "f9013a8cf79e4f30377c364df47625ca17d01adeb18a320def1e0083a988334b",
+  "cases": [
+    {
+      "case": "cloudflare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "observer",
+      "connections": []
+    },
+    {
+      "case": "codeshare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "observer",
+      "connections": []
+    }
+  ]
+}

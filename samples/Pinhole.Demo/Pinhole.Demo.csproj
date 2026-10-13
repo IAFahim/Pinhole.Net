@@ -16,6 +16,9 @@
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Turn/Pinhole.Turn.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Providers/Pinhole.Providers.csproj" />
+		<Compile Include="../ChatConsole.cs" Link="ChatConsole.cs" />
+		<Compile Include="../InvitationChat.cs" Link="InvitationChat.cs" />
+		<Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
 	</ItemGroup>
 
 </Project>

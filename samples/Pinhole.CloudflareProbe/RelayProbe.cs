@@ -93,7 +93,7 @@ internal static class RelayProbe
     {
         Bind = new IPEndPoint(IPAddress.Any, 0),
         Relays = [new TurnServerConfig(server, credentials.Username, credentials.Credential)],
-        StunServers = [], IrohRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [],
+        StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [],
         PublishIrohAddress = false, EnableDirectUdp = false, EnableTcpTransport = false,
         EnableInterfaceCandidates = false, EnablePortMapping = false, EnablePortPrediction = false,
         AdvertiseLinkLocal = false, EnableNetworkWatch = false, EnableLanDiscovery = false,

@@ -2,7 +2,7 @@
 
 Run this sample on **every PC**. It accepts multiple friends concurrently and
 keeps listening when someone disconnects. No Cloudflare account is needed: each
-connection uses Pinhole's direct UDP/TCP or public iroh relay fallback.
+connection uses Pinhole's direct UDP/TCP or public iroh/Tailcat DERP relay fallback.
 
 From the repository root, with the .NET 10 SDK installed:
 
@@ -62,3 +62,7 @@ dotnet publish samples/Pinhole.Tiny.Mulit -c Release -r win-x64 --self-contained
 Everyone launches `Pinhole.Tiny.Mulit.exe`, then pastes the shared host's
 invitation into its prompt. Use `linux-x64` or a macOS runtime ID when publishing
 for another platform.
+
+Rebuild every participant's executable when updating the relay support or group
+format. Existing downloaded executables do not update themselves. See the
+[verification guide](../README.md) for the actual process checks and path modes.

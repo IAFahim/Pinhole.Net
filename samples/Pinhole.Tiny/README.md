@@ -1,6 +1,6 @@
 # Two PCs, plain Pinhole
 
-This sample uses Google STUN and Pinhole's public iroh HTTPS relays. It needs no
+This sample uses free STUN and Pinhole's public iroh and Tailcat DERP HTTPS relays. It needs no
 Cloudflare Worker, Cloudflare TURN app, API token, player account or VM. Direct
 UDP/TCP and public relay fallback are handled by Pinhole.
 
@@ -26,7 +26,8 @@ apps cannot consume underscores as formatting. This console normalizes that
 spelling to the SDK's base64url format before connecting and still accepts older
 invitations. Update Tiny on both PCs before exchanging the new spelling.
 Send invitations as plain text or in a code block; copy the entire string without
-editing it. An invalid paste leaves the app running so you can paste again.
+editing it. An invalid paste or timed-out join leaves the app listening so you can
+paste a fresh invitation or let your friend join your invitation instead.
 
 **Alternatively, PC B can supply the invitation at startup:**
 
@@ -54,3 +55,6 @@ a ticket from a stopped process cannot connect.
 
 For a nine-character code and your Cloudflare relay instead, use
 [Pinhole.CloudflareChat](../Pinhole.CloudflareChat/README.md).
+
+See [sample checks and transport diagnostics](../README.md) for repeatable
+process checks and how to force just iroh or Tailcat when investigating a network.

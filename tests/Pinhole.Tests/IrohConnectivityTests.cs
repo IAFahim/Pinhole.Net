@@ -22,7 +22,7 @@ public sealed class IrohConnectivityTests
         SecretKeySeed = seed,
         Network = new PinholeOptions
         {
-            Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], Relays = [], IrohRelayUrls = [],
+            Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false, StunRefreshInterval = TimeSpan.Zero,
@@ -196,7 +196,7 @@ public sealed class IrohConnectivityTests
         using var service = new MemoryPkarr();
         await using var transport = await IrohTransport.BindAsync(new IrohTransportOptions
         {
-            Network = Offline().Network with { IrohRelayUrls = [relay.Url] },
+            Network = Offline().Network with { IrohRelayUrls = [relay.Url], DerpRelayUrls = [] },
             DiscoveryHandler = service, PublishDirectAddresses = false,
         });
         IrohAddress record = IrohDiscovery.ParsePayload(Convert.FromHexString(transport.EndpointId), service.Payload!, out _);

@@ -1,0 +1,81 @@
+{
+  "status": "FAIL",
+  "index": 1,
+  "os": "Windows",
+  "commit": "d24407504b299cc42ed3124b081e379dcfaf4a93",
+  "machineSha256": "cc361fff7d7c21a37bb17c10bb8b00f9a693eb10eb8b96a4cb86ded0f8e343b6",
+  "cases": [
+    {
+      "case": "chat",
+      "network": "auto",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [],
+      "seconds": 15.49
+    },
+    {
+      "case": "group",
+      "network": "auto",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected aedddfe465d7776d: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1",
+        "Connected aedddfe465d7776d: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "f502db283bc5643edc9990bc8b9f0f49ad164d66149faf6cc64af66c43ee41d9"
+      ],
+      "seconds": 50.89
+    },
+    {
+      "case": "send",
+      "network": "auto",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 10.49
+    },
+    {
+      "case": "chat",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [],
+      "seconds": 8.83
+    },
+    {
+      "case": "group",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected 037bdd0b2b53a53e: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1",
+        "Connected 037bdd0b2b53a53e: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "0342915c8740cc681ce78286d7fd95b6905780a35370c2f782db552c85a1f05b"
+      ],
+      "seconds": 40.88
+    },
+    {
+      "case": "send",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 7.08
+    },
+    {
+      "status": "FAIL",
+      "error": "Pinhole.Demo: missing '^Connected(?: [0-9a-f]{16})?:' (exit=None)\nStarting Pinhole.Demo...\nShare this invitation: <invitation redacted>\nPaste your friend's full pinhole1: invitation and press Enter, or leave this window open for them to join. /quit exits.\nNo relay connected yet. On different networks, both PCs may need to paste each other's fresh invitations.\nConnecting to your friend...\nCould not connect: Connection timed out. Keep both apps running and use your friend's current connection string. The peer may be offline, or a relay path could not be established. Still listening; paste a fresh invitation to retry."
+    }
+  ]
+}

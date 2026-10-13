@@ -187,7 +187,11 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         IrohAddress address = IrohAddress;
         var record = new IrohAddress(address.EndpointId,
             _options.PublishDirectIrohAddresses ? address.DirectAddresses : [], address.RelayUrls)
-        { UserData = IrohProtocolPrefix + Convert.ToHexString(pin).ToLowerInvariant() };
+        {
+            UserData = IrohProtocolPrefix + Convert.ToHexString(pin).ToLowerInvariant(),
+            DerpRelayUrls = _engine.LocalCandidatesSnapshot().Where(c => c.Kind == CandidateKind.DerpRelay)
+                .Select(c => c.RelayUrl!).Distinct().ToArray(),
+        };
         return _irohDiscovery.PublishAsync(record, _engine.EndpointRelayIdentity!, ct);
     }
 
@@ -231,6 +235,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         catch (FormatException ex) { throw new InvalidDataException("invalid signed Pinhole session key", ex); }
         var candidates = ticket.RelayUrls.Concat(record.RelayUrls).Distinct()
             .Select(url => new PinholeCandidate(CandidateKind.IrohRelay, new IPEndPoint(IPAddress.None, 0), RelayUrl: url, RelayKey: record.Key))
+            .Concat(record.DerpRelayUrls.Select(url => new PinholeCandidate(CandidateKind.DerpRelay,
+                new IPEndPoint(IPAddress.None, 0), RelayUrl: url, RelayKey: pin)))
             .Concat(ticket.DirectAddresses.Concat(record.DirectAddresses).Distinct()
                 .Select(ip => new PinholeCandidate(CandidateKind.Direct, ip)))
             .Take(Pinhole.ConnectionString.MaxCandidates).ToArray();
@@ -275,7 +281,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         ? _natHint
         : _engine.MappedEndpointSnapshot() is not null ? NatHint.Cone : _engine.ObservedNatHint;
 
-    /// <summary>Whether this node currently has a live iroh or TURN relay available.
+    /// <summary>Whether this node currently has a live iroh, DERP, or TURN relay available.
     /// This can change as relays disconnect or reconnect; it does not guarantee a peer is reachable.</summary>
     public bool HasRelay => _engine.HasRelay;
 
@@ -362,7 +368,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
     }
 
     private static bool PeerHasRelay(ConnectionString cs) =>
-        cs.Candidates.Any(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay);
+        cs.Candidates.Any(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay);
 
     private async Task<PinholeConnection> ConnectPeerAsync(ConnectionString cs, CancellationToken ct)
     {

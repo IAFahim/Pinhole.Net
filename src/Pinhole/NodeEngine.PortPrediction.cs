@@ -43,7 +43,7 @@ internal sealed partial class NodeEngine
         && c.Crypto is { PeerConfirmed: true } && c.PeerCandidatesReceived
         && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Degraded
         && !c.Connected.Task.IsFaulted && !c.Connected.Task.IsCanceled
-        && (c.Iroh is { IsAlive: true } && c.IrohConfirmed || c.RelayReady);
+        && (c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed || c.RelayReady);
 
     private void MaybeStartPortPrediction(ConnState c)
     {
@@ -76,7 +76,7 @@ internal sealed partial class NodeEngine
         {
             // Coordination must not create additional primary-socket destination
             // mappings after sampling. It stays on an already authenticated relay leg.
-            if (c.Iroh is { IsAlive: true } relay && c.IrohConfirmed && c.IrohPeerKey is { } key)
+            if (c.PacketRelay is { IsAlive: true } relay && c.PacketRelayConfirmed && c.PacketRelayPeerKey is { } key)
                 SendOnArrival(new Arrival(relay, key), frame[..length]);
             else if (c.RelayReady && c.RelayRemote is { } remote)
                 SendOnArrival(new Arrival(remote), frame[..length]);

@@ -15,4 +15,7 @@
 		<ProjectReference Include="..\..\src\Pinhole\Pinhole.csproj" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
+	</ItemGroup>
 </Project>

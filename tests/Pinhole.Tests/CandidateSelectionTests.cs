@@ -25,9 +25,12 @@ public sealed class CandidateSelectionTests
         for (int i = 0; i < 10; i++) input.Add(new(CandidateKind.Relay, Endpoint($"198.51.100.{i + 1}", 50000), Endpoint($"198.51.100.{i + 1}", 3478), "user", "password"));
         var iroh = new PinholeCandidate(CandidateKind.IrohRelay, new(IPAddress.None, 0), RelayUrl: new("https://relay.example.test/"), RelayKey: new byte[32]);
         input.Add(iroh);
+        var derp = new PinholeCandidate(CandidateKind.DerpRelay, new(IPAddress.None, 0), RelayUrl: new("https://derp.example.test/"), RelayKey: new byte[32]);
+        input.Add(derp);
         var selected = CandidateSelection.Published(input, mapped, tcp, sources);
         Assert.Equal(32, selected.Length);
         Assert.Contains(iroh, selected); Assert.Contains(selected, c => c.Kind == CandidateKind.Relay);
+        Assert.Contains(derp, selected);
         Assert.Contains(selected, c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(mapped));
         Assert.Contains(selected, c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(tcp));
         Assert.Contains(selected, c => c.Address.Address.Equals(IPAddress.Parse("2001:db8::20")));

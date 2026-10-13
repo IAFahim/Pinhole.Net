@@ -1,0 +1,872 @@
+{
+  "capturedAtUtc": "2026-10-13T08:14:10.9666363+00:00",
+  "framework": ".NET 10.0.12",
+  "os": "Microsoft Windows 10.0.26100",
+  "scope": "OS TLS only; normal certificate and hostname validation; no WebSocket/DERP authentication or peer connection",
+  "results": [
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "FAIL",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": null,
+      "cipher": null,
+      "certificateValidationReached": false,
+      "policyErrors": null,
+      "certificates": null,
+      "chainStatus": null,
+      "errors": [
+        {
+          "type": "AuthenticationException",
+          "message": "Authentication failed, see inner exception.",
+          "hresult": "0x80131501",
+          "nativeError": null
+        },
+        {
+          "type": "Win32Exception",
+          "message": "The token supplied to the function is invalid",
+          "hresult": "0x80004005",
+          "nativeError": "0x80090308"
+        }
+      ]
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:140.82.112.4]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "C90F26F0FB1B4018B22227519B5CA2B53E2CA5B3BE5CF18EFE1BEF47380C5383"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    }
+  ]
+}

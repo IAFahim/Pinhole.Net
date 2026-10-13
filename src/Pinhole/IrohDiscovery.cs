@@ -12,6 +12,7 @@ namespace Pinhole;
 internal sealed class IrohDiscovery
 {
     internal const int MaxPayloadSize = 1072;
+    private const string DerpTxtPrefix = "pinhole-derp=";
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly HttpClient _http;
     private readonly Uri _relay;
@@ -75,7 +76,7 @@ internal sealed class IrohDiscovery
         for (int count = direct.Length; ; count--)
         {
             var record = new IrohAddress(address.EndpointId, direct.Take(count).ToArray(), address.RelayUrls)
-            { UserData = address.UserData };
+            { UserData = address.UserData, DerpRelayUrls = address.DerpRelayUrls };
             try { return CreatePayload(record, identity, timestamp); }
             catch (InvalidDataException) when (count > 0) { }
         }
@@ -101,6 +102,7 @@ internal sealed class IrohDiscovery
     {
         if (!address.Key.AsSpan().SequenceEqual(identity.PublicKey)) throw new ArgumentException("the publishing key does not match the endpoint ID");
         List<string> values = address.RelayUrls.Select(x => "relay=" + x.AbsoluteUri).ToList();
+        values.AddRange(address.DerpRelayUrls.Select(x => DerpTxtPrefix + x.AbsoluteUri));
         // Native EndpointInfo parses one TransportAddr per TXT value. A grouped
         // space-separated value verifies cryptographically but loses every address.
         values.AddRange(address.DirectAddresses.Select(x => "addr=" + x));
@@ -180,6 +182,7 @@ internal sealed class IrohDiscovery
         string owner = "_iroh." + IrohEncoding.Encode32(key, zbase: true);
         List<IPEndPoint> direct = [];
         List<Uri> relays = [];
+        List<Uri> derpRelays = [];
         string? userData = null;
         foreach (string value in ReadTxt(dns, owner))
         {
@@ -188,6 +191,14 @@ internal sealed class IrohDiscovery
                 if (!Uri.TryCreate(value[6..], UriKind.Absolute, out Uri? relay)) throw new InvalidDataException("invalid discovered iroh relay URL");
                 try { relays.Add(IrohAddress.ValidateRelay(relay)); }
                 catch (ArgumentException ex) { throw new InvalidDataException("unsafe discovered iroh relay URL", ex); }
+            }
+            else if (value.StartsWith(DerpTxtPrefix, StringComparison.Ordinal))
+            {
+                if (!Uri.TryCreate(value[DerpTxtPrefix.Length..], UriKind.Absolute, out Uri? relay)
+                    || relay.AbsoluteUri.Length > 64 || relay.AbsoluteUri.Any(ch => ch > 127))
+                    throw new InvalidDataException("invalid discovered DERP relay URL");
+                try { derpRelays.Add(IrohAddress.ValidateRelay(relay)); }
+                catch (ArgumentException ex) { throw new InvalidDataException("unsafe discovered DERP relay URL", ex); }
             }
             else if (value.StartsWith("addr=", StringComparison.Ordinal))
             {
@@ -204,9 +215,9 @@ internal sealed class IrohDiscovery
                     throw new InvalidDataException("invalid or duplicate iroh user data");
                 userData = value[10..];
             }
-            if (direct.Count + relays.Count > IrohAddress.MaxAddresses) throw new InvalidDataException("too many discovered iroh paths");
+            if (direct.Count + relays.Count + derpRelays.Count > IrohAddress.MaxAddresses) throw new InvalidDataException("too many discovered iroh paths");
         }
-        return new IrohAddress(Convert.ToHexString(key), direct, relays) { UserData = userData };
+        return new IrohAddress(Convert.ToHexString(key), direct, relays) { UserData = userData, DerpRelayUrls = derpRelays.Distinct().ToArray() };
     }
 
     private static List<string> ReadTxt(ReadOnlySpan<byte> dns, string expectedOwner)

@@ -19,7 +19,7 @@ public class CryptoTests
         var o = new PinholeOptions
         {
             StunServers = [],
-            IrohRelayUrls = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
             EnablePortMapping = false,
             PublishIrohAddress = false,
             EnableLanDiscovery = false,

@@ -17,7 +17,7 @@ PinholeOptions options = new()
 {
     StunServers = [],
     Relays = [],
-    IrohRelayUrls = [],
+    IrohRelayUrls = [], DerpRelayUrls = [],
     PublishIrohAddress = false,
     EnableLanDiscovery = false,
     EnableNetworkWatch = false,

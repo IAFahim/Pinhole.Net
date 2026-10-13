@@ -11,7 +11,7 @@ internal static class ChatConsole
         if (Console.InputEncoding.CodePage != Encoding.UTF8.CodePage)
             Console.InputEncoding = Encoding.UTF8;
         Console.OutputEncoding = Encoding.UTF8;
-        Console.WriteLine($"Connected: {peer.Path.Kind} {peer.Path.Transport}, encrypted={peer.IsEncrypted}");
+        Console.WriteLine($"Connected: {SampleNetwork.Describe(peer)}, encrypted={peer.IsEncrypted}");
         Console.WriteLine("Type a message and press Enter. /quit or Ctrl+C exits.");
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         Task receiving = ReceiveAsync(peer, stop.Token);
@@ -28,7 +28,12 @@ internal static class ChatConsole
                 if (line.Length == 0) continue;
                 if (Encoding.UTF8.GetByteCount(line) > PinholeConnection.MaxPayload)
                 { Console.WriteLine($"Message too long: maximum {PinholeConnection.MaxPayload} UTF-8 bytes."); continue; }
-                if (!stop.IsCancellationRequested) peer.Send(Encoding.UTF8.GetBytes(line));
+                if (!stop.IsCancellationRequested)
+                {
+                    try { peer.Send(Encoding.UTF8.GetBytes(line)); }
+                    catch (Exception e) when (e is InvalidOperationException or System.Net.Sockets.SocketException)
+                    { Console.WriteLine($"Message could not be sent: {e.Message}"); }
+                }
             }
         });
         try { await await Task.WhenAny(sending, receiving); }

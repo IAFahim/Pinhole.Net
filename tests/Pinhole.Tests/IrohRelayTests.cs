@@ -17,7 +17,7 @@ public sealed class IrohRelayTests
 
     private static PinholeOptions Options(FakeIrohRelay server) => new()
     {
-        StunServers = [], Relays = [], IrohRelayUrls = [server.Url],
+        StunServers = [], Relays = [], IrohRelayUrls = [server.Url], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false, ConnectTimeout = Timeout,
@@ -83,8 +83,8 @@ public sealed class IrohRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Degraded && atB.State == PinholeConnectionState.Degraded);
@@ -143,8 +143,8 @@ public sealed class IrohRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
 
@@ -164,8 +164,8 @@ public sealed class IrohRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(a.ConnectionString);
         await using var atA = await accept.WaitAsync(Timeout);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         Assert.Equal(PathKind.Relay, atA.Path.Kind);
@@ -186,8 +186,8 @@ public sealed class IrohRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
 
@@ -216,8 +216,8 @@ public sealed class IrohRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         int before = server.Authentications;

@@ -1,0 +1,75 @@
+{
+  "status": "FAIL",
+  "index": 2,
+  "os": "Darwin",
+  "commit": "d24407504b299cc42ed3124b081e379dcfaf4a93",
+  "machineSha256": "78859a1766b90c06d63abcb479d59e228b5ac11ec785f9c03a8f2f89748021de",
+  "cases": [
+    {
+      "case": "chat",
+      "network": "auto",
+      "status": "PASS",
+      "role": "observer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 15.89
+    },
+    {
+      "case": "group",
+      "network": "auto",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected aedddfe465d7776d: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "2021e9d2dad6b8fc18fb75a684c23328e1c13a42e75b42e06b10ae550ebed28d"
+      ],
+      "seconds": 49.94
+    },
+    {
+      "case": "send",
+      "network": "auto",
+      "status": "PASS",
+      "role": "observer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 12.6
+    },
+    {
+      "case": "chat",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "observer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 7.33
+    },
+    {
+      "case": "group",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "peer",
+      "connections": [
+        "Connected 037bdd0b2b53a53e: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "7c254ec918c0820b4337b4787bae975ef3100d8f1aba4d9029cb996e42c32486"
+      ],
+      "seconds": 40.48
+    },
+    {
+      "case": "send",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "observer",
+      "connections": [],
+      "invitationSha256": [],
+      "seconds": 7.76
+    },
+    {
+      "status": "FAIL",
+      "error": "Separate runner did not publish derp/chat/done/0"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "status": "PASS",
+  "index": 0,
+  "os": "Linux",
+  "commit": "bf45e2c0b5e4dbc9363f2f17108d752e5a46161f",
+  "machineSha256": "c278f5569b1072258c3e6b724dc2cdf19ce3d90cb7c151458c15414d2e7b492d",
+  "cases": [
+    {
+      "case": "cloudflare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Direct Udp, encrypted=True"
+      ]
+    },
+    {
+      "case": "codeshare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "peer connected via Direct/Udp, encrypted=True"
+      ]
+    }
+  ]
+}

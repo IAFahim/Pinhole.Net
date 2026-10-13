@@ -9,6 +9,9 @@ public sealed class IrohAddress
 {
     internal const int MaxAddresses = 64;
     internal byte[] Key { get; }
+    // Signed Pinhole extension in pkarr TXT records. Native iroh tickets and the
+    // raw IrohTransport deliberately keep their original address representation.
+    internal IReadOnlyList<Uri> DerpRelayUrls { get; init; } = [];
     private readonly IPEndPoint[] _direct;
     private readonly Uri[] _relays;
 

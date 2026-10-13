@@ -85,7 +85,7 @@ public sealed class PortPredictionTests
     private static Task<PinholeNode> Node(VirtualLab lab, VirtualNat nat, InMemoryIrohRelay relay, IReadOnlyList<IPEndPoint> stun, bool enabled = true, bool signalingOnly = false) =>
         lab.BindNodeAsync(nat, tweak: o => o with
         {
-            StunServers = stun, IrohRelayUrls = [InMemoryIrohRelay.Url], IrohWebSocketFactory = relay.ConnectAsync,
+            StunServers = stun, IrohRelayUrls = [InMemoryIrohRelay.Url], DerpRelayUrls = [], IrohWebSocketFactory = relay.ConnectAsync,
             EnablePortPrediction = enabled, RelaySignalingOnly = signalingOnly, ReceiveBufferCapacity = 8, EnablePathValidation = false,
             EnablePmtud = false, StunRefreshInterval = TimeSpan.Zero, ConnectTimeout = TimeSpan.FromSeconds(12),
         });

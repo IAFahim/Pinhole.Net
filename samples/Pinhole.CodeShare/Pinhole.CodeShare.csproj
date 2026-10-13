@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pinhole\Pinhole.csproj" />
     <ProjectReference Include="..\..\src\Pinhole.Rendezvous\Pinhole.Rendezvous.csproj" />
+    <Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
   </ItemGroup>
 
 </Project>

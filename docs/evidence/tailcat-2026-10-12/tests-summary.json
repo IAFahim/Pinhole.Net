@@ -1,0 +1,76 @@
+{
+  "build": "dotnet build Pinhole.Net.slnx -c Release --disable-build-servers -warnaserror: PASS, 0 warnings, 0 errors",
+  "scope": "Linux local regression checks; functional results combine the full suite with corrected scenarios and explicit reruns; no long soak or performance category run",
+  "frameworks": {
+    "net8": {
+      "functional": {
+        "uniqueTests": 637,
+        "outcomes": {
+          "NotExecuted": 1,
+          "Passed": 636
+        },
+        "runGroups": [
+          "net8",
+          "net8-reconnect",
+          "net8-codes"
+        ]
+      },
+      "interop": {
+        "uniqueTests": 5,
+        "outcomes": {
+          "Passed": 5
+        },
+        "runGroups": [
+          "net8-interop"
+        ]
+      },
+      "resources": {
+        "uniqueTests": 9,
+        "outcomes": {
+          "NotExecuted": 2,
+          "Passed": 7
+        },
+        "runGroups": [
+          "net8-resources"
+        ]
+      }
+    },
+    "net10": {
+      "functional": {
+        "uniqueTests": 637,
+        "outcomes": {
+          "NotExecuted": 1,
+          "Passed": 636
+        },
+        "runGroups": [
+          "net10",
+          "net10-final",
+          "net10-codes"
+        ]
+      },
+      "interop": {
+        "uniqueTests": 5,
+        "outcomes": {
+          "Passed": 5
+        },
+        "runGroups": [
+          "net10-interop"
+        ]
+      },
+      "resources": {
+        "uniqueTests": 9,
+        "outcomes": {
+          "NotExecuted": 2,
+          "Passed": 7
+        },
+        "runGroups": [
+          "net10-resources"
+        ]
+      }
+    }
+  },
+  "reruns": [
+    "net10: multicast family case passed on rerun; relay-only real-iroh setup now disables direct UDP/TCP; signed DERP discovery test uses distinct identity seeds",
+    "net8: existing iroh reconnect timing failure passed in the isolated rerun"
+  ]
+}

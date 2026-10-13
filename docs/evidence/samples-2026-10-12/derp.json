@@ -1,0 +1,114 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "case": "tiny",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "1b8de5f4920aa21e9c6f5d84cefc0b1d562b7e218d97ecdabf43397aab9c8a77",
+        "133f5163a6db475366c3eab008036db9bdeb5da00b66565e242badd062b0eb7f",
+        "cc621c62a3dedb6973f2cd2d03d7e191f9e38466d88b490ec1aaba6952dbfce6"
+      ],
+      "connections": [
+        "Connected: Relay tc304a.ipn.dev, encrypted=True",
+        "Connected: Relay tc304a.ipn.dev, encrypted=True",
+        "Connected: Relay tc304a.ipn.dev, encrypted=True",
+        "Connected: Relay tc304a.ipn.dev, encrypted=True"
+      ],
+      "seconds": 4.6
+    },
+    {
+      "case": "demo",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "21f3cbbd91c019dddeff9c26cb0a9ced96e6e542594d962ac270e1d60df89679",
+        "fdf573fe4b9de67d8207825a7cbd64a196f134ed14c1f8db7ef53048e6899fd9"
+      ],
+      "connections": [
+        "Connected: Relay tc304a.ipn.dev, encrypted=True",
+        "Connected: Relay tc304a.ipn.dev, encrypted=True"
+      ],
+      "seconds": 2.23
+    },
+    {
+      "case": "retry",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "8464163b65eea61885aa2813fe549d3875f6deed507fa31fcf1cf205800bc8b5",
+        "8bea8e3e57afddb1f4c9291adea6d886b2ea8f0b4449b015e99b5995398d10b0"
+      ],
+      "connections": [
+        "Connected: Relay tc304a.ipn.dev, encrypted=True",
+        "Connected: Relay tc304a.ipn.dev, encrypted=True"
+      ],
+      "seconds": 18.01
+    },
+    {
+      "case": "group",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "0102b79fecc1541f1db42985dc89389f458a418c8299f99935a1e2eb77ba2495"
+      ],
+      "connections": [
+        "Connected ba8a2bc87bef674e: Relay tc304a.ipn.dev, encrypted=True, friends=1",
+        "Connected ba8a2bc87bef674e: Relay tc304a.ipn.dev, encrypted=True, friends=1",
+        "Connected 6142f7cd28cbf3b6: Relay tc304a.ipn.dev, encrypted=True, friends=1",
+        "Connected ba8a2bc87bef674e: Relay tc304a.ipn.dev, encrypted=True, friends=1"
+      ],
+      "seconds": 5.36
+    },
+    {
+      "case": "send",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "2a95c2cd3c4a5114264476c4a58e83a2424b379aea1c46c1c5a16f9b9776a426",
+        "5de52936f709c240b2003b8842aa9888b70b922f645b4beedc58f45b65c28ba6"
+      ],
+      "connections": [],
+      "seconds": 7.81
+    },
+    {
+      "case": "codeshare",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [
+        "peer connected via Relay/, encrypted=True",
+        "connected via Relay/, encrypted=True"
+      ],
+      "seconds": 2.33
+    },
+    {
+      "case": "mesh",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [
+        "42c85dc09369b9f201c15fc4a81d7048242f11e765759979f8cfccb24d618404"
+      ],
+      "connections": [
+        "[guest] connected via Relay tc304a.ipn.dev, encrypted=True"
+      ],
+      "seconds": 30.32
+    },
+    {
+      "case": "errors",
+      "network": "derp",
+      "status": "PASS",
+      "invitationSha256": [],
+      "connections": [],
+      "seconds": 0.03
+    }
+  ],
+  "initialHarnessFailures": [
+    "group"
+  ],
+  "rerunCases": [
+    "group",
+    "mesh"
+  ]
+}

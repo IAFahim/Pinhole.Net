@@ -15,7 +15,7 @@ public sealed class TcpSocketHardeningTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(12);
     private static PinholeOptions Options(IPAddress bind) => new()
     {
-        Bind = new IPEndPoint(bind, 0), StunServers = [], IrohRelayUrls = [],
+        Bind = new IPEndPoint(bind, 0), StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [],
         EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnableDirectUdp = false, ReceiveBufferCapacity = 16,
         ConnectTimeout = TimeSpan.FromSeconds(8), // TCP rounds start after the 1.2 s UDP-first window

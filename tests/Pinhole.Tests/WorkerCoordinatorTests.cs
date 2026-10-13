@@ -13,7 +13,7 @@ public sealed class WorkerCoordinatorTests
     private static PinholeOptions Offline(bool relay = false) => new()
     {
         Bind = new IPEndPoint(IPAddress.Loopback, 0), StunServers = [], Relays = relay ? null : [],
-        IrohRelayUrls = [], LookupProviders = [], RendezvousEndpoints = [],
+        IrohRelayUrls = [], DerpRelayUrls = [], LookupProviders = [], RendezvousEndpoints = [],
         PublishIrohAddress = false, EnablePortMapping = false, EnableNetworkWatch = false,
         EnableLanDiscovery = false, EnableInterfaceCandidates = false,
         EnableDirectUdp = !relay, EnableTcpTransport = false, ReceiveBufferCapacity = 32,
@@ -42,6 +42,30 @@ public sealed class WorkerCoordinatorTests
         await using var accepted = await host.AcceptAsync().WaitAsync(Timeout);
         Assert.True(service.WebSocketRejected);
         Assert.True(joined.IsEncrypted && accepted.IsEncrypted);
+        await Exchange(accepted, joined);
+    }
+
+    [Fact]
+    public async Task DefaultDerpProvider_PairsWorkerPeers_WhenTurnAndDirectPathsAreDisabled()
+    {
+        using var relay = new InMemoryDerpRelay(PinholeOptions.PublicDerpRelays[0].Host);
+        await using var service = new CoordinatorStub();
+        PinholeOptions options = Offline() with
+        {
+            EnableDirectUdp = false, DerpRelayUrls = null,
+            DerpWebSocketFactory = (uri, ct) => uri.Host == relay.Url.Host
+                ? relay.ConnectAsync(uri, ct)
+                : Task.FromException<System.Net.WebSockets.WebSocket>(new System.Net.WebSockets.WebSocketException("modeled alternate region unavailable")),
+        };
+        await using var host = await PinholeSession.HostAsync(new PinholeHostSettings
+            { CoordinatorUrl = service.Url, NodeOptions = options }).WaitAsync(Timeout);
+        await using var joined = await PinholeSession.JoinAsync(host.Code, new PinholeJoinSettings
+            { CoordinatorUrl = service.Url, NodeOptions = options }).WaitAsync(Timeout);
+        await using var accepted = await host.AcceptAsync().WaitAsync(Timeout);
+        Assert.True(joined.IsEncrypted && accepted.IsEncrypted);
+        Assert.Equal(PathKind.Relay, joined.Path.Kind);
+        Assert.Equal(relay.Url, joined.Path.RelayUrl);
+        Assert.Contains(ConnectionString.Parse(host.FullInvitation).Candidates, c => c.Kind == CandidateKind.DerpRelay);
         await Exchange(accepted, joined);
     }
 

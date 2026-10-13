@@ -18,7 +18,7 @@ internal static class WorkerProbe
         {
             Bind = new IPEndPoint(mode is "direct" or "tcp" ? IPAddress.Loopback : IPAddress.Any, 0),
             Relays = mode is "direct" or "tcp" ? [] : null, StunServers = mode != "auto" ? [] : null,
-            IrohRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [], PublishIrohAddress = false,
+            IrohRelayUrls = [], DerpRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [], PublishIrohAddress = false,
             EnableDirectUdp = mode is "direct" or "auto", EnableTcpTransport = mode is "tcp" or "auto",
             EnableInterfaceCandidates = mode == "auto", EnablePortMapping = false, EnablePortPrediction = false,
             EnableNetworkWatch = false, EnableLanDiscovery = false, EnablePmtud = false,

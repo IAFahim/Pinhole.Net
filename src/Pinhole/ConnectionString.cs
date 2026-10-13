@@ -20,11 +20,14 @@ public enum CandidateKind : byte
 
     /// <summary>Datagrams tunneled through an iroh HTTPS WebSocket relay.</summary>
     IrohRelay = 4,
+
+    /// <summary>Datagrams tunneled through a Tailcat-compatible DERP HTTPS relay.</summary>
+    DerpRelay = 5,
 }
 
-/// <summary>One address a peer can be reached at. TURN candidates carry credentials; iroh candidates
-/// carry a relay URL (at most 64 ASCII characters) and the public relay identity key.
-/// Address is unused for iroh candidates.</summary>
+/// <summary>One address a peer can be reached at. TURN candidates carry credentials; iroh and DERP
+/// candidates carry a relay URL (at most 64 ASCII characters) and the public relay identity key
+/// (Ed25519 for iroh, X25519 for DERP). Address is unused for these HTTPS candidates.</summary>
 public sealed record PinholeCandidate(
     CandidateKind Kind,
     IPEndPoint Address,
@@ -282,11 +285,11 @@ internal static class CandidateCodec
             WriteShortText(payload, candidate.Username);
             WriteShortText(payload, candidate.Credential);
         }
-        else if (candidate.Kind == CandidateKind.IrohRelay)
+        else if (candidate.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
         {
             if (candidate.RelayUrl is null || candidate.RelayKey is not { Length: 32 }
                 || !ValidRelayUrl(candidate.RelayUrl))
-                throw new InvalidOperationException("iroh candidates require an HTTPS relay URL and a 32-byte public key");
+                throw new InvalidOperationException("HTTPS relay candidates require a safe relay URL and a 32-byte public key");
             WriteShortText(payload, candidate.RelayUrl.AbsoluteUri);
             payload.Write(candidate.RelayKey);
         }
@@ -296,7 +299,7 @@ internal static class CandidateCodec
     {
         IPEndPoint address = reader.ReadEndpoint();
         CandidateKind kind = (CandidateKind)reader.ReadByte();
-        if (kind is < CandidateKind.Direct or > CandidateKind.IrohRelay)
+        if (kind is < CandidateKind.Direct or > CandidateKind.DerpRelay)
         {
             throw new FormatException("unknown candidate kind");
         }
@@ -310,10 +313,10 @@ internal static class CandidateCodec
             username = reader.ReadShortText();
             credential = reader.ReadShortText();
         }
-        else if (kind == CandidateKind.IrohRelay)
+        else if (kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
         {
             if (!Uri.TryCreate(reader.ReadShortText(), UriKind.Absolute, out Uri? url) || !ValidRelayUrl(url))
-                throw new FormatException("invalid iroh relay URL");
+                throw new FormatException("invalid HTTPS relay URL");
             byte[] key = new byte[32];
             for (int i = 0; i < key.Length; i++) key[i] = reader.ReadByte();
             return new PinholeCandidate(kind, address, RelayUrl: url, RelayKey: key);

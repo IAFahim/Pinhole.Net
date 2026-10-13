@@ -10,6 +10,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\Pinhole.Blobs\Pinhole.Blobs.csproj" />
+		<Compile Include="../SampleNetwork.cs" Link="SampleNetwork.cs" />
 	</ItemGroup>
 
 </Project>

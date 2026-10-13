@@ -24,7 +24,7 @@ public sealed class PathValidationTests
     {
         StunServers = [],
         Relays = [],
-        IrohRelayUrls = server is null ? [] : [server.Url],
+        IrohRelayUrls = server is null ? [] : [server.Url], DerpRelayUrls = [],
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
@@ -74,8 +74,8 @@ public sealed class PathValidationTests
         await using var a = await PinholeNode.BindAsync(Opts(server: server));
         await using var b = await PinholeNode.BindAsync(Opts(server: server));
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
         // Both ends must settle Open on the direct path before the fault is injected —
         // under load the relay can briefly carry the session while iroh confirmation
         // lands, and the premise of this test is a healthy direct path to kill.
@@ -129,8 +129,8 @@ public sealed class PathValidationTests
             originalB = pathB.Remote;
             return true;
         });
-        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.IrohConfirmed == true
-            && b.Engine.Lookup(a.PeerId)?.IrohConfirmed == true);
+        await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
+            && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
 
         a.Engine.SimulateSilentDirectPathLoss(b.PeerId);
         b.Engine.SimulateSilentDirectPathLoss(a.PeerId);

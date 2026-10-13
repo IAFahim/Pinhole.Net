@@ -11,7 +11,7 @@ public sealed class RelaySignalingTests
     private static Task<PinholeNode> Node(VirtualLab lab, InMemoryIrohRelay relay, string address, bool signalingOnly = true, double timeout = 8) =>
         lab.BindNodeAsync(hostAddress: new(IPAddress.Parse(address), 0), tweak: o => o with
         {
-            IrohRelayUrls = [InMemoryIrohRelay.Url], IrohWebSocketFactory = relay.ConnectAsync,
+            IrohRelayUrls = [InMemoryIrohRelay.Url], DerpRelayUrls = [], IrohWebSocketFactory = relay.ConnectAsync,
             RelaySignalingOnly = signalingOnly, ReceiveBufferCapacity = 16,
             ConnectTimeout = TimeSpan.FromSeconds(timeout),
             PathValidationIdle = TimeSpan.FromMilliseconds(150), PathValidationProbeInterval = TimeSpan.FromMilliseconds(80),

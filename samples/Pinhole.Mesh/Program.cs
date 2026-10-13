@@ -15,8 +15,8 @@
 // three unrelated GitHub-hosted runners can find each other with nothing shared in advance
 // except the repo they were spawned from. The connection string each node announces is the
 // real discovery artifact: peer ID + direct/reflexive candidates + free-relay fallback.
-// MESH_FORCE_RELAY=1 strips the direct candidates from announced tickets, forcing every
-// introductions onto an iroh HTTPS or TURN relay path.
+// MESH_FORCE_RELAY=1 disables direct UDP/TCP, keeping authenticated invitations
+// with iroh, DERP and TURN relay candidates.
 
 using System.Diagnostics;
 using System.Globalization;
@@ -59,7 +59,10 @@ internal static class MeshNode
         DateTimeOffset deadline = started + Deadline;
 
         await using ISignal signal = Signal.Create();
-        await using PinholeNode node = await PinholeNode.BindAsync().WaitAsync(Reserve(deadline, 60));
+        var options = SampleNetwork.Options();
+        if (Environment.GetEnvironmentVariable("MESH_FORCE_RELAY") == "1")
+            options = options with { EnableDirectUdp = false, EnableTcpTransport = false };
+        await using PinholeNode node = await PinholeNode.BindAsync(options).WaitAsync(Reserve(deadline, 60));
         Console.WriteLine($"[node {index}] bound (peer {node.PeerId:x16}, public: {string.Join(", ", node.PublicEndpoints)})");
 
         int roundsOk = 0;
@@ -110,7 +113,7 @@ internal static class MeshNode
 
         // Node 0 keeps accepting guests until the deadline so any machine (e.g. a dev PC)
         // can join with the connection string while the session is live.
-        if (index == 0 && Environment.GetEnvironmentVariable("MESH_LINGER") == "1")
+        if (index == 0 && Environment.GetEnvironmentVariable("MESH_LINGER") is "1" or "once")
         {
             await HostGuestsAsync(node, mySecrets, deadline);
         }
@@ -127,8 +130,8 @@ internal static class MeshNode
             TimeSpan.FromSeconds(Math.Max(1, Math.Min(seconds, (deadline - DateTimeOffset.UtcNow).TotalSeconds - 1)));
     }
 
-    // MESH_FORCE_RELAY=1 strips direct candidates from announced tickets: peers can then
-    // only meet through a relay — the CI canary uses this to exercise relay introductions.
+    // Retain both identity keys when filtering candidates: dropping them produces
+    // a plaintext v1 invitation, which encrypted nodes correctly refuse.
     private static string TicketOf(PinholeNode node)
     {
         if (Environment.GetEnvironmentVariable("MESH_FORCE_RELAY") != "1")
@@ -137,8 +140,8 @@ internal static class MeshNode
         }
 
         ConnectionString full = ConnectionString.Parse(node.ConnectionString);
-        var relayOnly = full.Candidates.Where(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay).ToList();
-        return new ConnectionString(full.PeerId, relayOnly, full.NatHint).ToString();
+        var relayOnly = full.Candidates.Where(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay).ToList();
+        return new ConnectionString(full.PeerId, relayOnly, full.NatHint, full.StaticKey, full.EndpointKey).ToString();
     }
 
     private static async Task<RoundReport> RunRoundAsync(
@@ -166,7 +169,7 @@ internal static class MeshNode
             // connection; ConnectAsync runs the direct->relay chain internally.
             CancellationToken roundToken = roundCts.Token;
             IEnumerable<Task<PinholeConnection>> pending = Enumerable.Range(0, index)
-                .Select(j => node.ConnectAsync(roundTickets[j]).WaitAsync(roundToken))
+                .Select(j => node.ConnectAsync(roundTickets[j], roundToken))
                 .Concat(Enumerable.Repeat(0, count - 1 - index)
                     .Select(_ => node.AcceptAsync(roundToken).WaitAsync(roundToken)));
 
@@ -287,26 +290,29 @@ internal static class MeshNode
             PinholeConnection? conn = null;
             try
             {
-                conn = await node.AcceptAsync().WaitAsync(deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(8))
-                    .ConfigureAwait(false);
-
-                var guestSecret = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-                void OnFrame(ReadOnlySpan<byte> frame)
-                {
-                    string text = Encoding.UTF8.GetString(frame);
-                    if (text.StartsWith("GUEST:", StringComparison.Ordinal))
-                    {
-                        guestSecret.TrySetResult(text["GUEST:".Length..]);
-                    }
-                }
-
-                conn.Received += OnFrame;
+                using var acceptStop = new CancellationTokenSource(deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(8));
+                conn = await node.AcceptAsync(acceptStop.Token).ConfigureAwait(false);
+                using var exchangeStop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                // The ACK proves the guest actually read the welcome. Buffered reads
+                // retain frames arriving between the handshake and this continuation.
+                Task<string> guestSecret = ReceivePrefixAsync(conn, "GUEST_ACK:", exchangeStop.Token);
                 byte[] body = Encoding.UTF8.GetBytes("WELCOME:" + JsonSerializer.Serialize(new { from = "pinhole-mesh", secrets }));
-                conn.Send(body);
-
-                if (await Task.WhenAny(guestSecret.Task, Task.Delay(TimeSpan.FromSeconds(10))).ConfigureAwait(false) == guestSecret.Task)
+                try
                 {
-                    Console.WriteLine($"GUEST joined ({conn.Path.Kind}) secret {guestSecret.Task.Result[..Math.Min(16, guestSecret.Task.Result.Length)]}…");
+                    while (!guestSecret.IsCompleted)
+                    {
+                        conn.Send(body);
+                        await Task.WhenAny(guestSecret, Task.Delay(300, exchangeStop.Token)).ConfigureAwait(false);
+                        exchangeStop.Token.ThrowIfCancellationRequested();
+                    }
+                    string secret = await guestSecret.ConfigureAwait(false);
+                    Console.WriteLine($"GUEST joined ({conn.Path.Kind}) secret {secret[..Math.Min(16, secret.Length)]}…");
+                }
+                finally
+                {
+                    exchangeStop.Cancel();
+                    try { await guestSecret.ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (exchangeStop.IsCancellationRequested) { }
                 }
 
                 // Bounded teardown; a pathological guest session must not stall the hosting loop.
@@ -315,6 +321,7 @@ internal static class MeshNode
                 {
                     // teardown is best-effort; the peer sees silence either way
                 }
+                if (Environment.GetEnvironmentVariable("MESH_LINGER") == "once") return;
             }
             catch (Exception exception)
             {
@@ -330,6 +337,16 @@ internal static class MeshNode
             }
         }
     }
+
+    internal static async Task<string> ReceivePrefixAsync(PinholeConnection peer, string prefix, CancellationToken ct)
+    {
+        await foreach (var frame in peer.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            string text = Encoding.UTF8.GetString(frame.Span);
+            if (text.StartsWith(prefix, StringComparison.Ordinal)) return text[prefix.Length..];
+        }
+        throw new IOException("Peer disconnected before the sample exchange completed.");
+    }
 }
 
 internal static class Guest
@@ -337,24 +354,16 @@ internal static class Guest
     public static async Task<int> RunAsync(string connectionString)
     {
         string mySecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        await using PinholeNode node = await PinholeNode.BindAsync().WaitAsync(TimeSpan.FromSeconds(60));
-        await using PinholeConnection conn = await node.ConnectAsync(connectionString).WaitAsync(TimeSpan.FromSeconds(60));
-        Console.WriteLine("[guest] connected to the live session");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        await using PinholeNode node = await PinholeNode.BindAsync(SampleNetwork.Options(), deadline.Token);
+        await using PinholeConnection conn = await node.ConnectAsync(SampleNetwork.NormalizeInvitation(connectionString), deadline.Token);
+        Console.WriteLine($"[guest] connected via {SampleNetwork.Describe(conn)}, encrypted={conn.IsEncrypted}");
 
-        var answered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnFrame(ReadOnlySpan<byte> frame)
-        {
-            string text = Encoding.UTF8.GetString(frame);
-            if (text.StartsWith("WELCOME:", StringComparison.Ordinal))
-            {
-                answered.TrySetResult(text["WELCOME:".Length..]);
-            }
-        }
-
-        conn.Received += OnFrame;
+        using var exchangeStop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<string> answered = MeshNode.ReceivePrefixAsync(conn, "WELCOME:", exchangeStop.Token);
         byte[] hello = Encoding.UTF8.GetBytes("GUEST:" + mySecret);
         var guestSw = Stopwatch.StartNew();
-        while (!answered.Task.IsCompleted && guestSw.Elapsed < TimeSpan.FromSeconds(15))
+        while (!answered.IsCompleted && guestSw.Elapsed < TimeSpan.FromSeconds(15))
         {
             try { conn.Send(hello); }
             catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
@@ -364,13 +373,21 @@ internal static class Guest
             await Task.Delay(300);
         }
 
-        if (answered.Task.IsCompleted)
+        if (answered.IsCompletedSuccessfully)
         {
+            conn.Send(Encoding.UTF8.GetBytes("GUEST_ACK:" + mySecret));
             Console.WriteLine($"[guest] mesh answered over {conn.Path.Kind} with its secrets:");
-            Console.WriteLine(answered.Task.Result);
+            Console.WriteLine(await answered.ConfigureAwait(false));
+            // Keep the relay send queue alive until the host receives our ACK and
+            // closes; disposing this node immediately could discard the queued ACK.
+            try { await conn.Closed.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
+            catch (TimeoutException) { }
             return 0;
         }
 
+        exchangeStop.Cancel();
+        try { await answered.ConfigureAwait(false); }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException) { }
         Console.WriteLine("[guest] no answer within 15s");
         return 1;
     }

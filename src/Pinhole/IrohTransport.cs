@@ -167,7 +167,7 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         PinholeOptions network = await PinholeOptions.ResolveAsync(options.Network with
         {
             IdentityKeySeed = null, Encryption = PinholeEncryption.Disabled, Listen = false,
-            Relays = [], ResolvedRelays = [], LookupProviders = [], RendezvousEndpoints = [],
+            Relays = [], ResolvedRelays = [], DerpRelayUrls = [], ResolvedDerpRelays = [], LookupProviders = [], RendezvousEndpoints = [],
             EnableLanDiscovery = false, EnablePathValidation = false, EnablePmtud = false,
             KeepaliveInterval = TimeSpan.Zero, ReceiveBufferCapacity = 0,
             PublishIrohAddress = false,

@@ -150,7 +150,7 @@ public sealed class PcpClientTests
         {
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
-            StunServers = [], IrohRelayUrls = [], EnableNetworkWatch = false,
+            StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], EnableNetworkWatch = false,
             GatewayOverride = [gateway.Endpoint], PortMappingLease = TimeSpan.FromSeconds(30),
         });
         try

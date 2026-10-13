@@ -336,7 +336,7 @@ public sealed class RelayFailoverTests
         var options = new PinholeOptions
         {
             StunServers = [],
-            IrohRelayUrls = [new Uri("https://relay-that-does-not-resolve.invalid/")],
+            IrohRelayUrls = [new Uri("https://relay-that-does-not-resolve.invalid/")], DerpRelayUrls = [],
             PublishIrohAddress = false,
             EnableNetworkWatch = false,
             EnablePortMapping = false,

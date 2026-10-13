@@ -1,0 +1,138 @@
+{
+  "status": "PASS",
+  "index": 0,
+  "os": "Linux",
+  "commit": "9afd69f4ea14a3523387900f2a097da92f2c530d",
+  "machineSha256": "c278f5569b1072258c3e6b724dc2cdf19ce3d90cb7c151458c15414d2e7b492d",
+  "cases": [
+    {
+      "case": "cloudflare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Direct Udp, encrypted=True"
+      ]
+    },
+    {
+      "case": "codeshare",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "peer connected via Direct/Udp, encrypted=True"
+      ]
+    },
+    {
+      "case": "chat",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [
+        "a16f612c0ea3e42187799d0744f8f750c92e391c7aacd5dd166a91add84d83d7"
+      ],
+      "seconds": 14.15
+    },
+    {
+      "case": "group",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected a95419ebe95c5da2: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "6439c788c4340070f8d287485154e6910e3a84e9e1889412264c7736ee1375a6"
+      ],
+      "seconds": 55.18
+    },
+    {
+      "case": "send",
+      "network": "auto",
+      "status": "PASS",
+      "role": "host",
+      "connections": [],
+      "invitationSha256": [
+        "3a575b2f85548da21338ef1504e9e16cc91ec824a29ecc6e588353ea02a8ac52"
+      ],
+      "seconds": 12.67
+    },
+    {
+      "case": "chat",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Relay use1-1.relay.n0.iroh.link, encrypted=True"
+      ],
+      "invitationSha256": [
+        "a87a1392e34de3f0d6568ac67cc734124577fb2fe7a9f404737eba2e0c6d112c"
+      ],
+      "seconds": 10.59
+    },
+    {
+      "case": "group",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected 841e53c90c4e5aab: Relay use1-1.relay.n0.iroh.link, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "6bab1127167950a4afacac8dbbcbe30e9e85c961fc0c58b64d614bec7a282179"
+      ],
+      "seconds": 45.88
+    },
+    {
+      "case": "send",
+      "network": "iroh",
+      "status": "PASS",
+      "role": "host",
+      "connections": [],
+      "invitationSha256": [
+        "1fcefcee5b66e7cbd7a9511085a2bf4b95c8fb5004494b2a7abeea7ec6e08586"
+      ],
+      "seconds": 10.2
+    },
+    {
+      "case": "chat",
+      "network": "derp",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected: Relay tc301a.ipn.dev, encrypted=True"
+      ],
+      "invitationSha256": [
+        "c651af42764d69ca9467e61e6ff887a4f0f44ff6ee61cd7cda46ce27b2675e2a"
+      ],
+      "seconds": 9.78
+    },
+    {
+      "case": "group",
+      "network": "derp",
+      "status": "PASS",
+      "role": "host",
+      "connections": [
+        "Connected 57cbea84a9c4a4f7: Relay tc301a.ipn.dev, encrypted=True, friends=1"
+      ],
+      "invitationSha256": [
+        "418a5a6f925a4194b6b02e138bf986f4e009d52a2c781293e4b7b19064bcf094"
+      ],
+      "seconds": 56.9
+    },
+    {
+      "case": "send",
+      "network": "derp",
+      "status": "PASS",
+      "role": "host",
+      "connections": [],
+      "invitationSha256": [
+        "e6cdd3619bf5dc86ba75b0ae9a7da092623397422840a1ec8e87041143223b8d"
+      ],
+      "seconds": 11.48
+    }
+  ]
+}

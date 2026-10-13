@@ -70,7 +70,7 @@ public sealed class TurnBootstrapTests
         Bind = new IPEndPoint(IPAddress.Any, 0),
         Relays = [new TurnServerConfig(server.Control, "user", "pass")],
         RelayCatalog = _ => Task.FromResult(Array.Empty<IPEndPoint>()),
-        StunServers = [], IrohRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [],
+        StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [], RendezvousEndpoints = [], LookupProviders = [],
         PublishIrohAddress = false, EnableDirectUdp = false, EnableTcpTransport = false,
         EnableInterfaceCandidates = false, EnablePortMapping = false, EnablePortPrediction = false,
         AdvertiseLinkLocal = false, EnableNetworkWatch = false, EnableLanDiscovery = false,

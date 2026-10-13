@@ -53,7 +53,7 @@ internal sealed class RelayIdentity
     }
 }
 
-internal sealed class IrohRelay : IDisposable
+internal sealed class IrohRelay : IKeyedRelay
 {
     internal const int MaxDatagramSize = 65536 - 34; // native client encoded-frame limit
     private const int MaxMessage = 1024 * 1024;
@@ -71,9 +71,11 @@ internal sealed class IrohRelay : IDisposable
     private int _alive;
 
     public Uri Url { get; }
+    public CandidateKind Kind => CandidateKind.IrohRelay;
+    public byte[] PublicKey => _identity.PublicKey;
     public bool IsAlive => Volatile.Read(ref _alive) != 0;
-    public event Action<IrohRelay, byte[], byte[]>? Received;
-    public event Action<IrohRelay>? Changed;
+    public event Action<IKeyedRelay, byte[], byte[]>? Received;
+    public event Action<IKeyedRelay>? Changed;
     public string? LastError { get; private set; }
 
     /// <summary>Reconnect delay after the given number of consecutive failed connections:
