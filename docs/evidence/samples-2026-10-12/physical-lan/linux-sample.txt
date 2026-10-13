@@ -1,0 +1,8 @@
+Starting Pinhole.Tiny...
+Share this invitation: [fresh invitation captured]
+Paste your friend's full pinhole1: invitation and press Enter, or leave this window open for them to join. /quit exits.
+No relay connected yet. On different networks, both PCs may need to paste each other's fresh invitations.
+Connected: Direct Tcp, encrypted=True
+Type a message and press Enter. /quit or Ctrl+C exits.
+Friend: WINDOWS_AI_HELLO2: 9afd69f
+Friend: WINDOWS_AI_ACK2
