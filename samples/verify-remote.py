@@ -196,7 +196,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", type=int, choices=[0, 1, 2], required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--networks", default=os.environ.get("SAMPLE_NETWORKS", "auto,iroh,derp"),
+                        help="Comma-separated auto,iroh,derp; use none for coordinator samples only")
     args = parser.parse_args()
+    networks = [] if args.networks == "none" else args.networks.split(",")
+    if not all(network in ("auto", "iroh", "derp") for network in networks):
+        parser.error("--networks must contain auto,iroh,derp or none")
     signals = Signals()
     index = args.index
     worker = "https://pinhole-coordinator.fahimmanowarj5.workers.dev"
@@ -204,7 +209,22 @@ def main():
     failure = False
     try:
         signals.barrier("ready", index)
-        for network in ("auto", "iroh", "derp"):
+        for case in ("cloudflare", "codeshare"):
+            phase = "auto/" + case
+            checks = Checks(dict(os.environ, PINHOLE_SAMPLE_NETWORK="auto", PINHOLE_COORDINATOR=worker), "auto", worker)
+            try:
+                if case == "cloudflare":
+                    chat(index, checks, signals, phase, "Pinhole.CloudflareChat")
+                else:
+                    code(index, checks, signals, phase, worker)
+                signals.barrier(phase + "/done", index)
+                report = {"case": case, "network": "auto", "status": "PASS",
+                          "role": "host" if index == 0 else "peer" if index == 1 else "observer", "connections": checks.paths}
+                reports.append(report)
+                print(json.dumps(report), flush=True)
+            finally:
+                checks.close()
+        for network in networks:
             for case in ("chat", "group", "send"):
                 phase = network + "/" + case
                 checks = Checks(dict(os.environ, PINHOLE_SAMPLE_NETWORK=network), network, None)
@@ -225,21 +245,6 @@ def main():
                     print(json.dumps(report), flush=True)
                 finally:
                     checks.close()
-        for case in ("cloudflare", "codeshare"):
-            phase = "auto/" + case
-            checks = Checks(dict(os.environ, PINHOLE_SAMPLE_NETWORK="auto", PINHOLE_COORDINATOR=worker), "auto", worker)
-            try:
-                if case == "cloudflare":
-                    chat(index, checks, signals, phase, "Pinhole.CloudflareChat")
-                else:
-                    code(index, checks, signals, phase, worker)
-                signals.barrier(phase + "/done", index)
-                report = {"case": case, "network": "auto", "status": "PASS",
-                          "role": "host" if index == 0 else "peer" if index == 1 else "observer", "connections": checks.paths}
-                reports.append(report)
-                print(json.dumps(report), flush=True)
-            finally:
-                checks.close()
     except Exception as ex:
         failure = True
         reports.append({"status": "FAIL", "error": redacted(str(ex))})

@@ -7,6 +7,11 @@ on:
     branches: ['verify/**']
     paths-ignore: ['docs/**']
   workflow_dispatch:
+    inputs:
+      networks:
+        description: 'Networks: auto,iroh,derp (or none for coordinator samples only)'
+        default: 'auto,iroh,derp'
+        type: string
 
 concurrency:
   group: sample-network-${{ github.ref }}
@@ -72,7 +77,18 @@ jobs:
           PINHOLE_TRACE_FILE: artifacts/network/derp-trace-${{ matrix.index }}.log
         run: |
           python -c "from pathlib import Path; Path('artifacts/network').mkdir(parents=True, exist_ok=True)"
+          dotnet run --project samples/Pinhole.TailcatProbe -c Release -f net10.0 -- --all --tls-only --output artifacts/network/tls-${{ matrix.index }}.json
           dotnet run --project samples/Pinhole.TailcatProbe -c Release -f net10.0 -- --all --output artifacts/network/derp-probe-${{ matrix.index }}.json
+      - name: Compare Windows native HTTPS without the Pinhole client
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          curl.exe --version > artifacts/network/curl-version.txt
+          curl.exe -Iv --max-time 15 https://tc301a.ipn.dev/derp 2>&1 | Out-File artifacts/network/curl-default.txt
+          curl.exe -Iv --tlsv1.2 --tls-max 1.2 --max-time 15 https://tc301a.ipn.dev/derp 2>&1 | Out-File artifacts/network/curl-tls12.txt
+          & 'C:\Program Files\Git\mingw64\bin\curl.exe' --version > artifacts/network/curl-git-version.txt
+          & 'C:\Program Files\Git\mingw64\bin\curl.exe' -Iv --max-time 15 https://tc301a.ipn.dev/derp 2>&1 | Out-File artifacts/network/curl-git.txt
       - uses: actions/upload-artifact@v4
         with:
           name: sample-network-diagnostics-${{ matrix.index }}-${{ github.run_attempt }}
@@ -84,6 +100,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SAMPLE_KEY_FILE: ${{ runner.temp }}/sample-key/key.bin
+          SAMPLE_NETWORKS: ${{ inputs.networks || 'auto,iroh,derp' }}
         run: python samples/verify-remote.py --index ${{ matrix.index }} --output artifacts/network/peer-${{ matrix.index }}.json
       - uses: actions/upload-artifact@v4
         if: always()

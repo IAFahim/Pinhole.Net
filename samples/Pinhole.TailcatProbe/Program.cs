@@ -8,16 +8,19 @@ using Pinhole;
 // A small connectivity check, never a throughput test on shared public relays.
 List<Uri> relays = [];
 string? output = null;
+bool tlsOnly = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--output" && i + 1 < args.Length) output = args[++i];
+    else if (args[i] == "--tls-only") tlsOnly = true;
     else if (args[i] == "--all")
         relays.AddRange(new[] { "tc304a.ipn.dev", "tc303a.ipn.dev", "tc301a.ipn.dev", "tc302a.ipn.dev" }
             .Select(host => new Uri($"https://{host}/")));
     else if (Uri.TryCreate(args[i], UriKind.Absolute, out Uri? relay) && relay.Scheme == "https") relays.Add(relay);
-    else throw new ArgumentException("usage: [--all | https://your-derp/] [--output report.json]");
+    else throw new ArgumentException("usage: [--all | https://your-derp/] [--tls-only] [--output report.json]");
 }
 if (relays.Count == 0) relays.Add(new Uri("https://tc304a.ipn.dev/"));
+if (tlsOnly) return await TlsDiagnostics.RunAsync(relays, output);
 List<object> results = [];
 int failures = 0;
 foreach (Uri relay in relays.Distinct())
