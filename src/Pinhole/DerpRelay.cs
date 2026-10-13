@@ -1,8 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.WebSockets;
-using System.Net.Security;
-using System.Security.Authentication;
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -30,11 +29,6 @@ internal sealed class DerpRelay : IKeyedRelay
     private Task? _loop;
     private WebSocket? _socket;
     private int _alive;
-    private static readonly HttpMessageInvoker WindowsTls12 = new(new SocketsHttpHandler
-    {
-        AllowAutoRedirect = false,
-        SslOptions = new SslClientAuthenticationOptions { EnabledSslProtocols = SslProtocols.Tls12 },
-    });
 
     public Uri Url { get; }
     public CandidateKind Kind => CandidateKind.DerpRelay;
@@ -175,22 +169,24 @@ internal sealed class DerpRelay : IKeyedRelay
     private static async Task<WebSocket> ConnectAsync(Uri uri, CancellationToken ct)
     {
         try { return await ConnectSocketAsync(uri, null, ct).ConfigureAwait(false); }
-        catch (WebSocketException ex) when (OperatingSystem.IsWindows() && HasTlsAuthenticationFailure(ex) && !ct.IsCancellationRequested)
+        catch (WebSocketException ex) when (OperatingSystem.IsWindows() && HasInvalidTlsToken(ex) && !ct.IsCancellationRequested)
         {
-            // Schannel can reject the public fleet's TLS negotiation before the
-            // WebSocket upgrade. Retry TLS 1.2 with the ordinary OS certificate
-            // validation; neither hostname nor chain checks are relaxed.
-            NodeEngine.TraceTransport($"DERP {uri.Host}: retrying TLS 1.2 after a Windows TLS authentication failure");
-            return await ConnectSocketAsync(uri, WindowsTls12, ct).ConfigureAwait(false);
+            NodeEngine.TraceTransport($"DERP {uri.Host}: retrying managed TLS with OS certificate validation after Windows rejected the TLS token");
+            return await ConnectManagedAsync(uri, ct).ConfigureAwait(false);
         }
     }
 
-    private static bool HasTlsAuthenticationFailure(Exception error)
+    private static bool HasInvalidTlsToken(Exception error)
     {
         for (Exception? current = error; current is not null; current = current.InnerException)
-            if (current is AuthenticationException) return true;
+            if (current is Win32Exception native && native.NativeErrorCode == unchecked((int)0x80090308)) return true;
         return false;
     }
+
+    internal static Task<WebSocket> ConnectManagedAsync(Uri uri, CancellationToken ct) =>
+        // HTTP/WebSocket framing runs over the already authenticated TLS stream
+        // returned by ConnectCallback. No plaintext network connection is used.
+        ConnectSocketAsync(new UriBuilder(uri) { Scheme = "ws", Port = uri.Port }.Uri, DerpTls.Http, ct);
 
     private static async Task<WebSocket> ConnectSocketAsync(Uri uri, HttpMessageInvoker? http, CancellationToken ct)
     {

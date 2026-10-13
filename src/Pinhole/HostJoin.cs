@@ -300,6 +300,7 @@ internal sealed class CodeDirectory
 {
     internal static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(40);
     private static readonly TimeSpan ReplyWait = TimeSpan.FromSeconds(2);
+    private const int MaxCodeRecordLength = 8 * 1024; // keep UDP framing within the macOS datagram limit
 
     private readonly IPEndPoint[] _servers;
 
@@ -317,7 +318,7 @@ internal sealed class CodeDirectory
     /// code is already live.</summary>
     public async Task<string?> PutAsync(string code, string invitation, CancellationToken ct)
     {
-        string message = $"PUTC {code} {Base64Url.Encode(Encoding.UTF8.GetBytes(invitation))}";
+        string message = $"PUTC {code} {EncodeInvitation(invitation)}";
         return await SendExpectAsync(message, "OKCG ", "TokB", ct).ConfigureAwait(false) is { } reply
             ? reply["OKCG ".Length..]
             : null;
@@ -325,8 +326,16 @@ internal sealed class CodeDirectory
 
     public Task RefreshAsync(string code, string token, string invitation, CancellationToken ct) =>
         SendExpectAsync(
-            $"PUTC {code} {Base64Url.Encode(Encoding.UTF8.GetBytes(invitation))} {token}",
+            $"PUTC {code} {EncodeInvitation(invitation)} {token}",
             "OKCG", "TokB", ct);
+
+    private static string EncodeInvitation(string invitation)
+    {
+        string record = Base64Url.Encode(Encoding.UTF8.GetBytes(invitation));
+        if (record.Length > MaxCodeRecordLength)
+            throw new ArgumentException("invitation exceeds the UDP code-directory limit; share the full invitation or use an HTTPS coordinator", nameof(invitation));
+        return record;
+    }
 
     public Task DeleteAsync(string code, string token, CancellationToken ct = default) =>
         SendExpectAsync($"DELC {code} {token}", "OKCD", "TokB", CancellationToken.None);

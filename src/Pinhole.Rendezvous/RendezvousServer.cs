@@ -24,7 +24,8 @@ public sealed class RendezvousServer : IAsyncDisposable
     public const int MaxRecordLength = 1024;
     // A code holds a whole connection string, then base64url wraps it again.
     // Keep the peer-ID lookup's smaller record bound separate from invitations.
-    public const int MaxCodeRecordLength = 12 * 1024;
+    // Leave space for framing within macOS's ordinary UDP datagram limit.
+    public const int MaxCodeRecordLength = 8 * 1024;
     public const int MaxCodes = 4096;
     public const int MaxCodeLength = 16;
 

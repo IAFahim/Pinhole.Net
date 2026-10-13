@@ -72,7 +72,25 @@ relay support for Pinhole's wire protocol; it is not compatibility with Tailcat
 `tc...` addresses, WireGuard tunnels, or Tailscale's magicsock traversal engine.
 
 Self-hosted UDP invitation-code directories must also be upgraded: the code
-record bound is now 12 KiB, allowing the full invitation with both relay fleets.
+record bound is now 8 KiB, allowing the full default invitation with both relay
+fleets while keeping UDP framing within macOS's datagram limit. Larger custom
+invitations need a full-invitation exchange or the HTTPS coordinator.
+
+## Windows TLS interoperability
+
+Some Windows builds reject the DERP TLS certificate list with Schannel error
+`0x80090308` before .NET can validate the HTTPS certificate. The public fleet
+appends an unrelated Ed25519 metadata certificate after its HTTPS chain.
+Windows 11 23H2 was verified to connect normally; the build 26100 runner
+reproduced the failure with TLS 1.2 and TLS 1.3.
+
+On that specific Windows error, the adapter retries the WebSocket over managed
+TLS 1.2/1.3 using the existing Bouncy Castle dependency. The HTTPS leaf still
+needs a matching hostname, server-authentication usage and a chain trusted by
+the operating system. Extra non-CA metadata does not become a trust anchor.
+Async socket I/O keeps idle relays from occupying worker threads. The fallback
+makes a direct HTTPS connection; the ordinary first attempt retains the
+platform's proxy behavior. Certificate checks are never disabled.
 Peer-ID lookup records retain their existing 1 KiB bound.
 
 ## Validation

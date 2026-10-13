@@ -81,3 +81,8 @@ Remove the variable to return to automatic selection. Free relays are rate-limit
 extra paths increase options without guaranteeing universal connectivity or delivery.
 The chat samples use datagrams and add no message retransmission. Send implements
 verified file-transfer recovery above that transport.
+
+For a LAN listener that needs a specific allowed port, set `PINHOLE_SAMPLE_BIND`
+to its local endpoint, for example `192.168.68.113:53317`, before starting it.
+The dialing peer can keep its OS-assigned port. The `loopback` test mode always
+binds `127.0.0.1` and an OS-assigned port.

@@ -203,6 +203,9 @@ public sealed class HostJoinTests
     public async Task DirectoryBounds_RejectOversizedRecordsAndBadCodes()
     {
         await using var server = RendezvousServer.Start();
+        var directory = new CodeDirectory([new(IPAddress.Loopback, server.LocalEndPoint.Port)]);
+        await Assert.ThrowsAsync<ArgumentException>(() => directory.PutAsync("ABCDEFG",
+            new string('A', ConnectionString.MaxEncodedLength), CancellationToken.None));
         using var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
         var target = new IPEndPoint(IPAddress.Loopback, server.LocalEndPoint.Port);

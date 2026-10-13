@@ -12,6 +12,8 @@ internal static class SampleNetwork
             ReceiveBufferCapacity = receiveBufferCapacity,
             KeepaliveInterval = TimeSpan.FromSeconds(10),
         };
+        if (Environment.GetEnvironmentVariable("PINHOLE_SAMPLE_BIND") is { Length: > 0 } bind)
+            options = options with { Bind = IPEndPoint.Parse(bind.Trim()) };
         string mode = Environment.GetEnvironmentVariable("PINHOLE_SAMPLE_NETWORK")?.Trim().ToLowerInvariant() ?? "auto";
         if (mode == "auto") return options;
         options = options with
