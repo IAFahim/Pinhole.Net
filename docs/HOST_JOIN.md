@@ -101,7 +101,7 @@ Wire additions (space-framed ASCII, same style as REG/WANT):
 - `GETC <code>` → `OKCC <b64url-record>` or `WAITC` when absent/expired.
 - `DELC <code> <token>` → deletes, `OKCD`; wrong token `TokB`.
 
-Bounds: ≤4096 codes, code records ≤12 KiB base64url,
+Bounds: ≤4096 codes, code records ≤8 KiB base64url,
 codes 4–16 ASCII chars, TTL sweep, oldest-eviction at capacity. The
 directory stores and forwards records without validating them — the
 authentication always happens in the dialer's handshake, never at the
