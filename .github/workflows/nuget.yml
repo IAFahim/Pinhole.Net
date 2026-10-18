@@ -1,9 +1,11 @@
 name: Publish to NuGet
 
 # Publishes the three packages (Pinhole.Net, Pinhole.Turn, Pinhole.Providers) on tag
-# pushes matching a version (v1.0.0). Requires an NUGET_API_KEY secret with push rights;
-# without it the workflow builds and packs (with symbols) but skips the push, so a
-# release can never half-publish silently.
+# pushes matching a version (v1.9.0) via nuget.org Trusted Publishing — OIDC, no
+# stored API key. Requires the NUGET_USER repo variable (nuget.org profile name) and
+# a trusted publishing policy on nuget.org naming owner/repo/workflow; without
+# NUGET_USER the workflow builds and packs but skips the push, so a release can
+# never half-publish silently.
 
 on:
   push:
@@ -16,6 +18,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      id-token: write # OIDC token issuance for trusted publishing
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -23,16 +28,20 @@ jobs:
           dotnet-version: 10.0.x
       - name: Pack (release, with symbols)
         run: dotnet pack Pinhole.Net.slnx -c Release -o artifacts
+      - name: NuGet login (OIDC → short-lived key)
+        if: vars.NUGET_USER != ''
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ vars.NUGET_USER }}
       - name: Publish
-        env:
-          NUGET_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: vars.NUGET_USER != ''
         run: |
-          if [ -z "$NUGET_KEY" ]; then
-            echo "NUGET_API_KEY secret not set — skipping push; packages land in the workflow artifact"
-            exit 0
-          fi
-          dotnet nuget push artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_KEY" --skip-duplicate
-          dotnet nuget push artifacts/*.snupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_KEY" --skip-duplicate
+          dotnet nuget push artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --skip-duplicate
+          dotnet nuget push artifacts/*.snupkg --source https://api.nuget.org/v3/index.json --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" --skip-duplicate
+      - name: Skip notice (NUGET_USER not set)
+        if: vars.NUGET_USER == ''
+        run: echo "NUGET_USER variable not set — skipping push; packages land in the workflow artifact"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
