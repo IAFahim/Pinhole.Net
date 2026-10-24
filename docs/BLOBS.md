@@ -125,8 +125,9 @@ restarts counters with it; a recovery never continues old counters under recreat
 keys. Resume is then real on the wire, not just on disk: the attempt's requests anchor
 at the checkpointed prefix's first gap, so verified bytes never cross the network
 twice, and reported progress never visibly regresses. Directory downloads carry the
-decoded manifest and the set of completed roots across re-dials — finished files are
-skipped, not re-verified.
+decoded manifest and per-path completion across re-dials — finished files are skipped,
+not re-verified; a file whose content root already landed under another path is
+materialized by copy, since those bytes were root-verified when they arrived.
 
 The failure taxonomy is the contract: `TimeoutException` means the route did not come
 back inside the budget; `InvalidDataException` means a fact about the content or the
@@ -226,11 +227,13 @@ hash verification or resumable checkpoints; an integration must keep those check
 ### Directories
 
 A directory is a manifest blob plus one blob per file. The manifest is binary, not JSON —
-trivially AOT-safe: `[nameLen u8][name][entryCount u32 LE]` then per entry
+trivially AOT-safe: `[nameLen u16 LE][name][entryCount u32 LE]` then per entry
 `[pathLen u16 LE][path (UTF-8, '/'-separated)][size i64 LE][root 32]`. The ticket root
 for a directory is the **manifest's** root (single indirection: ticket → manifest →
 entry roots). Entry paths are sanitized on download: absolute paths and `..` segments
 are rejected, so a hostile manifest cannot write outside the destination directory.
+Entries are stored in ordinal (byte-wise UTF-8) path order — the same tree hashes to
+the same manifest root under every ambient culture.
 
 ## Encryption
 

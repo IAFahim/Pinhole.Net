@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -174,6 +175,33 @@ public sealed class RediscoveryTests
 
         // Truncated wires never parse.
         Assert.False(AddressRecord.TryParseVerified(wire[..^65], 0xABCD, victim.PublicKey, now, out _));
+    }
+
+    [Fact]
+    public void RecordVerification_HostileExpiryTimestamp_ReturnsFalseInsteadOfThrowing()
+    {
+        byte[] seed = NewSeed();
+        RelayIdentity victim = new(EndpointIdentity.DeriveEndpointSeed(seed));
+        byte[] wire = new AddressRecord
+        {
+            PeerId = 0xABCD,
+            EndpointKey = victim.PublicKey,
+            Sequence = 1000,
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5),
+            Endpoints = [new IPEndPoint(IPAddress.Loopback, 4711)],
+        }.EncodeSigned(victim);
+
+        // Forge the expiry (body offset 49, i64 LE) far past DateTimeOffset's representable
+        // range: the signature no longer matches, but expiry is examined BEFORE the
+        // signature, so a total parser must return false — never ArgumentOutOfRangeException.
+        byte[] hostile = (byte[])wire.Clone();
+        BinaryPrimitives.WriteInt64LittleEndian(hostile.AsSpan(49, 8), long.MaxValue);
+        Assert.False(AddressRecord.TryParseVerified(hostile, 0xABCD, victim.PublicKey,
+            DateTimeOffset.UtcNow, out _));
+
+        BinaryPrimitives.WriteInt64LittleEndian(hostile.AsSpan(49, 8), long.MinValue);
+        Assert.False(AddressRecord.TryParseVerified(hostile, 0xABCD, victim.PublicKey,
+            DateTimeOffset.UtcNow, out _));
     }
 
     [Fact]

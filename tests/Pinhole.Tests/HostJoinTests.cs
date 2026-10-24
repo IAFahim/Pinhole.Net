@@ -235,4 +235,155 @@ public sealed class HostJoinTests
         Assert.Equal("WAITC", await Roundtrip("GETC NOSUCHCODE"));
         Assert.Equal("TokB", await Roundtrip("DELC ABCDEFG wrong-token"));
     }
+
+    [Fact]
+    public async Task ClaimToken_IsExactly22Base64UrlCharacters_AndDrivesRefreshAndDelete()
+    {
+        await using var server = RendezvousServer.Start();
+        using var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+        var target = new IPEndPoint(IPAddress.Loopback, server.LocalEndPoint.Port);
+        byte[] buffer = new byte[4096];
+        IPEndPoint any = new(IPAddress.IPv6Any, 0);
+
+        async Task<string> Roundtrip(string message)
+        {
+            await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, target);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            SocketReceiveFromResult res = await udp.ReceiveFromAsync(buffer, SocketFlags.None, any, cts.Token);
+            return Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
+        }
+
+        string reply = await Roundtrip("PUTC TOKEN01 AAAAAAAA");
+        Assert.StartsWith("OKCG ", reply);
+        string token = reply["OKCG ".Length..];
+
+        // 16 random bytes are exactly 22 unpadded base64url characters: no '=', no NUL,
+        // and nothing that depends on stack zero-initialization surviving to the string.
+        Assert.Equal(22, token.Length);
+        Assert.All(token, c => Assert.True(
+            c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_',
+            $"unexpected token character '{c}' (0x{(short)c:X4})"));
+
+        // The issued token authorizes refresh and delete — the operations a token exists for.
+        Assert.StartsWith("OKCG", await Roundtrip($"PUTC TOKEN01 BBBBBBBB {token}"));
+        Assert.Equal("OKCD", await Roundtrip($"DELC TOKEN01 {token}"));
+    }
+
+    [Fact]
+    public async Task RefreshOfAnAbsentCode_IsNOCODE_NotTokB()
+    {
+        await using var server = RendezvousServer.Start();
+        using var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+        var target = new IPEndPoint(IPAddress.Loopback, server.LocalEndPoint.Port);
+        byte[] buffer = new byte[4096];
+        IPEndPoint any = new(IPAddress.IPv6Any, 0);
+
+        async Task<string> Roundtrip(string message)
+        {
+            await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, target);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            SocketReceiveFromResult res = await udp.ReceiveFromAsync(buffer, SocketFlags.None, any, cts.Token);
+            return Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
+        }
+
+        // A token-bearing refresh of a code the directory never saw (restart, eviction)
+        // must say so distinctly: NOCODE means "safe to claim again", TokB means "someone
+        // else owns it". Same distinction for delete.
+        Assert.Equal("NOCODE", await Roundtrip("PUTC GONECOD AAAAAAAA stalenonce"));
+        Assert.Equal("NOCODE", await Roundtrip("DELC GONECOD stalenonce"));
+
+        // ...while a wrong token on a LIVE code is still TokB.
+        Assert.StartsWith("OKCG", await Roundtrip("PUTC LIVECODE AAAAAAAA"));
+        Assert.Equal("TokB", await Roundtrip("PUTC LIVECODE BBBBBBBB wrong-token"));
+        Assert.Equal("TokB", await Roundtrip("DELC LIVECODE wrong-token"));
+    }
+
+    [Fact]
+    public async Task ForgedDirectoryReply_FromAnUnconfiguredSource_IsIgnored()
+    {
+        // The "directory" the client is configured with is attacker-observed: it learns
+        // the client's ephemeral port from the request but never answers itself. A second
+        // socket on a different port then sprays the forged success — the off-path
+        // injection C-08 describes. Only replies from configured servers may count.
+        using var fakeDirectory = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        fakeDirectory.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+        using var spoofer = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+        spoofer.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+
+        var directory = new CodeDirectory([(IPEndPoint)fakeDirectory.LocalEndPoint!]);
+        byte[] forged = Encoding.ASCII.GetBytes("OKCC " + Base64Url.Encode(Encoding.UTF8.GetBytes("pinhole1:AAAAFORGED")));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        Task<string?> resolve = directory.ResolveAsync("ABCDEFG", TimeSpan.FromSeconds(3), TimeSpan.FromMilliseconds(300), cts.Token);
+
+        byte[] buffer = new byte[2048];
+        var anySource = new IPEndPoint(IPAddress.IPv6Any, 0);
+        while (!resolve.IsCompleted)
+        {
+            using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            SocketReceiveFromResult res;
+            try
+            {
+                res = await fakeDirectory.ReceiveFromAsync(buffer, SocketFlags.None, anySource, wait.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            await spoofer.SendToAsync(forged, SocketFlags.None, res.RemoteEndPoint!);
+        }
+
+        Assert.Null(await resolve.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task DirectoryRestart_KeepaliveReClaimsTheCode()
+    {
+        // Reserve a port so the restarted directory can listen where the old one did.
+        int port;
+        using (var probe = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true })
+        {
+            probe.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+            port = ((IPEndPoint)probe.LocalEndPoint!).Port;
+        }
+
+        var endpoint = new IPEndPoint(IPAddress.IPv6Loopback, port);
+
+        var settings = new PinholeHostSettings
+        {
+            RendezvousEndpoints = [endpoint],
+            NodeOptions = OfflineNode(),
+            RefreshInterval = TimeSpan.FromSeconds(1),
+        };
+
+        await using var server = RendezvousServer.Start(port);
+        await using var host = await PinholeSession.HostAsync(settings).WaitAsync(Timeout);
+        Assert.Equal(1, server.CodeCount);
+        string code = host.Code;
+
+        // The directory restarts empty (deploy, crash): the code table is gone and
+        // every refresh now draws NOCODE. Registration must reconcile — re-claim the
+        // code — or the host stays unlisted forever while believing it is listed.
+        await server.DisposeAsync();
+        await using var restarted = RendezvousServer.Start(port);
+        Assert.Equal(0, restarted.CodeCount);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (restarted.CodeCount == 0 && sw.Elapsed < TimeSpan.FromSeconds(8))
+        {
+            await Task.Delay(100);
+        }
+
+        Assert.Equal(1, restarted.CodeCount);
+
+        // The re-claimed registration actually serves joiners.
+        var joiner = new CodeDirectory([restarted.LocalEndPoint]);
+        string? invitation = await joiner.ResolveAsync(code, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(200),
+            CancellationToken.None).WaitAsync(Timeout);
+        Assert.NotNull(invitation);
+        Assert.True(Pinhole.ConnectionString.TryParse(invitation, out _), "re-claimed record is a live connection string");
+    }
 }

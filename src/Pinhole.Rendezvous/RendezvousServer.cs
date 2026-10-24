@@ -200,8 +200,15 @@ public sealed class RendezvousServer : IAsyncDisposable
                 await Say(remote, $"OKCG {token}").ConfigureAwait(false);
                 break;
             case ["PUTC", var code, var record, var oldToken] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
-                if (!_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) held)
-                    || held.Token != oldToken)
+                if (!_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) held))
+                {
+                    // The code vanished — restart or eviction, not a wrong token. NOCODE
+                    // tells the rightful host its registration must reconcile (re-claim).
+                    await Say(remote, "NOCODE").ConfigureAwait(false);
+                    break;
+                }
+
+                if (!Token.Matches(held.Token, oldToken))
                 {
                     await Say(remote, "TokB").ConfigureAwait(false);
                     break;
@@ -223,8 +230,11 @@ public sealed class RendezvousServer : IAsyncDisposable
 
                 break;
             case ["DELC", var delCode, var delToken] when ValidCode(delCode!):
-                if (_codes.TryGetValue(delCode, out (string Record, string Token, DateTimeOffset Seen) current)
-                    && current.Token == delToken)
+                if (!_codes.TryGetValue(delCode, out (string Record, string Token, DateTimeOffset Seen) current))
+                {
+                    await Say(remote, "NOCODE").ConfigureAwait(false);
+                }
+                else if (Token.Matches(current.Token, delToken))
                 {
                     _codes.TryRemove(delCode, out _);
                     await Say(remote, "OKCD").ConfigureAwait(false);
@@ -325,19 +335,30 @@ public sealed class RendezvousServer : IAsyncDisposable
 
     private static class Token
     {
+        /// <summary>16 random bytes as exactly 22 unpadded base64url characters — no
+        /// padding '=' to trim (which once silently left stack NULs inside the token) and
+        /// nothing that depends on span zero-initialization.</summary>
         public static string New()
         {
             Span<byte> raw = stackalloc byte[16];
             System.Security.Cryptography.RandomNumberGenerator.Fill(raw);
-            System.Span<char> chars = stackalloc char[26];
-            Base64UrlEncode(raw, chars);
-            return new string(chars[..26].TrimEnd('='));
+            return Convert.ToBase64String(raw).Replace('+', '-').Replace('/', '_').TrimEnd('=');
         }
 
-        private static void Base64UrlEncode(ReadOnlySpan<byte> bytes, Span<char> output)
+        /// <summary>Constant-time equality: a presented token is compared against the
+        /// stored secret, so comparison timing must not leak how many characters matched.</summary>
+        public static bool Matches(string expected, string presented)
         {
-            string s = Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_');
-            s.AsSpan().CopyTo(output);
+            if (expected.Length != presented.Length || expected.Length > 128)
+            {
+                return false;
+            }
+
+            Span<byte> a = stackalloc byte[expected.Length];
+            Span<byte> b = stackalloc byte[presented.Length];
+            Encoding.ASCII.GetBytes(expected, a);
+            Encoding.ASCII.GetBytes(presented, b);
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(a, b);
         }
     }
 

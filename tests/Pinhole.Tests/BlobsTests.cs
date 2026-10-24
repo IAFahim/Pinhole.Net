@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -132,6 +133,163 @@ public sealed class BlobsTests
             Assert.Equal(3000, new FileInfo(Path.Combine(root, "sub", "b.bin")).Length);
             Assert.Equal(0, new FileInfo(Path.Combine(root, "empty.txt")).Length);
             Assert.Equal(3000 + 5, result.Bytes);
+        }
+        finally
+        {
+            DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryRoundtrip_WritesEveryDuplicateContentFile()
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] shared = RandomBytes(2048);
+            string tree = Path.Combine(dir, "tree");
+            Directory.CreateDirectory(Path.Combine(tree, "pkg"));
+            await File.WriteAllBytesAsync(Path.Combine(tree, "first.bin"), shared);
+            await File.WriteAllBytesAsync(Path.Combine(tree, "pkg", "second.bin"), shared);
+            await File.WriteAllBytesAsync(Path.Combine(tree, "pkg", "third.bin"), shared);
+            // Empty files all share one content root too.
+            await File.WriteAllBytesAsync(Path.Combine(tree, "keep1"), Array.Empty<byte>());
+            await File.WriteAllBytesAsync(Path.Combine(tree, "keep2"), Array.Empty<byte>());
+
+            await using var server = await BlobServer.ServeAsync(tree, new BlobServeOptions { NodeOptions = Offline() });
+            string outDir = Path.Combine(dir, "out");
+            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+
+            string root = Path.Combine(outDir, "tree");
+            string first = Path.Combine(root, "first.bin");
+            string second = Path.Combine(root, "pkg", "second.bin");
+            string third = Path.Combine(root, "pkg", "third.bin");
+            Assert.True(File.Exists(first), "first copy exists");
+            Assert.True(File.Exists(second), "second copy exists");
+            Assert.True(File.Exists(third), "third copy exists");
+            Assert.Equal(shared, await File.ReadAllBytesAsync(first));
+            Assert.Equal(shared, await File.ReadAllBytesAsync(second));
+            Assert.Equal(shared, await File.ReadAllBytesAsync(third));
+            Assert.True(File.Exists(Path.Combine(root, "keep1")), "first empty file exists");
+            Assert.True(File.Exists(Path.Combine(root, "keep2")), "second empty file exists");
+            Assert.Equal(3L * shared.Length, result.Bytes);
+        }
+        finally
+        {
+            DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryRoot_IsCultureIndependent()
+    {
+        string dir = TempDir();
+        CultureInfo original = CultureInfo.CurrentCulture;
+        try
+        {
+            string tree = Path.Combine(dir, "tree");
+            Directory.CreateDirectory(tree);
+            await File.WriteAllBytesAsync(Path.Combine(tree, "a.txt"), "a"u8.ToArray());
+            await File.WriteAllBytesAsync(Path.Combine(tree, "z.txt"), "z"u8.ToArray());
+            await File.WriteAllBytesAsync(Path.Combine(tree, "Å.txt"), "ring"u8.ToArray());
+            await File.WriteAllBytesAsync(Path.Combine(tree, "I.txt"), "cap"u8.ToArray());
+            await File.WriteAllBytesAsync(Path.Combine(tree, "i.txt"), "low"u8.ToArray());
+
+            // da-DK sorts Å after Z and tr-TR swaps I/i; any culture-aware order makes the
+            // same tree hash to a different manifest, hence a different announced root.
+            string danishRoot, turkishRoot, invariantRoot;
+            CultureInfo.CurrentCulture = new CultureInfo("da-DK");
+            await using (var server = await BlobServer.ServeAsync(tree, new BlobServeOptions { NodeOptions = Offline() }))
+            {
+                danishRoot = Convert.ToHexString(server.Ticket.Root);
+            }
+
+            CultureInfo.CurrentCulture = new CultureInfo("tr-TR");
+            await using (var server = await BlobServer.ServeAsync(tree, new BlobServeOptions { NodeOptions = Offline() }))
+            {
+                turkishRoot = Convert.ToHexString(server.Ticket.Root);
+            }
+
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+            await using (var server = await BlobServer.ServeAsync(tree, new BlobServeOptions { NodeOptions = Offline() }))
+            {
+                invariantRoot = Convert.ToHexString(server.Ticket.Root);
+            }
+
+            Assert.Equal(invariantRoot, danishRoot);
+            Assert.Equal(invariantRoot, turkishRoot);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+            DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task FailedHandshake_DoesNotKillTheAcceptLoop()
+    {
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "serve.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(5000));
+            var nodeOptions = Offline() with { ConnectTimeout = TimeSpan.FromSeconds(2) };
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = nodeOptions });
+
+            // A crypto-shaped junk PUNC materializes a stranger that is queued for
+            // AcceptAsync but never completes its handshake, so AcceptAsync throws
+            // TimeoutException inside the loop (A-03). The provider must keep accepting
+            // afterwards — one dead dialer cannot end serving for everyone.
+            using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
+            punc[0] = 0x50;
+            RandomNumberGenerator.Fill(punc.AsSpan(1)); // junk peer id, junk "ephemeral key"
+            attacker.SendTo(punc, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, server.Node.LocalPort));
+
+            await Task.Delay(TimeSpan.FromSeconds(3)); // the handshake deadline fires inside the loop
+
+            string outDir = Path.Combine(dir, "out");
+            await BlobClient.DownloadAsync(server.Ticket, outDir,
+                options: new BlobDownloadOptions
+                {
+                    NodeOptions = Offline(),
+                    RecoveryTimeout = TimeSpan.FromSeconds(4),
+                }).WaitAsync(Timeout);
+            Assert.Equal(await File.ReadAllBytesAsync(src),
+                await File.ReadAllBytesAsync(Path.Combine(outDir, "serve.bin")));
+        }
+        finally
+        {
+            DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task StrangerPunc_IsQueuedForAcceptExactlyOnce()
+    {
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "serve.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(2048));
+            var nodeOptions = Offline() with { Encryption = PinholeEncryption.Optional };
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = nodeOptions });
+
+            // One junk plaintext PUNC under Optional policy: exactly one accept, not two —
+            // a double-queue would hand the same connection to two serving workers.
+            using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            byte[] punc = new byte[13];
+            punc[0] = 0x50;
+            RandomNumberGenerator.Fill(punc.AsSpan(1, 8));
+            attacker.SendTo(punc, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, server.Node.LocalPort));
+
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => server.ConnectionsAccepted >= 1);
+            await Task.Delay(500);
+            Assert.Equal(1, server.ConnectionsAccepted);
         }
         finally
         {

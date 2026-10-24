@@ -260,7 +260,7 @@ public sealed class ConnectionString
     private static void WriteU64(MemoryStream payload, ulong value)
     {
         Span<byte> tmp = stackalloc byte[8];
-        BitConverter.TryWriteBytes(tmp, value);
+        BinaryPrimitives.WriteUInt64LittleEndian(tmp, value);
         payload.Write(tmp);
     }
 }
@@ -376,7 +376,7 @@ internal static class CandidateCodec
                 throw Truncated();
             }
 
-            ulong value = BitConverter.ToUInt64(_data, _pos);
+            ulong value = BinaryPrimitives.ReadUInt64LittleEndian(_data.AsSpan(_pos, 8));
             _pos += 8;
             return value;
         }

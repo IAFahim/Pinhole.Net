@@ -70,15 +70,29 @@ public sealed class BlobTicket
             payload.Write(psk);
         }
 
-        payload.Write(BitConverter.GetBytes((ushort)cs.Length));
+        WriteU16(payload, (ushort)cs.Length);
         payload.Write(cs);
         return Scheme + ":" + Pinhole.Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
+
+        static void WriteU16(Stream s, ushort value)
+        {
+            Span<byte> tmp = stackalloc byte[2];
+            BinaryPrimitives.WriteUInt16LittleEndian(tmp, value);
+            s.Write(tmp);
+        }
     }
 
     /// <summary>Attempts a <see cref="Parse"/> without throwing: false on any malformed
-    /// input (wrong scheme, bad base64url, wrong version, truncated or trailing payload).</summary>
+    /// input — null included — (wrong scheme, bad base64url, wrong version, truncated or
+    /// trailing payload).</summary>
     public static bool TryParse(string? text, out BlobTicket? ticket)
     {
+        if (text is null)
+        {
+            ticket = null;
+            return false;
+        }
+
         try
         {
             ticket = Parse(text);
@@ -142,7 +156,7 @@ public sealed class BlobTicket
             pos += 32;
         }
 
-        int csLen = BitConverter.ToUInt16(p, pos);
+        int csLen = BinaryPrimitives.ReadUInt16LittleEndian(p.AsSpan(pos, 2));
         pos += 2;
         if (csLen == 0 || pos + csLen != p.Length)
         {
@@ -171,20 +185,41 @@ internal static class Manifest
         var payload = new MemoryStream(64 + entries.Count * 64);
         byte[] nameBytes = Encoding.UTF8.GetBytes(name);
         WriteText(payload, nameBytes);
-        payload.Write(BitConverter.GetBytes((uint)entries.Count));
+        WriteU32(payload, (uint)entries.Count);
         foreach (Entry e in entries)
         {
             WriteText(payload, Encoding.UTF8.GetBytes(e.Path));
-            payload.Write(BitConverter.GetBytes(e.Size));
+            WriteU64(payload, e.Size);
             payload.Write(e.Root);
         }
 
         return payload.ToArray();
 
-        static void WriteText(MemoryStream s, byte[] text)
+        static void WriteText(Stream s, byte[] text)
         {
-            s.Write(BitConverter.GetBytes((ushort)text.Length));
+            WriteU16(s, (ushort)text.Length);
             s.Write(text);
+        }
+
+        static void WriteU16(Stream s, ushort value)
+        {
+            Span<byte> tmp = stackalloc byte[2];
+            BinaryPrimitives.WriteUInt16LittleEndian(tmp, value);
+            s.Write(tmp);
+        }
+
+        static void WriteU32(Stream s, uint value)
+        {
+            Span<byte> tmp = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(tmp, value);
+            s.Write(tmp);
+        }
+
+        static void WriteU64(Stream s, long value)
+        {
+            Span<byte> tmp = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64LittleEndian(tmp, value);
+            s.Write(tmp);
         }
     }
 

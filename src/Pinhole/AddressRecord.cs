@@ -161,7 +161,10 @@ public sealed class AddressRecord
             return false;
         }
 
-        if (DateTimeOffset.FromUnixTimeSeconds(expires) <= now)
+        // Expiry is hostile input and is compared as raw Unix seconds — a forged value
+        // beyond DateTimeOffset's range must fail the parse, not throw before the
+        // signature is even checked.
+        if (expires <= now.ToUnixTimeSeconds())
         {
             return false;
         }
@@ -204,6 +207,14 @@ public sealed class AddressRecord
             return false; // trailing bytes mean the signature covered something we didn't parse
         }
 
+        // Unix-second bounds of DateTimeOffset: a hostile expiry inside the "not expired"
+        // half of the range but past the representable maximum still cannot become a
+        // record — total parse, typed false.
+        if (expires is < -62135596800 || expires > 253402300799)
+        {
+            return false;
+        }
+
         record = new AddressRecord
         {
             PeerId = peerId,
@@ -221,7 +232,7 @@ public sealed class AddressRecord
     private static void WriteU64(MemoryStream payload, ulong value)
     {
         Span<byte> tmp = stackalloc byte[8];
-        BitConverter.TryWriteBytes(tmp, value);
+        BinaryPrimitives.WriteUInt64LittleEndian(tmp, value);
         payload.Write(tmp);
     }
 

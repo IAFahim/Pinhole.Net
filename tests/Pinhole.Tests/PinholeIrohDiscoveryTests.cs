@@ -1,6 +1,9 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using Xunit;
 
 namespace Pinhole.Tests;
@@ -197,6 +200,30 @@ public sealed class PinholeIrohDiscoveryTests
         Assert.Null(IrohAddress.Parse(address.ToString()).UserData);
         Assert.Throws<ArgumentException>(() => IrohDiscovery.CreatePayload(
             new IrohAddress(address.EndpointId) { UserData = new string('x', 246) }, identity, 2));
+    }
+
+    [Fact]
+    public void ParsePayload_InvalidUtf8InTxt_IsRejectedAsInvalidData()
+    {
+        // A hostile-but-properly-signed record whose DNS TXT bytes are not UTF-8 must
+        // surface as InvalidDataException (the parser's failure contract), not as a raw
+        // DecoderFallbackException/ArgumentException from the strict decoder.
+        var identity = new RelayIdentity();
+        var address = new IrohAddress(Convert.ToHexString(identity.PublicKey)) { UserData = new string('x', 40) };
+        byte[] payload = IrohDiscovery.CreatePayload(address, identity, 1);
+        ulong timestamp = BinaryPrimitives.ReadUInt64BigEndian(payload.AsSpan(64, 8));
+        byte[] dns = payload[72..];
+        dns[^1] = 0xFF; // last TXT content byte; lengths and offsets stay intact
+
+        byte[] signable = Encoding.ASCII.GetBytes(
+            "3:seqi" + timestamp.ToString(CultureInfo.InvariantCulture)
+            + "e1:v" + dns.Length.ToString(CultureInfo.InvariantCulture) + ":").Concat(dns).ToArray();
+        byte[] hostile = identity.SignBody(signable)
+            .Concat(payload[64..72])
+            .Concat(dns)
+            .ToArray();
+
+        Assert.Throws<InvalidDataException>(() => IrohDiscovery.ParsePayload(identity.PublicKey, hostile, out _));
     }
 
     private sealed class MemoryPkarr : HttpMessageHandler

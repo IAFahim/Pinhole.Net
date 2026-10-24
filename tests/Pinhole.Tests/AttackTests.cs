@@ -195,6 +195,44 @@ public sealed class AttackTests
         Assert.Equal("through the flood"u8.ToArray(), await got.Task.WaitAsync(TimeSpan.FromSeconds(1)));
     }
 
+    /// <summary>A-01: stranger husks that never complete a handshake must be reaped after
+    /// the connect timeout, or a junk-peer flood permanently fills the table and every
+    /// later legitimate inbound stranger is dropped until restart — the cap protects
+    /// memory and then denies service.</summary>
+    [Fact]
+    public async Task StrangerHusks_AreReapedAfterConnectTimeout_AllowingRealPeersIn()
+    {
+        const int cap = 8;
+        await using PinholeNode listener = await PinholeNode.BindAsync(
+            Opts() with { MaxConnectionsOverride = cap, ConnectTimeout = TimeSpan.FromSeconds(2) });
+
+        using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        IPEndPoint listenerWire = new(IPAddress.Loopback, listener.LocalPort);
+        // Crypto-shaped PUNC (77 B): under the default Required policy this is the only
+        // stranger probe that materializes state. Random peer ids, random "ephemeral"
+        // key material — the responder still creates a husk per frame (finding C-11);
+        // none of them ever completes a handshake.
+        byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
+        punc[0] = 0x50;
+        for (int i = 0; i < cap * 5; i++)
+        {
+            RandomNumberGenerator.Fill(punc.AsSpan(1)); // fresh junk peer id and body per frame
+            attacker.SendTo(punc, SocketFlags.None, listenerWire);
+        }
+
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap);
+
+        // Past the listener's connect timeout (plus reap cadence) the junk husks must be
+        // gone: they never handshook, and holding the slots locks every real peer out.
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(10), () => listener.Connections.Count == 0);
+
+        // The freed table admits a genuine peer.
+        await using PinholeNode real = await PinholeNode.BindAsync(Opts() with { ConnectTimeout = TimeSpan.FromSeconds(5) });
+        await using PinholeConnection conn = await real.ConnectAsync(LoopbackString(listener)).WaitAsync(Timeout);
+        Assert.True(conn.IsEncrypted);
+    }
+
     /// <summary>The 1024 cap proven with REAL handshakes instead of raw datagrams (#34
     /// seam): a listener whose MaxConnectionsOverride is 4 admits exactly four strangers,
     /// refuses the rest (their PUNCs stop materializing state, so their dials only ever

@@ -260,6 +260,8 @@ internal sealed partial class NodeEngine : IDisposable
     private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
+    private long _nextHuskReapTicks;     // maintenance deadline for reaping unestablished husks
+    private const long HuskReapIntervalMs = 1000;
 
     public NodeEngine(PinholeOptions options, RelayIdentity? rawIdentity = null,
         Action<IrohPath, ReadOnlyMemory<byte>>? rawReceive = null)
@@ -273,7 +275,7 @@ internal sealed partial class NodeEngine : IDisposable
             _endpointIdentity = rawIdentity;
         else if (endpointSeed is not null || options.PublishIrohAddress || (options.IrohRelayUrls ?? options.ResolvedIrohRelays).Count > 0)
             _endpointIdentity = new RelayIdentity(endpointSeed);
-        _peerId = _endpointIdentity?.PeerId ?? BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        _peerId = _endpointIdentity?.PeerId ?? BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));
         _options = options;
         _maxConns = options.MaxConnectionsOverride ?? MaxConnections;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
@@ -1533,7 +1535,7 @@ internal sealed partial class NodeEngine : IDisposable
         var c = new ConnState
         {
             PeerId = cs.PeerId,
-            Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
+            Token = BinaryPrimitives.ReadUInt32LittleEndian(RandomNumberGenerator.GetBytes(4)),
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly
                 && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay),
@@ -1689,7 +1691,7 @@ internal sealed partial class NodeEngine : IDisposable
         var c = new ConnState
         {
             PeerId = peerId,
-            Token = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)),
+            Token = BinaryPrimitives.ReadUInt32LittleEndian(RandomNumberGenerator.GetBytes(4)),
             RemoteToken = token,
             RemoteTokenKnown = true,
             IsIncoming = true,
@@ -1723,8 +1725,14 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (arrival.Tcp is null && c.Crypto is null && !_options.RelaySignalingOnly)
         {
-            c.IncomingQueued = true;
-            _incoming?.Writer.TryWrite(c);
+            // DirectPathConfirmed/RelayPathConfirmed above usually queued this stranger
+            // already (setting Connected); queueing it again would hand AcceptAsync the
+            // same connection twice and spawn two serving workers on one connection.
+            if (!c.IncomingQueued)
+            {
+                c.IncomingQueued = true;
+                _incoming?.Writer.TryWrite(c);
+            }
         }
         else if (arrival.Tcp is not null) c.PendingTcp = arrival.Tcp;
         return c;
@@ -1769,6 +1777,44 @@ internal sealed partial class NodeEngine : IDisposable
         _tcp?.ClosePeer(c.PeerId, c.DirectTcp);
         c.Dead.Cancel();
         await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>Removes never-established connections whose punch budget expired. A husk
+    /// holds a table slot otherwise: crypto strangers never run a punch loop, condemned
+    /// punches stay as Dead entries, and a full table refuses every later inbound
+    /// stranger. Real sessions (handshake completed once) are untouched — their Dead
+    /// state is deliberately revivable. No Bye is sent (an unauthenticated source must
+    /// not be able to draw one out) and no closed-handshake tombstone is recorded (junk
+    /// peer ids must not evict real handshakes from the ring).</summary>
+    private void ReapUnestablishedHusks()
+    {
+        long budget = (long)_options.ConnectTimeout.TotalMilliseconds;
+        long now = Environment.TickCount64;
+        foreach (ConnState c in ConnectionsSnapshot())
+        {
+            if (c.Connected.Task.IsCompleted)
+            {
+                continue;
+            }
+
+            bool reap;
+            lock (c.Gate)
+            {
+                reap = c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
+                    && now - c.LastKickTicks > budget;
+                if (reap && c.State == PinholeConnectionState.Punching)
+                {
+                    Transition(c, PinholeConnectionState.Dead);
+                    c.DeadSinceTicks = now;
+                }
+            }
+
+            if (reap)
+            {
+                _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
+                c.Dead.Cancel();
+            }
+        }
     }
 
     // ------------------------------------------------------------------ punch
@@ -2011,6 +2057,17 @@ internal sealed partial class NodeEngine : IDisposable
             _portMap?.Tick(Environment.TickCount64);
             _tcpPortMap?.Tick(Environment.TickCount64);
             _interfaceUdp?.Tick(Environment.TickCount64);
+
+            // Stranger-flood lockout (A-01): husks that never completed a handshake and
+            // have gone a full ConnectTimeout without progress must leave the table, or a
+            // junk-peer flood permanently fills the cap and every legitimate inbound
+            // stranger is refused until restart.
+            if (Environment.TickCount64 >= Volatile.Read(ref _nextHuskReapTicks))
+            {
+                Volatile.Write(ref _nextHuskReapTicks, Environment.TickCount64 + HuskReapIntervalMs);
+                ReapUnestablishedHusks();
+            }
+
             if (_interfaceUdp is not null && Environment.TickCount64 >= _nextInterfaceRefresh) RefreshInterfaceCandidates();
             if (_ipv6Firewall is not null && Environment.TickCount64 >= _nextIPv6FirewallRefresh)
                 RefreshIPv6Firewall();
@@ -2289,7 +2346,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         Span<byte> frame = stackalloc byte[PmtuBaseWire];
         Span<byte> nonceBytes = stackalloc byte[8];
-        BitConverter.TryWriteBytes(nonceBytes, nonce);
+        BinaryPrimitives.WriteInt64LittleEndian(nonceBytes, nonce);
         int len = BuildFloorPing(c, nonceBytes, frame);
         try
         {
@@ -2447,7 +2504,7 @@ internal sealed partial class NodeEngine : IDisposable
     private void SendPmtuProbe(ConnState c, SocketAddress target, long nonce, int size)
     {
         Span<byte> body = stackalloc byte[size - PmtuOverhead];
-        BitConverter.TryWriteBytes(body, nonce); // the padding behind it stays zero
+        BinaryPrimitives.WriteInt64LittleEndian(body, nonce); // the padding behind it stays zero
         Span<byte> frame = stackalloc byte[size];
         int len = BuildFrame(c, FrameType.Ping, body, frame);
         try
@@ -2548,7 +2605,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         Span<byte> frame = stackalloc byte[PmtuBaseWire];
         Span<byte> timestamp = stackalloc byte[8];
-        BitConverter.TryWriteBytes(timestamp, Environment.TickCount64);
+        BinaryPrimitives.WriteInt64LittleEndian(timestamp, Environment.TickCount64);
         int len = BuildFloorPing(c, timestamp, frame);
         try
         {
@@ -3452,7 +3509,7 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
-        long echoed = BitConverter.ToInt64(frame[(HeaderSize + 4)..]);
+        long echoed = BinaryPrimitives.ReadInt64LittleEndian(frame[(HeaderSize + 4)..]);
         if (arrival.Tcp is { } stream && stream.AuthenticatedPeer != c.PeerId)
         {
             if (stream.ConfirmProof(c.PeerId, echoed))
@@ -4575,8 +4632,8 @@ internal sealed partial class NodeEngine : IDisposable
         // every retransmission — key agreement must not depend on which probe lands.
         byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody : CryptoWire.PuncCryptoBody)];
         frame[0] = (byte)FrameType.Punc;
-        BitConverter.TryWriteBytes(frame.AsSpan(1), _peerId);
-        BitConverter.TryWriteBytes(frame.AsSpan(HeaderSize), c.Token);
+        BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), _peerId);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(HeaderSize), c.Token);
         if (c.Crypto is { } crypto)
         {
             crypto.MyEphPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength));
@@ -4607,7 +4664,7 @@ internal sealed partial class NodeEngine : IDisposable
     private void WriteHeader(Span<byte> frame, FrameType type)
     {
         frame[0] = (byte)type;
-        BitConverter.TryWriteBytes(frame[1..], _peerId);
+        BinaryPrimitives.WriteUInt64LittleEndian(frame[1..], _peerId);
     }
 
     private static IPEndPoint ToEndpoint(SocketAddress sa)

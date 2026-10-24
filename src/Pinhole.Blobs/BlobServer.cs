@@ -33,10 +33,23 @@ public sealed class BlobServer : IAsyncDisposable
     private readonly object _servingGate = new();
     private readonly HashSet<Task> _serving = new();
 
-    private BlobServer(PinholeNode node, BlobServeOptions options)
+    private BlobServer(PinholeNode node, BlobServeOptions options, Served root, byte[]? psk)
     {
+        // The full immutable catalog is in place before the accept loop can run (A-04):
+        // the serving node is already bound when this constructor starts, so a dial that
+        // lands in the first milliseconds must find _kind/_root/_name/_psk/_streams set.
         _node = node;
         _options = options;
+        _kind = root.IsManifest ? BlobKind.Directory : BlobKind.File;
+        _root = root.Root;
+        _name = root.DisplayName;
+        _psk = psk;
+        _streams[BlobWire.StreamId(root.Root)] = root;
+        foreach (Served entry in root.Entries)
+        {
+            _streams[BlobWire.StreamId(entry.Root)] = entry;
+        }
+
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_stop.Token));
     }
 
@@ -51,13 +64,15 @@ public sealed class BlobServer : IAsyncDisposable
         PreSharedKey = _psk,
     };
 
-    private BlobKind _kind = default!;
-    private byte[] _root = default!;
-    private string _name = default!;
-    private byte[]? _psk;
+    private readonly BlobKind _kind;
+    private readonly byte[] _root;
+    private readonly string _name;
+    private readonly byte[]? _psk;
+
+    private long _chunksServed;
 
     /// <summary>Total verified chunks sent across all connections — a live activity counter.</summary>
-    public long ChunksServed { get; private set; }
+    public long ChunksServed => Interlocked.Read(ref _chunksServed);
 
     /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
     internal PinholeNode Node => _node;
@@ -67,8 +82,10 @@ public sealed class BlobServer : IAsyncDisposable
         get { lock (_servingGate) return _serving.Count; }
     }
 
+    private long _connectionsAccepted;
+
     /// <summary>Total downloader connections accepted so far.</summary>
-    public long ConnectionsAccepted { get; private set; }
+    public long ConnectionsAccepted => Interlocked.Read(ref _connectionsAccepted);
 
     /// <summary>Deterministic loss seam for tests: called with each chunk index about to
     /// be sent; returning true silently drops that chunk (the client's re-request machinery
@@ -114,20 +131,8 @@ public sealed class BlobServer : IAsyncDisposable
         PinholeNode node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
         try
         {
-            var server = new BlobServer(node, options)
-            {
-                _kind = root.IsManifest ? BlobKind.Directory : BlobKind.File,
-                _root = root.Root,
-                _name = root.DisplayName,
-                _psk = options.Encrypt ? BlobWire.Cipher.FreshKey() : null,
-            };
-            server._streams[BlobWire.StreamId(root.Root)] = root;
-            foreach (Served entry in root.Entries)
-            {
-                server._streams[BlobWire.StreamId(entry.Root)] = entry;
-            }
-
-            return server;
+            byte[]? psk = options.Encrypt ? BlobWire.Cipher.FreshKey() : null;
+            return new BlobServer(node, options, root, psk);
         }
         catch
         {
@@ -159,8 +164,24 @@ public sealed class BlobServer : IAsyncDisposable
             {
                 return;
             }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+            {
+                // One dialer whose handshake never completed (or faulted mid-handshake)
+                // is that dialer's problem: the loop keeps serving everyone else instead
+                // of silently stopping the provider (A-03). The pause keeps a repeatedly
+                // faulting source from spinning the loop.
+                try
+                {
+                    await Task.Delay(100, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                continue;
+            }
 
-            ConnectionsAccepted++;
+            Interlocked.Increment(ref _connectionsAccepted);
             Task serving = Task.Run(() => ServeConnectionAsync(conn, ct), CancellationToken.None);
             lock (_servingGate)
             {
@@ -331,7 +352,7 @@ public sealed class BlobServer : IAsyncDisposable
                 await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
             }
 
-            ChunksServed++;
+            Interlocked.Increment(ref _chunksServed);
         }
     }
 
@@ -411,7 +432,7 @@ public sealed class BlobServer : IAsyncDisposable
         {
             string name = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar));
             var entries = new List<(string Rel, Served Served)>();
-            foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Order())
+            foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
             {
                 string rel = Path.GetRelativePath(root, file).Replace('\\', '/');
                 entries.Add((rel, await BuildOneAsync(file, Path.GetFileName(file), ct).ConfigureAwait(false)));

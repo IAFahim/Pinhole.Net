@@ -220,6 +220,21 @@ internal sealed class IrohDiscovery
         return new IrohAddress(Convert.ToHexString(key), direct, relays) { UserData = userData, DerpRelayUrls = derpRelays.Distinct().ToArray() };
     }
 
+    /// <summary>Strict UTF-8 decode that surfaces malformed bytes as the parser's own
+    /// failure type — a hostile TXT/name must die as InvalidDataException, not as a raw
+    /// DecoderFallbackException from the encoder.</summary>
+    private static string DecodeStrict(ReadOnlySpan<byte> dns, byte[] bytes)
+    {
+        try
+        {
+            return Utf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new InvalidDataException("malformed UTF-8 in DNS record", ex);
+        }
+    }
+
     private static List<string> ReadTxt(ReadOnlySpan<byte> dns, string expectedOwner)
     {
         List<string> values = [];
@@ -249,7 +264,7 @@ internal sealed class IrohDiscovery
                     text.Write(dns.Slice(cursor, length));
                     cursor += length;
                 }
-                values.Add(Utf8.GetString(text.ToArray()));
+                values.Add(DecodeStrict(dns, text.ToArray()));
             }
             offset += size;
         }
@@ -278,7 +293,7 @@ internal sealed class IrohDiscovery
             {
                 if (length > 63) throw new InvalidDataException("invalid DNS label");
                 Check(dns, cursor, length);
-                labels.Add(Utf8.GetString(dns.Slice(cursor, length)));
+                labels.Add(DecodeStrict(dns, dns.Slice(cursor, length).ToArray()));
                 if (labels.Sum(x => x.Length + 1) > 255) throw new InvalidDataException("DNS name exceeds size limit");
                 cursor += length;
             }

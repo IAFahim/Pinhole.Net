@@ -32,7 +32,7 @@ public sealed class PinholeHost : IAsyncDisposable
     private readonly CodeDirectory? _directory;
     private readonly WorkerCoordinator? _worker;
     private readonly Task<PinholeConnection>? _workerConnection;
-    private readonly string _token;
+    private string _token;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _keepalive;
     private readonly TimeSpan _refreshInterval;
@@ -111,7 +111,23 @@ public sealed class PinholeHost : IAsyncDisposable
                 catch (Exception ex) when (ex is HttpRequestException or IOException) { }
                 catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested) { }
             }
-            else await _directory!.RefreshAsync(Code, _token, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false);
+            else
+            {
+                // Desired state: the code maps to this host's live string. A refresh that
+                // comes back NOCODE means the directory lost the code (restart, eviction)
+                // and must not be retried with a token forever — reconcile by claiming
+                // again. If another host grabbed the code in the gap the claim draws TokB
+                // and the next refresh interval retries.
+                if (await _directory!.RefreshAsync(Code, _token, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false)
+                    == CodeDirectory.RefreshOutcome.NoCode)
+                {
+                    string? reclaimed = await _directory.PutAsync(Code, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false);
+                    if (reclaimed is not null)
+                    {
+                        _token = reclaimed;
+                    }
+                }
+            }
         }
     }
 
@@ -319,15 +335,36 @@ internal sealed class CodeDirectory
     public async Task<string?> PutAsync(string code, string invitation, CancellationToken ct)
     {
         string message = $"PUTC {code} {EncodeInvitation(invitation)}";
-        return await SendExpectAsync(message, "OKCG ", "TokB", ct).ConfigureAwait(false) is { } reply
+        string? reply = await SendExpectAsync(message, "OKCG ", ["TokB"], ct).ConfigureAwait(false);
+        return reply is not null && reply.StartsWith("OKCG ", StringComparison.Ordinal)
             ? reply["OKCG ".Length..]
             : null;
     }
 
-    public Task RefreshAsync(string code, string token, string invitation, CancellationToken ct) =>
-        SendExpectAsync(
+    /// <summary>Outcome of a token-bearing refresh: confirmed, refused (the code belongs
+    /// to another host now), or gone (the directory lost the code — restart or eviction —
+    /// and the registration should reconcile by claiming again).</summary>
+    public enum RefreshOutcome
+    {
+        Confirmed,
+        Refused,
+        NoCode,
+        Failed,
+    }
+
+    public async Task<RefreshOutcome> RefreshAsync(string code, string token, string invitation, CancellationToken ct)
+    {
+        string? reply = await SendExpectAsync(
             $"PUTC {code} {EncodeInvitation(invitation)} {token}",
-            "OKCG", "TokB", ct);
+            "OKCG", ["TokB", "NOCODE"], ct).ConfigureAwait(false);
+        return reply switch
+        {
+            null => RefreshOutcome.Failed,
+            "TokB" => RefreshOutcome.Refused,
+            "NOCODE" => RefreshOutcome.NoCode,
+            _ => RefreshOutcome.Confirmed,
+        };
+    }
 
     private static string EncodeInvitation(string invitation)
     {
@@ -338,7 +375,7 @@ internal sealed class CodeDirectory
     }
 
     public Task DeleteAsync(string code, string token, CancellationToken ct = default) =>
-        SendExpectAsync($"DELC {code} {token}", "OKCD", "TokB", CancellationToken.None);
+        SendExpectAsync($"DELC {code} {token}", "OKCD", ["TokB", "NOCODE"], CancellationToken.None);
 
     /// <summary>Polls for a code until it appears or the deadline passes. Returns the
     /// decoded invitation, or null on timeout. A record that does not decode is treated
@@ -348,7 +385,8 @@ internal sealed class CodeDirectory
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < deadline)
         {
-            string? record = await SendExpectAsync($"GETC {code}", "OKCC ", "WAITC", ct).ConfigureAwait(false) is { } reply
+            string? record = await SendExpectAsync($"GETC {code}", "OKCC ", ["WAITC"], ct).ConfigureAwait(false) is { } reply
+                && reply.StartsWith("OKCC ", StringComparison.Ordinal)
                 ? reply["OKCC ".Length..]
                 : null;
             if (record is not null)
@@ -373,7 +411,13 @@ internal sealed class CodeDirectory
         return null;
     }
 
-    private async Task<string?> SendExpectAsync(string message, string want, string refusal, CancellationToken ct)
+    /// <summary>Sends one request to every configured server and returns the first
+    /// accepted reply line — a success (starts with <paramref name="want"/>) or a named
+    /// refusal (exactly a terminator). Null means timeout. Replies from endpoints that are
+    /// not configured servers are dropped: an off-path sprayer that guesses the ephemeral
+    /// port must not be able to inject an OKCC/OKCG verdict. (A request-id echo that also
+    /// defeats source spoofing needs a wire-version bump; tracked with handshake v4.)</summary>
+    private async Task<string?> SendExpectAsync(string message, string want, string[] terminators, CancellationToken ct)
     {
         using Socket udp = NewSocket();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -401,19 +445,41 @@ internal sealed class CodeDirectory
                 continue; // one dead server is not a verdict on the others
             }
 
+            if (res.RemoteEndPoint is not IPEndPoint from || !IsConfiguredServer(from))
+            {
+                continue;
+            }
+
             string reply = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
             if (reply.StartsWith(want, StringComparison.Ordinal))
             {
                 return reply;
             }
 
-            if (reply == refusal)
+            foreach (string terminator in terminators)
             {
-                return null;
+                if (reply == terminator)
+                {
+                    return reply;
+                }
             }
         }
 
         return null;
+    }
+
+    private bool IsConfiguredServer(IPEndPoint from)
+    {
+        foreach (IPEndPoint server in _servers)
+        {
+            IPEndPoint wire = ToWire(server);
+            if (wire.Port == from.Port && wire.Address.Equals(from.Address))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Socket NewSocket()

@@ -153,7 +153,7 @@ internal static class PeerEngine
             : bind.Address.AddressFamily == AddressFamily.InterNetwork
                 ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port) // dual-mode cannot bind a bare IPv4 address
                 : bind);
-        return new PeerState { Udp = udp, NodeId = nodeId, Magic = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) };
+        return new PeerState { Udp = udp, NodeId = nodeId, Magic = BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8)) };
     }
 
     public static void Start(PeerState s)
@@ -273,7 +273,7 @@ internal static class PeerEngine
 
         Span<byte> frame = stackalloc byte[9];
         frame[0] = FramePing;
-        BitConverter.TryWriteBytes(frame[1..], Environment.TickCount64);
+        BinaryPrimitives.WriteInt64LittleEndian(frame[1..], Environment.TickCount64);
         s.Udp.SendTo(frame, SocketFlags.None, peer);
     }
 
@@ -453,7 +453,7 @@ internal static class PeerEngine
 
     private static void OnPack(PeerState s, SocketAddress remote, ReadOnlySpan<byte> frame)
     {
-        if (frame.Length < 9 || BitConverter.ToUInt64(frame[1..]) != s.Magic)
+        if (frame.Length < 9 || BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]) != s.Magic)
         {
             return;
         }
@@ -492,7 +492,7 @@ internal static class PeerEngine
             return;
         }
 
-        s.LastRtt = TimeSpan.FromMilliseconds(Environment.TickCount64 - BitConverter.ToInt64(frame[1..]));
+        s.LastRtt = TimeSpan.FromMilliseconds(Environment.TickCount64 - BinaryPrimitives.ReadInt64LittleEndian(frame[1..]));
     }
 
     private static void OnSignal(PeerState s, ReadOnlySpan<byte> line)
@@ -540,7 +540,7 @@ internal static class PeerEngine
     {
         byte[] probe = new byte[9];
         probe[0] = FramePunc;
-        BitConverter.TryWriteBytes(probe.AsSpan(1), s.Magic);
+        BinaryPrimitives.WriteUInt64LittleEndian(probe.AsSpan(1), s.Magic);
         using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(s.Shutdown.Token);
         deadline.CancelAfter(PunchTimeout);
         try

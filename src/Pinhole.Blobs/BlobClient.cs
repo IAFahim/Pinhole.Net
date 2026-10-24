@@ -93,10 +93,13 @@ public static class BlobClient
         int backoffMs = 500;
 
         // State that legitimately survives a re-dial: the decoded manifest (never fetched
-        // twice in one call) and every root that already completed (skipped, not
-        // re-downloaded — its bytes were root-verified before the connection died).
+        // twice in one call) and per-path completion (a file that finished stays finished —
+        // its bytes were root-verified before the connection died). Completion is keyed by
+        // destination path, never by content root: a tree may legitimately contain several
+        // files with the same bytes, and each must be materialized.
         (string Name, List<Manifest.Entry> Entries)? manifest = null;
-        var completedRoots = new HashSet<string>();
+        var completedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var verifiedFileByRoot = new Dictionary<string, string>(StringComparer.Ordinal);
         bool anyResumed = false;
 
         await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
@@ -188,14 +191,29 @@ public static class BlobClient
                 int filesDone = 0;
                 foreach (Manifest.Entry entry in entries)
                 {
-                    if (completedRoots.Contains(Convert.ToHexString(entry.Root)))
+                    if (completedPaths.Contains(entry.Path))
                     {
                         verified += entry.Size;
                         filesDone++;
                         continue;
                     }
 
-                    var sink = new FileSink(SafeJoin(rootDir, entry.Path), entry.Root);
+                    string target = SafeJoin(rootDir, entry.Path);
+                    if (verifiedFileByRoot.TryGetValue(Convert.ToHexString(entry.Root), out string? written))
+                    {
+                        // Identical content is already on disk under another path and was
+                        // root-verified when it landed; copying it is exact, not a shortcut.
+                        string? parent = Path.GetDirectoryName(target);
+                        if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                        File.Copy(written, target, overwrite: true);
+                        completedPaths.Add(entry.Path);
+                        verified += entry.Size;
+                        filesDone++;
+                        progress?.Report(new BlobProgress(verified, total, filesDone, entries.Count));
+                        continue;
+                    }
+
+                    var sink = new FileSink(target, entry.Root);
                     StreamDownloader entryDownloader = new(conn, sink,
                         v => progress?.Report(new BlobProgress(verified + v, total, filesDone, entries.Count)), send, session,
                         entry.Root, recoveryBudget, entry.Root, options: options);
@@ -210,7 +228,8 @@ public static class BlobClient
                         throw;
                     }
 
-                    completedRoots.Add(Convert.ToHexString(entry.Root));
+                    completedPaths.Add(entry.Path);
+                    verifiedFileByRoot[Convert.ToHexString(entry.Root)] = target;
                     verified += bytes;
                     filesDone++;
                     anyResumed |= sink.Resumed;

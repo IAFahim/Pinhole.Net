@@ -63,6 +63,14 @@ public sealed class DecoderHardeningTests
     }
 
     [Fact]
+    public void BlobTicket_TryParse_Null_ReturnsFalse()
+    {
+        // The contract says "false on any malformed input"; null is not exempt.
+        Assert.False(BlobTicket.TryParse(null, out BlobTicket? ticket));
+        Assert.Null(ticket);
+    }
+
+    [Fact]
     public void BlobTicket_RandomBytes_NeverProduceAnUnexpectedThrow()
     {
         // Deterministic seed: any failure regenerates the exact inputs.
