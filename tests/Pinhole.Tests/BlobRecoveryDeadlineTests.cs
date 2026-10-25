@@ -3,10 +3,11 @@ using System.Net;
 using System.Security.Cryptography;
 using Pinhole.Blobs;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-public sealed class BlobRecoveryDeadlineTests
+public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
 {
     private static readonly TimeSpan Ceiling = TimeSpan.FromSeconds(10);
 
@@ -158,13 +159,17 @@ public sealed class BlobRecoveryDeadlineTests
     public async Task HealthyTimeBeforeProviderRestart_DoesNotSpendRecoveryAllowance()
     {
         string dir = TempDir();
-        using var stop = new CancellationTokenSource(TestBudget.Scenario + Ceiling);
+        // The whole scenario is shaper-paced (1 Mbps token bucket), so every phase has a
+        // hard wall-clock floor that runner load can only lengthen, never shrink.
+        TimeSpan allowance = TimeSpan.FromSeconds(10);
+        TimeSpan halfFloor = TimeSpan.FromSeconds(12);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(75));
         Task<BlobDownloadResult>? download = null;
         try
         {
             using var lab = new VirtualLab();
             byte[] seed = RandomNumberGenerator.GetBytes(32);
-            byte[] expected = TestDispose.Pattern(2 * 1024 * 1024, 0xA3);
+            byte[] expected = TestDispose.Pattern(3 * 1024 * 1024, 0xA3);
             string source = Path.Combine(dir, "asset.bin");
             await File.WriteAllBytesAsync(source, expected);
             BlobServeOptions serveOptions = new()
@@ -176,22 +181,32 @@ public sealed class BlobRecoveryDeadlineTests
             lab.Net.AddRule(LinkRule.Bottleneck(region, region, 1_000_000, 128,
                 delay: TimeSpan.FromMilliseconds(20)));
             await using BlobServer server = await BlobServer.ServeAsync(source, serveOptions);
+            long half = expected.Length / 2;
             var halfDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var progress = new InlineProgress(p =>
             {
-                if (p.VerifiedBytes >= expected.Length / 2) halfDone.TrySetResult();
+                if (p.VerifiedBytes >= half) halfDone.TrySetResult();
             });
             var watch = Stopwatch.StartNew();
-            // Half the file takes at least 8.4 s at 1 Mbps, exceeding this allowance.
+            // Half the file is 1.5 MiB over a 1 Mbps shaper: at least ~12.4 s (minus the
+            // bucket's 0.2 s burst credit) plus the dial — a floor the 10 s allowance stays
+            // under, so "the healthy portion exceeds the allowance" is physics, not timing.
+            // The allowance itself covers the restart chain: silent path death (~5 s of
+            // ride-out with these validation knobs), a 0.5 s backoff, re-dial and the first
+            // verified chunk — 5 s could not absorb that on a loaded runner (CI failures at
+            // ~14 s: recovery expired right after the restart).
             // Clock accounting is also tested above without scheduler/timer noise;
             // this scenario verifies actual provider replacement and checkpoint reuse.
-            TimeSpan allowance = TimeSpan.FromSeconds(5);
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with
                 {
                     RecoveryTimeout = allowance,
                     // The blackout fixtures use one 20 ms probe, shorter than this
                     // link's 40 ms RTT. Give healthy traffic a valid probe budget here.
+                    // The knobs are also near their safe minimum: the 128-packet queue
+                    // drains for ~1 s at 1 Mbps, so probe replies can legitimately lag
+                    // a full interval; anything tighter falsely declares the healthy
+                    // path dead mid-transfer.
                     NodeOptions = ClientOptions(lab) with
                     {
                         PathValidationIdle = TimeSpan.FromSeconds(2),
@@ -199,18 +214,20 @@ public sealed class BlobRecoveryDeadlineTests
                         PathValidationMaxUnansweredProbes = 3,
                     },
                 }, stop.Token);
-            Task first = await Task.WhenAny(halfDone.Task, download).WaitAsync(TestBudget.Scenario);
+            Task first = await Task.WhenAny(halfDone.Task, download).WaitAsync(TimeSpan.FromSeconds(45));
             if (first == download)
             {
                 await download; // Report a transfer failure immediately, before the progress wait.
                 Assert.Fail("the transfer finished before the provider-restart trigger");
             }
             Assert.True(watch.Elapsed > allowance, "the healthy portion must exceed the recovery allowance");
+            output.WriteLine($"healthy half ({half} B) verified at {watch.Elapsed.TotalSeconds:F1}s, "
+                + $"allowance {allowance.TotalSeconds:F0}s, floor {halfFloor.TotalSeconds:F0}s");
             await server.DisposeAsync();
             await using BlobServer successor = await BlobServer.ServeAsync(source, serveOptions);
 
             BlobDownloadResult result;
-            try { result = await download.WaitAsync(TestBudget.Scenario); }
+            try { result = await download.WaitAsync(TimeSpan.FromSeconds(45)); }
             catch (TimeoutException ex)
             {
                 Assert.Fail($"provider-restart recovery failed after {watch.Elapsed}: {ex}; "
@@ -222,6 +239,7 @@ public sealed class BlobRecoveryDeadlineTests
             Assert.True(result.Resumed);
             Assert.True(successor.ConnectionsAccepted >= 1);
             Assert.Equal(expected, await File.ReadAllBytesAsync(result.Path));
+            output.WriteLine($"resumed from checkpoint and finished at {watch.Elapsed.TotalSeconds:F1}s total");
         }
         finally
         {

@@ -176,18 +176,22 @@ public sealed class PathValidationTests
     public async Task HealthyDirectTraffic_ProducesNoProbes_AndStaysOpen()
     {
         // A wider idle window than the file default: the flood paces at ~20 ms and a single
-        // scheduler stall on a loaded CI runner must not read as a dead path. 750 ms rather
-        // than 500: on a steal-heavy runner the maintenance loop itself (75 ms ticks) can
-        // stall past half a second, which showed up as a silent side that never probed.
-        await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(750)));
-        await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(750)));
+        // scheduler stall on a loaded CI runner must not read as a dead path. 1500 ms
+        // rather than 750 (itself a widening from 500): the observed macOS failure was
+        // the eventual-probe poll starving for its whole 10 s budget, so the maintenance
+        // loop demonstrably lagged seconds — the same class of stall crossing a 750 ms
+        // idle would make the RECEIVER probe and void the "never probes" assert.
+        await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(1500)));
+        await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(1500)));
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         // One-way flood for far longer than the idle window: the RECEIVER hears constant
         // direct traffic and must never probe; the SENDER hears nothing, so its probes run —
         // and are answered, which is exactly a healthy one-way stream staying Open.
+        // 6 s keeps the flood at 4x the idle window even with the wider 1500 ms budget,
+        // so the receiver-side "never probes" claim still covers many idle windows.
         var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromMilliseconds(3000))
+        while (sw.Elapsed < TimeSpan.FromSeconds(6))
         {
             atB.Send("streaming"u8);
             await Task.Delay(20);
@@ -196,8 +200,10 @@ public sealed class PathValidationTests
         Assert.Equal(0, atA.PathProbesSent);
         Assert.Equal(PinholeConnectionState.Open, atA.State);
         // The silent side's probes and their answers are eventual, not instant: a probe
-        // sent near the flood's end has its reply land after it. Poll the pair.
-        await TestPoll.UntilAsync(Timeout, () => atB.PathProbesSent > 0 && atB.PathProbeReplies > 0);
+        // sent near the flood's end has its reply land after it. Poll the pair — with a
+        // scenario-sized budget, since a loaded runner's maintenance loop (75 ms ticks)
+        // can lag seconds behind the counters it is supposed to advance.
+        await TestPoll.UntilAsync(TestBudget.Scenario, () => atB.PathProbesSent > 0 && atB.PathProbeReplies > 0);
         Assert.Equal(PinholeConnectionState.Open, atB.State);
         Assert.Equal(0, atB.Stats.PingsSent); // monitoring counters stay out of caller stats
     }

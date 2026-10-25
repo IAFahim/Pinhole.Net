@@ -78,17 +78,44 @@ public sealed class LossLadderTests(ITestOutputHelper output)
     [Fact, Trait("Category", "Performance")]
     public async Task LadderCurve_GoodputFallsAsLossRises()
     {
-        double at2 = await RunIsolatedRungAsync(0.02, 501);
-        double at10 = await RunIsolatedRungAsync(0.10, 502);
-        double burst = await RunIsolatedBurstAsync(701);
+        Rung at2 = await RunIsolatedRungAsync(0.02, 501);
+        Rung at15 = await RunIsolatedRungAsync(0.15, 504);
+        Rung at25 = await RunIsolatedRungAsync(0.25, 503);
+        Rung at10 = await RunIsolatedRungAsync(0.10, 502);
+        Rung burst = await RunIsolatedBurstAsync(701, meanLoss: 0.10, meanBurstPackets: 24);
 
-        output.WriteLine($"ladder curve: 2% -> {at2:F0} B/s, 10% -> {at10:F0} B/s, GE(10%, burst 8) -> {burst:F0} B/s");
-        // The orderings are qualitative, but on a loaded runner the three rungs compress
-        // to within ~0.5% of each other (observed: 972383/971757/968504), so a strict
-        // inequality flips on scheduling noise. Preserve the fixed-seed baseline's
-        // two orderings within the existing 2% measurement band.
-        Assert.True(at10 < at2 * 1.02, $"goodput at 10% loss ({at10:F0} B/s) must fall below 2% ({at2:F0} B/s)");
-        Assert.True(burst > at10 * 0.98, $"bursty-loss goodput ({burst:F0} B/s) must beat scattered 10% ({at10:F0} B/s)");
+        output.WriteLine($"ladder curve: 2% -> {at2.Goodput:F0} B/s (served {at2.ChunksServed}), " +
+            $"15% -> {at15.Goodput:F0} B/s (served {at15.ChunksServed}), 25% -> {at25.Goodput:F0} B/s " +
+            $"(served {at25.ChunksServed}); GE(10%, burst 24) -> {burst.Goodput:F0} B/s " +
+            $"(served {burst.ChunksServed}) vs scattered 10% -> {at10.Goodput:F0} B/s (served {at10.ChunksServed})");
+        // The wall-clock orderings are qualitative, and under parallel suite load every
+        // rung's stopwatch stretches, compressing the differences toward equality. The
+        // ladder spacing is chosen so a load-stalled runner cannot realistically invert
+        // it: on a quiet host the rungs take roughly 0.6 s / ~3.5 s / ~10 s, so inverting
+        // an adjacent pair needs a multi-second stall that hits only the cheaper rung —
+        // uniform load cannot invert anything (the lossier rung always stays slower).
+        // The 2% band stays: it marks "measurably below", not "equal".
+        Assert.True(at15.Goodput < at2.Goodput * 1.02,
+            $"goodput at 15% loss ({at15.Goodput:F0} B/s) must fall below 2% ({at2.Goodput:F0} B/s)");
+        Assert.True(at25.Goodput < at15.Goodput * 1.02,
+            $"goodput at 25% loss ({at25.Goodput:F0} B/s) must fall below 15% ({at15.Goodput:F0} B/s)");
+        // Same 10% mean, different structure: long clean stretches between bursts let
+        // the window recover, so bursty loss must beat scattered loss — burst 24 widens
+        // the quiet gap to ~6x (burst 8 was ~1.8x and still inverted under load). The
+        // 15% mean was tried and rejected: its long bad stretches gut the window and the
+        // rung's wall clock swings 4x run to run.
+        Assert.True(burst.Goodput > at10.Goodput * 0.98,
+            $"bursty-loss goodput ({burst.Goodput:F0} B/s) must beat scattered 10% ({at10.Goodput:F0} B/s)");
+        // The same curve in a scheduling-immune currency: rising loss forces rising
+        // retransmission work (chunks served past the 512-chunk floor), and clustered
+        // loss wastes less than scattered loss at the same mean. These counters do not
+        // depend on the runner's clock, so a load-compressed stopwatch cannot flip them.
+        long floor = RungBytes / BlobWire.MaxChunkData;
+        Assert.True(at2.ChunksServed < at15.ChunksServed && at15.ChunksServed < at25.ChunksServed,
+            $"retransmission cost must rise with loss: served {at2.ChunksServed} / {at15.ChunksServed} / "
+            + $"{at25.ChunksServed} (floor {floor})");
+        Assert.True(burst.ChunksServed < at10.ChunksServed,
+            $"bursty 10% must serve fewer chunks than scattered 10%: {burst.ChunksServed} vs {at10.ChunksServed}");
     }
 
     [Fact]
@@ -235,7 +262,10 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         Assert.Equal(RungBytes, new FileInfo(Path.Combine(dir, "out", "rung.bin")).Length);
     }
 
-    private async Task<double> RunIsolatedRungAsync(double loss, int seed)
+    // One measured ladder rung: wall-clock goodput plus the scheduling-immune chunk count.
+    private readonly record struct Rung(double Goodput, long ChunksServed);
+
+    private async Task<Rung> RunIsolatedRungAsync(double loss, int seed)
     {
         string dir = TempDir();
         try
@@ -249,7 +279,7 @@ public sealed class LossLadderTests(ITestOutputHelper output)
             sw.Stop();
             AssertVerified(dir, result);
             output.WriteLine($"rung iid p={loss:P0}: {result.Bytes} B in {sw.Elapsed.TotalSeconds:F1}s — {lab.Net.Counters()}");
-            return result.Bytes / sw.Elapsed.TotalSeconds;
+            return new Rung(result.Bytes / sw.Elapsed.TotalSeconds, server.ChunksServed);
         }
         finally
         {
@@ -257,20 +287,20 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
-    private async Task<double> RunIsolatedBurstAsync(int seed)
+    private async Task<Rung> RunIsolatedBurstAsync(int seed, double meanLoss = 0.10, int meanBurstPackets = 8)
     {
         string dir = TempDir();
         try
         {
             using VirtualLab lab = new();
             await using BlobServer server = await ServeAsync(lab, dir);
-            lab.Net.AddRule(BurstRule(0.10, 8, seed));
+            lab.Net.AddRule(BurstRule(meanLoss, meanBurstPackets, seed));
 
             var sw = Stopwatch.StartNew();
             BlobDownloadResult result = await DownloadAsync(lab, server, dir).WaitAsync(RungBudget);
             sw.Stop();
             AssertVerified(dir, result);
-            return result.Bytes / sw.Elapsed.TotalSeconds;
+            return new Rung(result.Bytes / sw.Elapsed.TotalSeconds, server.ChunksServed);
         }
         finally
         {

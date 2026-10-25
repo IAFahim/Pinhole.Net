@@ -200,7 +200,10 @@ public sealed class HostJoinTests
         await udp.SendToAsync(stranger, SocketFlags.None, target);
         byte[] buffer = new byte[256];
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        // The refusal itself is the verdict, so the wait must be generous: on a loaded
+        // runner the in-process directory's receive loop can sit behind other collections'
+        // work for seconds (CI once timed this out at 3 s). 10 s only bounds a lost reply.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         SocketReceiveFromResult res = await udp.ReceiveFromAsync(buffer, SocketFlags.None, any, cts.Token);
         Assert.Equal("TokB", Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim());
         Assert.Equal(1, server.CodeCount); // unchanged, not replaced by the stranger

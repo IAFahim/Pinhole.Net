@@ -24,16 +24,18 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // A 2 MiB flow, not the class's 512 KiB default: the receive window opens small
+            // A 6 MiB flow, not the class's 512 KiB default: the receive window opens small
             // and ramps over ~40 ms RTTs, and on a slow runner the ramp alone can eat a
             // quarter of a short flow (observed 435 KiB/s vs the 1953 ceiling, zero loss,
-            // queue depth 1). The saturation claim needs the sustained phase to dominate.
-            const long bytes = 2 * 1024 * 1024;
+            // queue depth 1). The saturation claim needs the sustained phase to dominate,
+            // and the measured window below skips the first 1 MiB entirely so window
+            // ramp-up and runner scheduling stalls during it cannot dilute the rate.
+            const long bytes = 6 * 1024 * 1024;
             using var lab = new VirtualLab();
             await using BlobServer server = await ServeAsync(lab, dir, bytes);
             AddBottleneck(lab, queuePackets: 256);
 
-            var transfer = new TransferProgress();
+            var transfer = new TransferProgress(startAfterBytes: bytes / 6);
             var stats = new BlobTransferStats();
             var sw = Stopwatch.StartNew();
             BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer, stats).WaitAsync(FlowBudget);
@@ -43,13 +45,17 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             Assert.True(transfer.Bytes > 0 && transfer.Elapsed > TimeSpan.Zero);
             double kibPerSecond = transfer.Bytes / transfer.Elapsed.TotalSeconds / 1024;
             output.WriteLine($"deep queue: {result.Bytes} B in {sw.Elapsed.TotalSeconds:F2}s total; " +
-                             $"{transfer.Bytes} B in {transfer.Elapsed.TotalSeconds:F2}s receiving = {kibPerSecond:F0} KiB/s " +
-                             $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()} | " +
-                             $"requests={stats.RequestsSent}, retransmits={stats.Retransmits}, loss-windows={stats.LossEvents}, " +
-                             $"resumes={stats.ConservativeResumes}, duplicate-bytes={stats.DuplicateBytes}, " +
-                             $"rtt-ms={stats.SmoothedRtt?.TotalMilliseconds:F1}, window={stats.WindowBytes}");
+                $"{transfer.Bytes} B in {transfer.Elapsed.TotalSeconds:F2}s sustained = {kibPerSecond:F0} KiB/s " +
+                $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()} | " +
+                $"requests={stats.RequestsSent}, retransmits={stats.Retransmits}, loss-windows={stats.LossEvents}, " +
+                $"resumes={stats.ConservativeResumes}, duplicate-bytes={stats.DuplicateBytes}, " +
+                $"rtt-ms={stats.SmoothedRtt?.TotalMilliseconds:F1}, window={stats.WindowBytes}");
             Assert.True(kibPerSecond <= LinkBits / 8 / 1024 * 1.05,
                 $"measured {kibPerSecond:F0} KiB/s exceeds the 16 Mbit/s link — the shaper is not shaping");
+            // The floor keeps its 25%-of-ceiling meaning but is asserted over the sustained
+            // window (last 5 MiB): a loaded runner stretches the ramp and the first data
+            // far more than the steady drain, which is exactly what must not read as a
+            // broken baseline (the CI flake measured ~110 KiB/s with the ramp included).
             Assert.True(kibPerSecond >= LinkBits / 8 / 1024 * 0.25,
                 $"goodput collapsed to {kibPerSecond:F0} KiB/s on a clean 16 Mbit/s link — the baseline is broken");
         }
@@ -215,7 +221,11 @@ public sealed class BottleneckTests(ITestOutputHelper output)
 
     private static void AssertVerified(string dir, BlobDownloadResult result) => Assert.Equal(FlowBytes, result.Bytes);
 
-    private sealed class TransferProgress : IProgress<BlobProgress>
+    // Measures the SUSTAINED window only: recording starts once VerifiedBytes crosses
+    // startAfterBytes, so the receive window's ramp (and any scheduler stall inside it)
+    // stays out of the goodput math; the elapsed span is still first-recorded to
+    // last-report, as before.
+    private sealed class TransferProgress(long startAfterBytes) : IProgress<BlobProgress>
     {
         private long _firstTick;
         private long _lastTick;
@@ -228,6 +238,7 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             long now = Stopwatch.GetTimestamp();
             if (_firstTick == 0)
             {
+                if (progress.VerifiedBytes < startAfterBytes) return;
                 _firstTick = now;
                 _firstBytes = progress.VerifiedBytes;
             }
