@@ -84,8 +84,12 @@ public sealed class Aead : IDisposable
 
             return true;
         }
-        catch (AuthenticationTagMismatchException)
+        catch (CryptographicException)
         {
+            // Authentication failures must read as "false", never throw: the input is
+            // wire data. The base type, not just AuthenticationTagMismatchException,
+            // because OpenSSL 3.5/3.6 surfaces corrupt ChaCha20-Poly1305 tags through
+            // other exception shapes on some paths.
             return false;
         }
     }
