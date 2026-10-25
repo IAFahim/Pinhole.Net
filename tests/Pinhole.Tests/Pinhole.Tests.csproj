@@ -21,6 +21,7 @@
 		     entry point and generated sources; it is built through InteropHost.csproj. -->
 		<Compile Remove="Interop/**/*.cs" />
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Core/Pinhole.Core.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Crypto/Pinhole.Crypto.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Wire/Pinhole.Wire.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Moq/Pinhole.Moq.csproj" />
