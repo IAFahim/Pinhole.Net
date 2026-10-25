@@ -54,11 +54,6 @@ public sealed class BlobRunTransferTests
         }
     }
 
-    private sealed class InlineProgress(Action<BlobProgress> on) : IProgress<BlobProgress>
-    {
-        public void Report(BlobProgress value) => on(value);
-    }
-
     private static byte[] RandomBytes(long size)
     {
         var data = new byte[size];
@@ -649,25 +644,33 @@ public sealed class BlobRunTransferTests
             await File.WriteAllBytesAsync(src, data);
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            // Hold run 1 (chunks 64..127) back until the runs around it have staged,
-            // so it commits last: the fold prefix stalls at run 1 while runs 2..4
-            // commit sparse, then the drain and final fold must still hit the root.
+            // Hold run 1 (chunks 64..127) back until the runs around it have been
+            // served, so it commits last: the fold prefix stalls at run 1 while runs
+            // 2..4 commit sparse, then the drain and final fold must still hit the
+            // root. The release counts chunks SERVED BY THE PROVIDER, not client
+            // progress: progress timing is scheduler-dependent and hung this test on
+            // every non-Linux CI runner, while the served-chunk counter flips at the
+            // same point on any OS. Budget 90s: the heal is 64 single-chunk PTO
+            // re-requests, which loaded runners stretch without anything being wrong.
+            int othersServed = 0;
             int released = 0;
-            server.DropChunk = idx => idx is >= 64 and < 128 && Volatile.Read(ref released) == 0;
-            // Synchronous report (no Progress<T> threadpool hop) so the release flips
-            // the moment the surrounding runs have staged, and a generous budget: the
-            // heal is 64 single-chunk PTO re-requests, which loaded CI runners stretch
-            // well past the default 30 s without anything being wrong.
-            var progress = new InlineProgress(p =>
+            server.DropChunk = idx =>
             {
-                if (p.VerifiedBytes >= 200_000)
+                if (idx is >= 64 and < 128)
+                {
+                    return Volatile.Read(ref released) == 0;
+                }
+
+                if (Interlocked.Increment(ref othersServed) >= 200)
                 {
                     Volatile.Write(ref released, 1);
                 }
-            });
+
+                return false;
+            };
 
             string outDir = Path.Combine(dir, "out");
-            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir, progress,
+            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(TimeSpan.FromSeconds(90));
             Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "ooo.bin")));
             _ = result;
