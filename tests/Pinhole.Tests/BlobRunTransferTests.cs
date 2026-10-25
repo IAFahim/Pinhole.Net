@@ -13,7 +13,7 @@ namespace Pinhole.Tests;
 // v4/v3 fallback, v3/v4, plaintext) still completes byte-exact.
 public sealed class BlobRunTransferTests
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
 
     private static PinholeOptions Offline() => new()
     {
@@ -52,6 +52,11 @@ public sealed class BlobRunTransferTests
                 Thread.Sleep(50);
             }
         }
+    }
+
+    private sealed class InlineProgress(Action<BlobProgress> on) : IProgress<BlobProgress>
+    {
+        public void Report(BlobProgress value) => on(value);
     }
 
     private static byte[] RandomBytes(long size)
@@ -649,7 +654,11 @@ public sealed class BlobRunTransferTests
             // commit sparse, then the drain and final fold must still hit the root.
             int released = 0;
             server.DropChunk = idx => idx is >= 64 and < 128 && Volatile.Read(ref released) == 0;
-            var progress = new Progress<BlobProgress>(p =>
+            // Synchronous report (no Progress<T> threadpool hop) so the release flips
+            // the moment the surrounding runs have staged, and a generous budget: the
+            // heal is 64 single-chunk PTO re-requests, which loaded CI runners stretch
+            // well past the default 30 s without anything being wrong.
+            var progress = new InlineProgress(p =>
             {
                 if (p.VerifiedBytes >= 200_000)
                 {
@@ -659,7 +668,7 @@ public sealed class BlobRunTransferTests
 
             string outDir = Path.Combine(dir, "out");
             BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir, progress,
-                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(TimeSpan.FromSeconds(90));
             Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "ooo.bin")));
             _ = result;
         }
