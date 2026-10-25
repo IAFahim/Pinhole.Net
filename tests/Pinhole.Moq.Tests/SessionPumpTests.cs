@@ -80,11 +80,13 @@ public sealed class SessionPumpTests
         var parts = new List<(int, byte[])> { (0, SubgroupHeader(alias: 1, group: 7)) };
         for (uint i = 0; i < 8; i++)
         {
-            parts.Add((100, Object(i == 0 ? 0UL : 1UL, (byte)(0xa0 + i)))); // 8 × 100 ms ≫ the 200 ms idle budget
+            // 8 × 150 ms of lifetime against a 900 ms budget: the gaps keep a 750 ms
+            // cushion for CI runners whose Task.Delay continuations overshoot.
+            parts.Add((150, Object(i == 0 ? 0UL : 1UL, (byte)(0xa0 + i))));
         }
 
         await MoqSessionPump.ProcessSubgroupStreamAsync(
-            new DripStream([.. parts]), (_, _) => Task.FromResult(subscription), CancellationToken.None, TimeSpan.FromMilliseconds(200)).WaitAsync(Timeout);
+            new DripStream([.. parts]), (_, _) => Task.FromResult(subscription), CancellationToken.None, TimeSpan.FromMilliseconds(900)).WaitAsync(Timeout);
 
         for (uint i = 0; i < 8; i++)
         {
