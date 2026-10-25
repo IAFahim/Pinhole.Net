@@ -135,7 +135,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         {
             lock (_c.Gate)
             {
-                return _c.PmtuWire > 0 ? _c.PmtuWire : NodeEngine.PmtuBaseWire;
+                return _c.Pmtu.Wire > 0 ? _c.Pmtu.Wire : NodeEngine.PmtuBaseWire;
             }
         }
     }
@@ -220,7 +220,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         {
             lock (_c.Gate)
             {
-                return _c.RttEwmaTicks > 0 ? TimeSpan.FromTicks((long)_c.RttEwmaTicks) : null;
+                return _c.Keepalive.RttEwmaTicks > 0 ? TimeSpan.FromTicks((long)_c.Keepalive.RttEwmaTicks) : null;
             }
         }
     }

@@ -6,6 +6,8 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading.Channels;
+using Pinhole.Core;
+using Pinhole.Crypto;
 using Pinhole.Turn;
 
 namespace Pinhole;
@@ -91,30 +93,19 @@ internal sealed class ConnState
     // nothing, or a dead path that never errors would look alive forever.
     public long LastDirectRxTicks;       // Volatile; written under Gate
     public long LastRelayRxTicks;        // Volatile; receive thread only — relay-leg liveness clock
-    public bool ProbeOutstanding;        // Gate
-    public long ProbeNonce;              // Gate; TickCount64 | ProbeMarker
-    public long ProbeDeadlineTicks;      // Gate
     public SocketAddress? ProbeTarget;   // Gate; the endpoint the outstanding probe went to
-    public int UnansweredProbes;         // Gate
     public long PathProbesSent;          // Interlocked; separate from caller ping stats
     public long PathProbeReplies;        // Interlocked; only matched, direct-endpoint replies
 
     // RFC 8899-style path MTU discovery. The 1200-byte API floor is presumed good; padded
     // pings climb from there, and a confirmed size raises the app payload ceiling. All
-    // fields are guarded by Gate except the counters.
-    public int PmtuWire;                   // Gate; confirmed wire capacity (0 = unprobed)
-    public bool PmtuVerifiedSize;          // Gate; the confirmed size itself was (re)verified
-    public bool PmtuOutstanding;           // Gate
-    public long PmtuProbeNonce;            // Gate; TickCount64 | PmtuProbeMarker
-    public int PmtuProbeSize;              // Gate; wire bytes of the outstanding probe
-    public int PmtuProbeTries;             // Gate
-    public long PmtuDeadlineTicks;         // Gate
-    public SocketAddress? PmtuProbeTarget; // Gate; the endpoint the probe went to
+    // fields are guarded by Gate except the counters; the decisions live in PmtuMachine.
+    public PmtuState Pmtu;                   // Gate; wired from options at creation
+    public SocketAddress? PmtuProbeTarget;   // Gate; the endpoint the probe went to
     public IUdpSocket? PmtuProbeUdpSocket;
-    public long PmtuNextProbeTicks;        // Gate; cooldown after failure / ceiling
     public long PmtuProbesSent;            // Interlocked
     public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
-    public long KeepaliveNextTicks;        // Gate; zero-interval (off) never reaches this path
+    public KeepaliveState Keepalive;       // Gate; ping cadence, probe ladder, RTT EWMA — KeepaliveMachine owns the decisions
 
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
@@ -132,7 +123,6 @@ internal sealed class ConnState
     public string? LastRejectFrom; // Volatile.Read/Write: source of the last token-rejected frame
     public readonly long[] RejectsByKind = new long[9]; // indexed by the kinds above
     public long LastRttTicks = long.MinValue; // Interlocked
-    public double RttEwmaTicks;              // guarded by Gate
     public int ConsecutiveSendFailures;
 }
 
@@ -174,8 +164,9 @@ internal sealed partial class NodeEngine : IDisposable
     private const int PmtuStepBytes = 128;
     private const int PmtuProbeAttempts = 3;
     // RFC 8899 re-probe cadence comes from PmtuReprobeInterval (default 5 min): a settled
-    // path re-verifies its confirmed size, catching a mid-connection MTU shrink.
-    private const long PmtuProbeMarker = 1L << 62;
+    // path re-verifies its confirmed size, catching a mid-connection MTU shrink. The
+    // probe nonce marker (positive, bit 62) lives in PmtuMachine and cannot collide with
+    // path-probe nonces (sign bit, KeepaliveMachine) or caller ping timestamps.
 
     private readonly ulong _peerId;
     private readonly PinholeOptions _options;
@@ -307,6 +298,16 @@ internal sealed partial class NodeEngine : IDisposable
 
     private DatagramBuffer? CreateBuffer() =>
         _options.ReceiveBufferCapacity > 0 ? new DatagramBuffer(_options.ReceiveBufferCapacity) : null;
+
+    private PmtuState NewPmtuState() => PmtuState.Create(
+        PmtuBaseWire, PmtuStepBytes, PmtuProbeAttempts, PmtuCeilingV4, PmtuCeilingV6,
+        (long)_options.PmtuReprobeInterval.TotalMilliseconds,
+        (long)_options.PathValidationProbeInterval.TotalMilliseconds);
+
+    private KeepaliveState NewKeepaliveState() => KeepaliveState.Create(
+        (long)_options.KeepaliveInterval.TotalMilliseconds,
+        (long)_options.PathValidationProbeInterval.TotalMilliseconds,
+        _options.PathValidationMaxUnansweredProbes);
 
     public int LocalPort
     {
@@ -1491,6 +1492,8 @@ internal sealed partial class NodeEngine : IDisposable
                 : null,
         };
         c.Buffer = CreateBuffer();
+        c.Pmtu = NewPmtuState();
+        c.Keepalive = NewKeepaliveState();
         c.PuncFrame = BuildPunc(c);
         c.Public = new PinholeConnection(this, c);
         // Before publication: no other thread can see c through the table, so seeding the
@@ -1641,6 +1644,8 @@ internal sealed partial class NodeEngine : IDisposable
             Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
         };
         c.Buffer = CreateBuffer();
+        c.Pmtu = NewPmtuState();
+        c.Keepalive = NewKeepaliveState();
         c.PuncFrame = BuildPunc(c);
         c.Public = new PinholeConnection(this, c);
         // Two PUNCs raced: the first entry wins, the second becomes nothing.
@@ -1930,9 +1935,9 @@ internal sealed partial class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ path validation
 
-    // High bit of a probe's timestamp marks it as maintenance; caller pings keep their
-    // plain TickCount64 so RTT stats and monitoring counters never mix.
-    private const long ProbeMarker = unchecked((long)0x8000000000000000);
+    // Probe timestamp markers (path probes the sign bit, PMTUD probes bit 62) live in the
+    // machines; caller pings keep their plain TickCount64 so RTT stats and monitoring
+    // counters never mix.
 
     private async Task MaintenanceLoopAsync(CancellationToken ct)
     {
@@ -2111,7 +2116,10 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
+        Span<Effect> effects = stackalloc Effect[2];
         bool suspect = false;
+        SocketAddress? target = null;
+        long nonce = 0;
         lock (c.Gate)
         {
             if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null)
@@ -2127,23 +2135,25 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            if (c.ProbeOutstanding)
+            KeepaliveInput input = default;
+            input.Kind = KeepaliveInputKind.ProbeTick;
+            input.PathEligible = true;  // state/path/remote eligibility is verified above
+            input.RecentActivity = false; // the idle window check above already ran
+            input.Path = EffectPath.Direct;
+            int n = KeepaliveMachine.Step(ref c.Keepalive, in input, new Tick(now), effects);
+            for (int i = 0; i < n; i++)
             {
-                if (now < c.ProbeDeadlineTicks)
+                if (effects[i].Kind == EffectKind.Notify)
                 {
-                    return; // this probe's reply may still land
-                }
-
-                c.ProbeOutstanding = false;
-                c.UnansweredProbes++;
-                if (c.UnansweredProbes >= _options.PathValidationMaxUnansweredProbes)
-                {
-                    c.UnansweredProbes = 0;
                     suspect = true;
                 }
-                else
+                else if (effects[i].Kind == EffectKind.Transmit)
                 {
-                    return; // next tick sends the next probe
+                    nonce = effects[i].Value;
+                    target = c.DirectRemote;
+                    c.ProbeTarget = target;
+                    c.ProbeTcp = c.DirectTcp;
+                    c.ProbeUdpSocket = c.DirectUdpSocket;
                 }
             }
         }
@@ -2154,12 +2164,16 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
-        SendPathProbe(c);
+        if (target is not null)
+        {
+            SendDirectProbe(c, target, nonce);
+        }
     }
 
     private void ValidateRelayPath(ConnState c)
     {
         long now = Environment.TickCount64;
+        Span<Effect> effects = stackalloc Effect[2];
         bool suspect = false;
         bool probe = false;
         lock (c.Gate)
@@ -2176,30 +2190,22 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            if (c.ProbeOutstanding)
+            KeepaliveInput input = default;
+            input.Kind = KeepaliveInputKind.ProbeTick;
+            input.PathEligible = true;  // degraded/relay/ready eligibility is verified above
+            input.RecentActivity = false; // the idle window check above already ran
+            input.Path = EffectPath.Relay;
+            int n = KeepaliveMachine.Step(ref c.Keepalive, in input, new Tick(now), effects);
+            for (int i = 0; i < n; i++)
             {
-                if (now < c.ProbeDeadlineTicks)
+                if (effects[i].Kind == EffectKind.Notify)
                 {
-                    return; // this probe's reply may still land
-                }
-
-                c.ProbeOutstanding = false;
-                c.UnansweredProbes++;
-                if (c.UnansweredProbes >= _options.PathValidationMaxUnansweredProbes)
-                {
-                    c.UnansweredProbes = 0;
                     suspect = true;
                 }
-                else
+                else if (effects[i].Kind == EffectKind.Transmit)
                 {
-                    return; // next tick sends the next probe
+                    probe = true;
                 }
-            }
-            else
-            {
-                probe = true;
-                c.ProbeOutstanding = true;
-                c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
             }
         }
 
@@ -2226,39 +2232,16 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void ResetPathProbesNoLock(ConnState c)
     {
-        c.ProbeOutstanding = false;
+        KeepaliveInput reset = default;
+        reset.Kind = KeepaliveInputKind.PathChanged;
+        KeepaliveMachine.Step(ref c.Keepalive, in reset, new Tick(Environment.TickCount64), Span<Effect>.Empty);
         c.ProbeTarget = null;
         c.ProbeTcp = null;
         c.ProbeUdpSocket = null;
-        c.UnansweredProbes = 0;
     }
 
-    private void SendPathProbe(ConnState c)
+    private void SendDirectProbe(ConnState c, SocketAddress target, long nonce)
     {
-        long now = Environment.TickCount64;
-        long nonce = now | ProbeMarker;
-        SocketAddress? target;
-        lock (c.Gate)
-        {
-            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct)
-            {
-                return;
-            }
-
-            target = c.DirectRemote;
-            if (target is null)
-            {
-                return;
-            }
-
-            c.ProbeOutstanding = true;
-            c.ProbeNonce = nonce;
-            c.ProbeTarget = target;
-            c.ProbeTcp = c.DirectTcp;
-            c.ProbeUdpSocket = c.DirectUdpSocket;
-            c.ProbeDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
-        }
-
         Span<byte> frame = stackalloc byte[PmtuBaseWire];
         Span<byte> nonceBytes = stackalloc byte[8];
         BinaryPrimitives.WriteInt64LittleEndian(nonceBytes, nonce);
@@ -2277,20 +2260,21 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void MaybeKeepalive(ConnState c)
     {
-        long intervalMs = (long)_options.KeepaliveInterval.TotalMilliseconds;
         long now = Environment.TickCount64;
+        Span<Effect> effects = stackalloc Effect[2];
+        bool ping = false;
         lock (c.Gate)
         {
-            if (c.State is not (PinholeConnectionState.Open or PinholeConnectionState.Degraded)
-                || now < c.KeepaliveNextTicks)
-            {
-                return;
-            }
-
-            c.KeepaliveNextTicks = now + intervalMs;
+            KeepaliveInput input = default;
+            input.Kind = KeepaliveInputKind.MaintainTick;
+            input.PathEligible = c.State is PinholeConnectionState.Open or PinholeConnectionState.Degraded;
+            ping = KeepaliveMachine.Step(ref c.Keepalive, in input, new Tick(now), effects) > 0;
         }
 
-        Ping(c);
+        if (ping)
+        {
+            Ping(c);
+        }
     }
 
     // ------------------------------------------------------------------ path MTU discovery
@@ -2298,108 +2282,41 @@ internal sealed partial class NodeEngine : IDisposable
     private void DiscoverPathMtu(ConnState c)
     {
         long now = Environment.TickCount64;
-        SocketAddress? target;
-        long nonce;
-        int size;
+        Span<Effect> effects = stackalloc Effect[2];
+        SocketAddress? target = null;
+        long nonce = 0;
+        int size = 0;
         lock (c.Gate)
         {
-            if (c.State != PinholeConnectionState.Open || c.Path != PathKind.Direct || c.DirectRemote is null || c.DirectTcp is not null)
+            PmtuInput input = default;
+            input.Kind = PmtuInputKind.Tick;
+            input.PathEligible = c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct
+                && c.DirectRemote is not null && c.DirectTcp is null;
+            input.IPv4 = PmtuPathIsV4NoLock(c);
+            int n = PmtuMachine.Step(ref c.Pmtu, in input, new Tick(now), effects);
+            for (int i = 0; i < n; i++)
             {
-                if (c.PmtuWire != 0 || c.PmtuOutstanding)
+                if (effects[i].Kind != EffectKind.Transmit)
                 {
-                    c.PmtuWire = 0;
-                    c.PmtuOutstanding = false;
-                    c.PmtuNextProbeTicks = 0;
+                    continue;
                 }
-                return;
+
+                c.PmtuProbeTarget = c.DirectRemote;
+                c.PmtuProbeUdpSocket = c.DirectUdpSocket;
+                target = c.PmtuProbeTarget;
+                nonce = effects[i].Value;
+                size = effects[i].Length;
             }
-
-            if (c.PmtuOutstanding)
-            {
-                if (now < c.PmtuDeadlineTicks)
-                {
-                    return; // this probe's pong may still land
-                }
-
-                if (++c.PmtuProbeTries >= PmtuProbeAttempts)
-                {
-                    // The size never answered. An over-MTU probe is silently dropped by the
-                    // network, not errored, so absence of a pong IS the measurement.
-                    c.PmtuOutstanding = false;
-                    if (c.PmtuProbeSize == c.PmtuWire && c.PmtuWire > PmtuBaseWire)
-                    {
-                        // The CONFIRMED size no longer traverses: the path's MTU shrank
-                        // under us. Fall back to the guaranteed floor and re-climb —
-                        // app-sized sends stop blackholing within one probe cycle.
-                        c.PmtuWire = PmtuBaseWire;
-                        c.PmtuVerifiedSize = false;
-                        c.PmtuNextProbeTicks = 0;
-                        return;
-                    }
-
-                    // A failed climb starts the cooldown; the cycle after EVERY cooldown
-                    // re-verifies the confirmed size first (VerifiedSize reset here), so a
-                    // path that shrank later is caught on the next cooldown, not never.
-                    c.PmtuVerifiedSize = false;
-                    c.PmtuNextProbeTicks = now + (long)_options.PmtuReprobeInterval.TotalMilliseconds;
-                    return;
-                }
-            }
-            else
-            {
-                if (now < c.PmtuNextProbeTicks)
-                {
-                    return;
-                }
-
-                int next;
-                if (c.PmtuWire > PmtuBaseWire && !c.PmtuVerifiedSize)
-                {
-                    // RFC 8899 size re-verification: prove the CONFIRMED size still
-                    // traverses before climbing further. A path whose MTU shrank after the
-                    // confirmation (a VPN or tunnel engaged mid-connection) silently drops
-                    // app-sized frames while small validation probes keep passing — without
-                    // this, the stale confirmation would blackhole large payloads forever.
-                    next = c.PmtuWire;
-                }
-                else
-                {
-                    next = NextPmtuSizeLocked(c);
-                    if (next <= 0)
-                    {
-                        c.PmtuNextProbeTicks = now + (long)_options.PmtuReprobeInterval.TotalMilliseconds; // ceiling reached; re-climb later
-                        return;
-                    }
-                }
-
-                c.PmtuProbeSize = next;
-                c.PmtuProbeTries = 0;
-                c.PmtuOutstanding = true;
-            }
-
-            c.PmtuProbeNonce = now | PmtuProbeMarker;
-            c.PmtuDeadlineTicks = now + (long)_options.PathValidationProbeInterval.TotalMilliseconds;
-            c.PmtuProbeTarget = c.DirectRemote;
-            c.PmtuProbeUdpSocket = c.DirectUdpSocket;
-            target = c.PmtuProbeTarget;
-            nonce = c.PmtuProbeNonce;
-            size = c.PmtuProbeSize;
         }
 
-        SendPmtuProbe(c, target!, nonce, size);
+        if (target is not null)
+        {
+            SendPmtuProbe(c, target, nonce, size);
+        }
     }
 
-    private static int NextPmtuSizeLocked(ConnState c)
-    {
-        int ceiling = PmtuCeilingLocked(c);
-        int floor = Math.Max(c.PmtuWire, PmtuBaseWire);
-        return floor >= ceiling ? 0 : Math.Min(ceiling, floor + PmtuStepBytes);
-    }
-
-    private static int PmtuCeilingLocked(ConnState c) =>
-        c.DirectRemoteEp is { Address.AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork }
-            ? PmtuCeilingV4
-            : PmtuCeilingV6;
+    private static bool PmtuPathIsV4NoLock(ConnState c) =>
+        c.DirectRemoteEp is { Address.AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork };
 
     private void SendPmtuProbe(ConnState c, SocketAddress target, long nonce, int size)
     {
@@ -2445,7 +2362,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             // PMTUD may have proven the path can carry more than the API floor; it can never
             // prove less — 1200 bytes are guaranteed from the moment the session opens.
-            ceiling = c.PmtuWire > 0 ? c.PmtuWire - PmtuOverhead : MaxPayload;
+            ceiling = c.Pmtu.Wire > 0 ? c.Pmtu.Wire - PmtuOverhead : MaxPayload;
         }
         ArgumentOutOfRangeException.ThrowIfGreaterThan(payload.Length, ceiling);
         switch (c.State)
@@ -3374,9 +3291,11 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 lock (c.Gate)
                 {
-                    int ceiling = PmtuCeilingLocked(c);
-                    if (wireLength > c.PmtuWire && wireLength <= ceiling)
-                        c.PmtuWire = wireLength;
+                    PmtuInput evidence = default;
+                    evidence.Kind = PmtuInputKind.InboundEvidence;
+                    evidence.IPv4 = PmtuPathIsV4NoLock(c);
+                    evidence.WireLength = wireLength;
+                    PmtuMachine.Step(ref c.Pmtu, in evidence, new Tick(Environment.TickCount64), Span<Effect>.Empty);
                 }
             }
         }
@@ -3417,14 +3336,19 @@ internal sealed partial class NodeEngine : IDisposable
             // traffic, or a reply from anywhere else counts for nothing.
             lock (c.Gate)
             {
-                if (c.ProbeOutstanding && c.ProbeNonce == echoed
-                    && !arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp)
+                if (!arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp)
                     && ReferenceEquals(arrival.UdpSocket, c.ProbeUdpSocket) && SameEndPoint(arrival.Direct, c.ProbeTarget))
                 {
-                    c.ProbeOutstanding = false;
-                    c.ProbeTarget = null;
-                    c.UnansweredProbes = 0;
-                    Interlocked.Increment(ref c.PathProbeReplies);
+                    bool wasOutstanding = c.Keepalive.ProbeOutstanding;
+                    KeepaliveInput ack = default;
+                    ack.Kind = KeepaliveInputKind.ProbeAcked;
+                    ack.Echo = echoed;
+                    KeepaliveMachine.Step(ref c.Keepalive, in ack, new Tick(Environment.TickCount64), Span<Effect>.Empty);
+                    if (wasOutstanding && !c.Keepalive.ProbeOutstanding)
+                    {
+                        c.ProbeTarget = null;
+                        Interlocked.Increment(ref c.PathProbeReplies);
+                    }
                 }
             }
 
@@ -3436,29 +3360,20 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
-        if ((echoed & PmtuProbeMarker) != 0)
+        if ((echoed & PmtuMachine.ProbeMarker) != 0)
         {
             // A PMTUD probe's pong: confirm the probe size only when the nonce matches the
             // outstanding probe AND the reply came from the endpoint it was sent to — the
             // same discipline path probes apply, for the same reason.
             lock (c.Gate)
             {
-                if (c.PmtuOutstanding && c.PmtuProbeNonce == echoed
-                    && !arrival.ViaRelay && arrival.Tcp is null && ReferenceEquals(arrival.UdpSocket, c.PmtuProbeUdpSocket)
+                if (!arrival.ViaRelay && arrival.Tcp is null && ReferenceEquals(arrival.UdpSocket, c.PmtuProbeUdpSocket)
                     && SameEndPoint(arrival.Direct, c.PmtuProbeTarget))
                 {
-                    c.PmtuOutstanding = false;
-                    if (c.PmtuProbeSize > c.PmtuWire)
-                    {
-                        c.PmtuWire = c.PmtuProbeSize;
-                        c.PmtuVerifiedSize = false; // the new size earns its own re-verification later
-                    }
-                    else
-                    {
-                        c.PmtuVerifiedSize = true; // the confirmed size re-verified; keep climbing
-                    }
-
-                    c.PmtuNextProbeTicks = 0; // climb again on the next tick
+                    PmtuInput ack = default;
+                    ack.Kind = PmtuInputKind.PongAcked;
+                    ack.Nonce = echoed;
+                    PmtuMachine.Step(ref c.Pmtu, in ack, new Tick(Environment.TickCount64), Span<Effect>.Empty);
                 }
             }
 
@@ -3475,12 +3390,16 @@ internal sealed partial class NodeEngine : IDisposable
             DirectPathConfirmed(c, arrival, sealedEvidence: true); // an answered caller ping is direct-path activity too
         }
 
-        long rttTicks = (Environment.TickCount64 - echoed) * TimeSpan.TicksPerMillisecond;
+        long nowMs = Environment.TickCount64;
+        long rttTicks = (nowMs - echoed) * TimeSpan.TicksPerMillisecond;
         Interlocked.Exchange(ref c.LastRttTicks, rttTicks);
         Interlocked.Increment(ref c.PongsReceived);
         lock (c.Gate)
         {
-            c.RttEwmaTicks = c.RttEwmaTicks == 0 ? rttTicks : c.RttEwmaTicks + 0.25 * (rttTicks - c.RttEwmaTicks);
+            KeepaliveInput sample = default;
+            sample.Kind = KeepaliveInputKind.RttSample;
+            sample.Echo = echoed;
+            KeepaliveMachine.Step(ref c.Keepalive, in sample, new Tick(nowMs), Span<Effect>.Empty);
         }
     }
 
@@ -3585,7 +3504,7 @@ internal sealed partial class NodeEngine : IDisposable
         RandomNumberGenerator.Fill(payload);
         // A transport-control nonce uses the maintenance marker, so its pong is
         // authenticated evidence without manufacturing an application RTT sample.
-        BinaryPrimitives.WriteInt64LittleEndian(payload, BinaryPrimitives.ReadInt64LittleEndian(payload) | ProbeMarker);
+        BinaryPrimitives.WriteInt64LittleEndian(payload, BinaryPrimitives.ReadInt64LittleEndian(payload) | KeepaliveMachine.ProbeMarker);
         Span<byte> frame = stackalloc byte[PmtuBaseWire];
         int length = BuildFloorPing(c, payload, frame);
         SendOnArrival(arrival, frame[..length]);
@@ -3816,12 +3735,11 @@ internal sealed partial class NodeEngine : IDisposable
             // Migration: the endpoint changed (roam, family switch), so the confirmed MTU
             // belongs to the OLD path. Forget it and re-climb — a v6 path's plateau and a
             // freshly-engaged VPN's overhead say so independently.
-            if (c.PmtuWire != 0 || c.PmtuOutstanding)
+            if (c.Pmtu.Wire != 0 || c.Pmtu.Outstanding)
             {
-                c.PmtuWire = 0;
-                c.PmtuOutstanding = false;
-                c.PmtuVerifiedSize = false;
-                c.PmtuNextProbeTicks = 0;
+                PmtuInput migrated = default;
+                migrated.Kind = PmtuInputKind.PathMigrated;
+                PmtuMachine.Step(ref c.Pmtu, in migrated, new Tick(Environment.TickCount64), Span<Effect>.Empty);
             }
 
             if (c.Connected.Task.IsFaulted)

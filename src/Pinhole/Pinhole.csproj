@@ -25,6 +25,7 @@
 		  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		  <PrivateAssets>all</PrivateAssets>
 		</PackageReference>
+		<ProjectReference Include="..\Pinhole.Core\Pinhole.Core.csproj" />
 		<ProjectReference Include="..\Pinhole.Turn\Pinhole.Turn.csproj" />
 		<ProjectReference Include="..\Pinhole.Providers\Pinhole.Providers.csproj" />
 	</ItemGroup>

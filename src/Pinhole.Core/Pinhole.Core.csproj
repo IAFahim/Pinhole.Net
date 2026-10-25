@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<!-- netstandard2.1 waits for R4's Unity runtime answer; premature here. -->
+		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>Sans-IO decision machines for Pinhole.Net — pure, total state steppers over Pinhole.Crypto primitives</Description>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- Tick comes from Crypto; Core never defines a second one. -->
+		<ProjectReference Include="..\Pinhole.Crypto\Pinhole.Crypto.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
+
+</Project>
