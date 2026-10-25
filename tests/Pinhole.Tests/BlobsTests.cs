@@ -362,9 +362,12 @@ public sealed class BlobsTests
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
             var droppedOnce = new HashSet<long>();
+            // The lie lands in run 1 (chunk 100), past run 0's 64-chunk boundary: under
+            // v4 only whole verified runs checkpoint, so a retry has state to resume
+            // from exactly when at least one run committed before the abort.
             server.CorruptChunk = (idx, bytes) =>
             {
-                if (idx == 10 && droppedOnce.Add(idx))
+                if (idx == 100 && droppedOnce.Add(idx))
                 {
                     bytes[0] ^= 0xFF; // lie exactly once, then serve honestly
                 }
@@ -530,20 +533,25 @@ public sealed class BlobsTests
             });
 
             // Drop the tail so the first attempt provably cannot finish — on loopback the
-            // transfer outruns any progress-callback cancellation otherwise.
-            server.DropChunk = idx => idx >= 50;
+            // transfer outruns any progress-callback cancellation otherwise. The v4
+            // transfer checkpoints whole verified runs (64 chunks), so the boundary sits
+            // past run 0's end.
+            server.DropChunk = idx => idx >= 130;
             Task firstRun = Task.Run(() => BlobClient.DownloadAsync(server.Ticket, outDir, progress,
                 new BlobDownloadOptions { NodeOptions = Offline() }, cancelFirst.Token));
             await firstProgress.Task.WaitAsync(Timeout);
             // Verified chunks can arrive ahead of a missing leading chunk. Resume
-            // starts at the persisted contiguous prefix, so wait for that evidence
-            // before interrupting instead of equating aggregate progress with it.
+            // starts at the committed runs, so wait for that evidence before
+            // interrupting instead of equating aggregate progress with it.
             await TestPoll.UntilAsync(Timeout, () =>
             {
                 try
                 {
                     byte[] state = File.ReadAllBytes(Path.Combine(target + ".pinhole-part", "state"));
-                    return state.Length == 56 && BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(48)) >= 20;
+                    // PBPART02: magic(8) root(32) totalBytes(8) runCount(8) bitmapLen(4)
+                    // bitmap — run 0 committed means bit 0 of the first bitmap byte.
+                    return state.Length > 61 && state.AsSpan(0, 8).SequenceEqual("PBPART02"u8)
+                        && (state[60] & 1) == 1;
                 }
                 catch (IOException) { return false; }
             });

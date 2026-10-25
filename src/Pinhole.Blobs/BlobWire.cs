@@ -18,10 +18,13 @@ internal static class BlobWire
     internal const byte TypeChunk = 4;
     internal const byte TypeBye = 5;
     internal const byte TypeWelcome = 6;
+    internal const byte TypeProof = 7;
     internal const byte ProtocolVersion = 3;
+    internal const byte CurrentVersion = 4;
 
     public const int MaxChunkData = Blake3.ChunkSize; // 1024
     public const int MaxRequestCount = 64;
+    public const int MaxProofSiblings = 64;
 
     public const int SessionIdLength = 32;
     private const int SealedHeadLength = 8 + 25 + 16;
@@ -41,8 +44,9 @@ internal static class BlobWire
 
     // Built without the shared BodyWriter helper, like Chunk: spans cannot be captured
     // in the lambda.
-    public static byte[] Hello(ulong stream, ReadOnlySpan<byte> sessionId)
+    public static byte[] Hello(ulong stream, ReadOnlySpan<byte> sessionId, byte version = ProtocolVersion)
     {
+        CheckVersion(version);
         if (sessionId.Length != SessionIdLength)
         {
             throw new ArgumentException("session id must be 32 bytes", nameof(sessionId));
@@ -51,14 +55,15 @@ internal static class BlobWire
         byte[] frame = new byte[10 + SessionIdLength];
         frame[0] = TypeHello;
         BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
-        frame[9] = ProtocolVersion;
+        frame[9] = version;
         sessionId.CopyTo(frame.AsSpan(10));
         return frame;
     }
 
     public static byte[] Welcome(ulong stream, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce,
-        ReadOnlySpan<byte> sealedHead)
+        ReadOnlySpan<byte> sealedHead, byte version = ProtocolVersion)
     {
+        CheckVersion(version);
         if (sessionId.Length != SessionIdLength || providerNonce.Length != SessionIdLength
             || sealedHead.Length != SealedHeadLength)
         {
@@ -68,11 +73,19 @@ internal static class BlobWire
         byte[] frame = new byte[10 + 2 * SessionIdLength + SealedHeadLength];
         frame[0] = TypeWelcome;
         BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
-        frame[9] = ProtocolVersion;
+        frame[9] = version;
         sessionId.CopyTo(frame.AsSpan(10));
         providerNonce.CopyTo(frame.AsSpan(10 + SessionIdLength));
         sealedHead.CopyTo(frame.AsSpan(10 + 2 * SessionIdLength));
         return frame;
+    }
+
+    private static void CheckVersion(byte version)
+    {
+        if (version is not (ProtocolVersion or CurrentVersion))
+        {
+            throw new ArgumentOutOfRangeException(nameof(version), "blob protocol version must be 3 or 4");
+        }
     }
 
     public static byte[] Bye(ulong stream) => Build(TypeBye, stream, 0, static _ => { });
@@ -103,6 +116,24 @@ internal static class BlobWire
         return frame;
     }
 
+    // Sibling CVs run bottom-up: from the verified run's root toward the file root.
+    public static byte[] Proof(ulong stream, long runIndex, ReadOnlySpan<byte> siblingCvs32Each)
+    {
+        if (siblingCvs32Each.Length % SessionIdLength != 0
+            || siblingCvs32Each.Length / SessionIdLength > MaxProofSiblings)
+        {
+            throw new ArgumentException($"sibling CVs are 0..{MaxProofSiblings} 32-byte values", nameof(siblingCvs32Each));
+        }
+
+        byte[] frame = new byte[9 + 8 + 1 + siblingCvs32Each.Length];
+        frame[0] = TypeProof;
+        BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
+        BinaryPrimitives.WriteInt64LittleEndian(frame.AsSpan(9), runIndex);
+        frame[17] = (byte)(siblingCvs32Each.Length / SessionIdLength);
+        siblingCvs32Each.CopyTo(frame.AsSpan(18));
+        return frame;
+    }
+
     public readonly record struct Frame
     {
         public byte Type { get; init; }
@@ -114,6 +145,7 @@ internal static class BlobWire
         public long Index { get; init; }
         public byte[]? ChunkCv { get; init; }
         public byte[]? ChunkData { get; init; }
+        public byte[]? SiblingCvs { get; init; } // Proof: count * 32 concatenated sibling CVs
 
         public byte[]? SessionId { get; init; }
         public byte Version { get; init; }
@@ -135,7 +167,7 @@ internal static class BlobWire
             {
                 case TypeHello:
                     if (body.Length is not (0 or SessionIdLength)
-                        && (body.Length != 1 + SessionIdLength || body[0] != ProtocolVersion))
+                        && (body.Length != 1 + SessionIdLength || body[0] is not (ProtocolVersion or CurrentVersion)))
                     {
                         return false;
                     }
@@ -144,12 +176,13 @@ internal static class BlobWire
                     {
                         Type = type,
                         Stream = stream,
-                        Version = body.IsEmpty ? (byte)1 : body.Length == SessionIdLength ? (byte)2 : ProtocolVersion,
+                        Version = body.IsEmpty ? (byte)1 : body.Length == SessionIdLength ? (byte)2 : body[0],
                         SessionId = body.IsEmpty ? null : body.Length == SessionIdLength ? body.ToArray() : body[1..].ToArray(),
                     };
                     return true;
                 case TypeWelcome:
-                    if (body.Length != 1 + 2 * SessionIdLength + SealedHeadLength || body[0] != ProtocolVersion)
+                    if (body.Length != 1 + 2 * SessionIdLength + SealedHeadLength
+                        || body[0] is not (ProtocolVersion or CurrentVersion))
                     {
                         return false;
                     }
@@ -158,7 +191,7 @@ internal static class BlobWire
                     {
                         Type = type,
                         Stream = stream,
-                        Version = ProtocolVersion,
+                        Version = body[0],
                         SessionId = body.Slice(1, SessionIdLength).ToArray(),
                         ProviderNonce = body.Slice(1 + SessionIdLength, SessionIdLength).ToArray(),
                         SealedHead = body[(1 + 2 * SessionIdLength)..].ToArray(),
@@ -219,6 +252,29 @@ internal static class BlobWire
                         ChunkData = data,
                     };
                     return f.Index >= 0 && data.Length > 0;
+                case TypeProof:
+                    if (body.Length is < 9 or > 9 + MaxProofSiblings * SessionIdLength)
+                    {
+                        return false;
+                    }
+
+                    int siblings = body[8];
+                    long runIndex = BinaryPrimitives.ReadInt64LittleEndian(body);
+                    if (runIndex < 0 || siblings > MaxProofSiblings
+                        || body.Length != 9 + siblings * SessionIdLength)
+                    {
+                        return false;
+                    }
+
+                    f = new Frame
+                    {
+                        Type = type,
+                        Stream = stream,
+                        Index = runIndex,
+                        Count = siblings,
+                        SiblingCvs = body[9..].ToArray(),
+                    };
+                    return true;
                 default:
                     return false;
             }
@@ -276,7 +332,7 @@ internal static class BlobWire
                 return false;
             }
 
-            Cipher candidate = _cipher ?? Cipher.For(_psk, _root, SessionId, welcome.ProviderNonce!)!;
+            Cipher candidate = _cipher ?? Cipher.For(_psk, _root, SessionId, welcome.ProviderNonce!, welcome.Version)!;
             ulong candidateWatermark = _watermark;
             if (!candidate.TryOpen(fromProvider: true, welcome.SealedHead!, ref candidateWatermark, out byte[] head)
                 || !Frame.TryParse(head, out frame) || frame.Type != TypeHead || frame.Stream != stream)
@@ -303,7 +359,8 @@ internal static class BlobWire
 
         private Cipher(KeyParameter key) => _key = key;
 
-        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce)
+        public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce,
+            byte version = ProtocolVersion)
         {
             if (psk is null)
             {
@@ -320,8 +377,16 @@ internal static class BlobWire
             root.CopyTo(salt, 0);
             sessionId.CopyTo(salt.AsSpan(root.Length));
             providerNonce.CopyTo(salt.AsSpan(root.Length + SessionIdLength));
-            return Derive(psk, salt, "pinhole-blobs-v3");
+            return Derive(psk, salt, InfoString(version));
         }
+
+        // The HKDF info string is the only v3/v4 difference; role byte and counters are shared.
+        private static string InfoString(byte version) => version switch
+        {
+            ProtocolVersion => "pinhole-blobs-v3",
+            CurrentVersion => "pinhole-blobs-v4",
+            _ => throw new ArgumentOutOfRangeException(nameof(version), "blob protocol version must be 3 or 4"),
+        };
 
         public static LegacyDetector ForLegacy(byte[] psk, byte[] root) => new(psk, root);
 

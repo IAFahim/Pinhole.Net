@@ -76,6 +76,23 @@ public sealed class BlobServer : IAsyncDisposable
 
     internal Func<long, bool>? DuplicateChunk { get; set; }
 
+    // v4 seams: proofs are honest unless a test says otherwise. DropProof suppresses
+    // the frame (loss), CorruptProof hands the test the mutable sibling bytes, and
+    // ReworkChunkCv lets a lying provider ship a self-consistent CV (the per-chunk
+    // check passes; only the run's root proof can catch it) — returning null keeps
+    // the honest outboard CV.
+    internal Func<long, bool>? DropProof { get; set; }
+
+    internal Action<ulong, long, byte[]>? CorruptProof { get; set; }
+
+    internal Func<long, byte[], byte[]?>? ReworkChunkCv { get; set; }
+
+    // Reorder the wire: send a covered run's proof before its chunks instead of after.
+    internal bool DeliverProofsBeforeChunks { get; set; }
+
+    // Emulate a pre-v4 provider: answer v3 Hellos, close on version 4.
+    internal bool LegacyV3Only { get; set; }
+
     public static async Task<BlobServer> ServeAsync(string path, BlobServeOptions? options = null, CancellationToken ct = default)
     {
         options ??= new BlobServeOptions();
@@ -179,6 +196,7 @@ public sealed class BlobServer : IAsyncDisposable
         BlobWire.Cipher? cipher = null;
         byte[]? boundSession = null;
         byte[]? providerNonce = null; // generated once per accepted blob connection, retained for retries
+        byte sessionVersion = 0;      // the Hello version this connection negotiated (3 or 4)
         BlobWire.Cipher.LegacyDetector? legacy = _psk is null ? null : BlobWire.Cipher.ForLegacy(_psk, _root);
         var files = new Dictionary<ulong, FileStream>();
         try
@@ -199,10 +217,15 @@ public sealed class BlobServer : IAsyncDisposable
                 {
                     // Hello and the nonce prefix of Welcome bootstrap the ticket cipher.
                     // They carry explicit versions; v1/v2 are refused without sealing anything.
+                    // A v4 Hello binds the v4 HKDF info string and a version-4 Welcome;
+                    // LegacyV3Only emulates a pre-v4 provider that closes on version 4.
                     if (BlobWire.Frame.TryParse(payload.Span, out f)
                         && f.Type == BlobWire.TypeHello)
                     {
-                        if (f.Version != BlobWire.ProtocolVersion)
+                        bool versionOk = LegacyV3Only
+                            ? f.Version == BlobWire.ProtocolVersion
+                            : f.Version is (BlobWire.ProtocolVersion or BlobWire.CurrentVersion);
+                        if (!versionOk)
                         {
                             await conn.CloseAsync().ConfigureAwait(false);
                             return;
@@ -212,11 +235,12 @@ public sealed class BlobServer : IAsyncDisposable
                         {
                             boundSession = f.SessionId!;
                             providerNonce = BlobWire.Cipher.FreshSessionId();
-                            cipher = BlobWire.Cipher.For(_psk, _root, boundSession, providerNonce);
+                            sessionVersion = f.Version;
+                            cipher = BlobWire.Cipher.For(_psk, _root, boundSession, providerNonce, sessionVersion);
                         }
-                        else if (!boundSession.AsSpan().SequenceEqual(f.SessionId))
+                        else if (!boundSession.AsSpan().SequenceEqual(f.SessionId) || f.Version != sessionVersion)
                         {
-                            continue; // a session swap mid-connection: confused or hostile, ignored
+                            continue; // a session or version swap mid-connection: confused or hostile, ignored
                         }
                     }
                     else if (cipher is not null
@@ -255,8 +279,11 @@ public sealed class BlobServer : IAsyncDisposable
                             {
                                 // Every retry keeps the same provider nonce but seals a
                                 // new Head with a fresh counter, including directory streams.
+                                // The Welcome (and the key under which it was sealed) carry
+                                // the version the Hello negotiated.
                                 byte[] sealedHead = cipher.Seal(asProvider: true, sendCounter.Next(), head);
-                                await SendFrameAsync(conn, BlobWire.Welcome(f.Stream, boundSession!, providerNonce!, sealedHead)).ConfigureAwait(false);
+                                await SendFrameAsync(conn, BlobWire.Welcome(f.Stream, boundSession!, providerNonce!, sealedHead,
+                                    sessionVersion)).ConfigureAwait(false);
                             }
                         }
 
@@ -264,7 +291,8 @@ public sealed class BlobServer : IAsyncDisposable
                     case BlobWire.TypeReq:
                         if (_streams.TryGetValue(f.Stream, out Served? item))
                         {
-                            await ServeRangeAsync(conn, cipher, item, f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
+                            await ServeRangeAsync(conn, cipher, sessionVersion == BlobWire.CurrentVersion, item,
+                                f.StartChunk, f.Count, files, sendCounter).ConfigureAwait(false);
                         }
 
                         break;
@@ -301,9 +329,21 @@ public sealed class BlobServer : IAsyncDisposable
     private ValueTask SendFrameAsync(PinholeConnection conn, byte[] wire) =>
         BlobWire.SendRidingOutPathlessnessAsync(conn, wire, _stop.Token);
 
-    private async Task ServeRangeAsync(PinholeConnection conn, BlobWire.Cipher? cipher, Served item, long start, int count, Dictionary<ulong, FileStream> files, Counter counter)
+    // Any request that delivers a run's last chunk also delivers that run's proof —
+    // whether it covered the whole run in one go or merely completed it piecewise (a
+    // young pacer window splits runs across requests). Proofs are idempotent on the
+    // receiver; retransmit requests that land on a run boundary carry one again. On a
+    // v4 connection the receiver stages chunks and commits a run only once this proof
+    // chains it to the ticket root.
+    private async Task ServeRangeAsync(PinholeConnection conn, BlobWire.Cipher? cipher, bool v4, Served item, long start, int count,
+        Dictionary<ulong, FileStream> files, Counter counter)
     {
         long end = Math.Min(start + count, item.TotalChunks);
+        if (v4 && cipher is not null && item.TotalChunks >= 2 && DeliverProofsBeforeChunks)
+        {
+            await SendProofsForCompletedRunsAsync(conn, cipher, item, start, end, counter).ConfigureAwait(false);
+        }
+
         for (long idx = start; idx < end; idx++)
         {
             if (DropChunk?.Invoke(idx) == true)
@@ -313,15 +353,57 @@ public sealed class BlobServer : IAsyncDisposable
 
             byte[] data = await item.ReadChunkAsync(idx, files, _stop.Token).ConfigureAwait(false);
             CorruptChunk?.Invoke(idx, data);
-            byte[] frame = BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data);
+            byte[]? reworked = ReworkChunkCv?.Invoke(idx, data); // null keeps the honest outboard CV
+            byte[] cv = reworked ?? item.Cvs[idx];
+            byte[] frame = BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, cv, data);
             await SendSealedAsync(conn, cipher, frame, counter).ConfigureAwait(false);
             if (DuplicateChunk?.Invoke(idx) == true)
             {
-                await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, item.Cvs[idx], data), counter).ConfigureAwait(false);
+                await SendSealedAsync(conn, cipher, BlobWire.Chunk(BlobWire.StreamId(item.Root), idx, cv, data), counter).ConfigureAwait(false);
             }
 
             Interlocked.Increment(ref _chunksServed);
+            if (v4 && cipher is not null && item.TotalChunks >= 2 && !DeliverProofsBeforeChunks
+                && idx == RunLastChunk(item, idx / RunVerify.RunChunks))
+            {
+                await SendRunProofAsync(conn, cipher, item, idx / RunVerify.RunChunks, counter).ConfigureAwait(false);
+            }
         }
+    }
+
+    private static long RunLastChunk(Served item, long run) =>
+        Math.Min((run + 1) * RunVerify.RunChunks, item.TotalChunks) - 1;
+
+    private async Task SendProofsForCompletedRunsAsync(PinholeConnection conn, BlobWire.Cipher cipher, Served item,
+        long start, long end, Counter counter)
+    {
+        for (long run = start / RunVerify.RunChunks; run <= (end - 1) / RunVerify.RunChunks; run++)
+        {
+            if (start <= RunLastChunk(item, run) && RunLastChunk(item, run) < end)
+            {
+                await SendRunProofAsync(conn, cipher, item, run, counter).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task SendRunProofAsync(PinholeConnection conn, BlobWire.Cipher cipher, Served item, long runIndex, Counter counter)
+    {
+        if (DropProof?.Invoke(runIndex) == true)
+        {
+            return;
+        }
+
+        var scratch = new byte[RunVerify.MaxSiblings * RunVerify.CvSize];
+        int count = item.RunProof(runIndex, scratch);
+        if (count < 0)
+        {
+            return; // no proof exists for this run (single-chunk files have no folds)
+        }
+
+        byte[] siblings = scratch.AsSpan(0, count * RunVerify.CvSize).ToArray();
+        CorruptProof?.Invoke(BlobWire.StreamId(item.Root), runIndex, siblings);
+        await SendSealedAsync(conn, cipher, BlobWire.Proof(BlobWire.StreamId(item.Root), runIndex, siblings), counter)
+            .ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -370,6 +452,25 @@ public sealed class BlobServer : IAsyncDisposable
         // root, so serving it would only produce receiver-side failures.
         public long SourceLength { get; init; } = -1;
         public DateTime SourceModifiedUtc { get; init; }
+
+        private readonly object _runTreeGate = new();
+        private RunTree? _runTree;
+
+        // Lazy and per-file: a directory catalog builds this only when a v4 peer
+        // actually asks for a proof, so plain v3 traffic never pays for it.
+        public int RunProof(long runIndex, Span<byte> siblings)
+        {
+            RunTree? tree = _runTree;
+            if (tree is null)
+            {
+                lock (_runTreeGate)
+                {
+                    tree = _runTree ??= new RunTree(Cvs, TotalChunks);
+                }
+            }
+
+            return tree.Proof(runIndex, TotalChunks, siblings);
+        }
 
         public async Task<byte[]> ReadChunkAsync(long idx, Dictionary<ulong, FileStream> files, CancellationToken ct)
         {

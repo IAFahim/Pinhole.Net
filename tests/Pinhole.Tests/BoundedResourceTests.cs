@@ -76,10 +76,14 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 // synchronously on the verify path, so cancellation lands mid-transfer
                 // with no scheduling race. The 64 KiB-remaining guard is 8× the window —
                 // nothing queued or requested could finish the file before the next
-                // cancellation check, on any machine, under any starvation.
+                // cancellation check, on any machine, under any starvation. Verified
+                // runs commit at 64 KiB granularity (v4): the threshold sits one run
+                // past the first commit so a cancelled attempt always leaves an
+                // honestly resumable checkpoint — bytes staged short of a run commit
+                // are unverifiable and correctly leave nothing behind.
                 var progress = new SyncProgress(p =>
                 {
-                    if (p.VerifiedBytes > 24 * 1024 && p.TotalBytes - p.VerifiedBytes > 64 * 1024)
+                    if (p.VerifiedBytes > 72 * 1024 && p.TotalBytes - p.VerifiedBytes > 64 * 1024)
                     {
                         cts.Cancel();
                     }

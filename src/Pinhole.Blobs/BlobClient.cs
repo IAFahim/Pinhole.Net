@@ -22,10 +22,17 @@ public sealed record BlobDownloadOptions
     public TimeSpan RecoveryTimeout { get; init; } = TimeSpan.FromMinutes(10);
 }
 
-internal sealed class BlobTransportLostException(string message) : Exception(message);
+internal class BlobTransportLostException(string message) : Exception(message);
+
+// A v3-only provider closes the connection on a version-4 Hello before answering.
+// The recovery loop turns exactly this into a single immediate v3 re-dial.
+internal sealed class BlobV4RefusedException(string message) : BlobTransportLostException(message);
 
 public static class BlobClient
 {
+    // v4 bound: a Head larger than this is refused before any staging or file
+    // allocation happens — a hostile Head can never size the receiver's memory.
+    internal const long MaxDeclaredTotalBytes = 1L << 40;
     public static async Task<BlobDownloadResult> DownloadAsync(
         BlobTicket ticket,
         string destinationDirectory,
@@ -49,10 +56,12 @@ public static class BlobClient
         int backoffMs = 500;
 
         // State that legitimately survives a re-dial: the decoded manifest (never fetched
-        // twice in one call) and per-path completion (a file that finished stays finished —
-        // its bytes were root-verified before the connection died). Completion is keyed by
-        // destination path, never by content root: a tree may legitimately contain several
-        // files with the same bytes, and each must be materialized.
+        // twice in one call), per-path completion (a file that finished stays finished —
+        // its bytes were root-verified before the connection died), and the Hello version
+        // the transfer settled on. Completion is keyed by destination path, never by
+        // content root: a tree may legitimately contain several files with the same
+        // bytes, and each must be materialized.
+        var negotiation = new BlobNegotiation(ticket.PreSharedKey is not null);
         (string Name, List<Manifest.Entry> Entries)? manifest = null;
         var completedPaths = new HashSet<string>(StringComparer.Ordinal);
         var verifiedFileByRoot = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -63,6 +72,7 @@ public static class BlobClient
         {
             ct.ThrowIfCancellationRequested();
             recoveryBudget.Check();
+            negotiation.ConnectionStarted();
 
             bool dialing = true;
             try
@@ -106,7 +116,7 @@ public static class BlobClient
                     StreamDownloader? downloader = null;
                     downloader = new StreamDownloader(conn, sink,
                         v => progress?.Report(new BlobProgress(v, downloader!.TotalBytes, 0, 1)), new SendCounter(), session,
-                        ticket.Root, recoveryBudget, options: options);
+                        ticket.Root, recoveryBudget, negotiation, options: options);
                     long bytes;
                     try
                     {
@@ -126,7 +136,7 @@ public static class BlobClient
                 {
                     var manifestSink = new MemorySink();
                     var manifestDownloader = new StreamDownloader(conn, manifestSink, _ => { }, send, session, ticket.Root, recoveryBudget,
-                        options: options);
+                        negotiation, options: options);
                     try
                     {
                         await manifestDownloader.RunAsync(ct).ConfigureAwait(false);
@@ -172,7 +182,7 @@ public static class BlobClient
                     var sink = new FileSink(target, entry.Root);
                     StreamDownloader entryDownloader = new(conn, sink,
                         v => progress?.Report(new BlobProgress(verified + v, total, filesDone, entries.Count)), send, session,
-                        entry.Root, recoveryBudget, entry.Root, options: options);
+                        entry.Root, recoveryBudget, negotiation, entry.Root, options: options);
                     long bytes;
                     try
                     {
@@ -196,6 +206,14 @@ public static class BlobClient
             }
             catch (Exception ex) when (IsTransportLoss(ex, dialing))
             {
+                if (ex is BlobV4RefusedException && negotiation.FallBackToV3())
+                {
+                    // A v3-only provider hung up on our version-4 Hello before answering
+                    // anything: one immediate re-dial at v3, remembered for the whole
+                    // transfer, without spending an outage backoff on it.
+                    continue;
+                }
+
                 if (recovery <= TimeSpan.Zero || recoveryBudget.Remaining <= TimeSpan.Zero)
                 {
                     throw recoveryBudget.Exhausted(ex);
@@ -216,6 +234,51 @@ public static class BlobClient
     private static bool IsTransportLoss(Exception ex, bool dialing) =>
         ex is BlobTransportLostException or TimeoutException or ObjectDisposedException
         || (ex is InvalidOperationException && !dialing);
+
+    // Per-transfer negotiation state. The Hello version persists across re-dials (once
+    // a provider proved itself v3-only, the whole transfer stays at v3); the Welcome
+    // version and head-seen flag describe the current connection only.
+    internal sealed class BlobNegotiation
+    {
+        public BlobNegotiation(bool encrypted)
+        {
+            Encrypted = encrypted;
+            // Plaintext tickets have no Welcome to negotiate through: v3 semantics.
+            HelloVersion = encrypted ? BlobWire.CurrentVersion : BlobWire.ProtocolVersion;
+        }
+
+        public bool Encrypted { get; }
+        public byte HelloVersion { get; private set; }
+        public byte SessionVersion { get; private set; } // 0 until a Welcome is adopted
+        public bool HeadSeen { get; private set; }
+
+        public void ConnectionStarted()
+        {
+            SessionVersion = 0;
+            HeadSeen = false;
+        }
+
+        public void AdoptWelcomeVersion(byte version)
+        {
+            if (SessionVersion == 0)
+            {
+                SessionVersion = version;
+            }
+        }
+
+        public void MarkHeadSeen() => HeadSeen = true;
+
+        public bool FallBackToV3()
+        {
+            if (HelloVersion != BlobWire.CurrentVersion)
+            {
+                return false;
+            }
+
+            HelloVersion = BlobWire.ProtocolVersion;
+            return true;
+        }
+    }
 
     private sealed class SendCounter
     {
@@ -264,6 +327,11 @@ public static class BlobClient
     {
         private readonly record struct ReceivedFrame(BlobWire.Frame Frame, long ArrivedAtMs);
 
+        // Verified-run staging: at most this many incomplete runs are held in memory
+        // (16 * 64 KiB = 1 MiB). The request horizon is the same distance past the
+        // lowest incomplete run, so staging can never outrun it.
+        private const int MaxStagedRuns = 16;
+
         private static readonly TimeSpan ControlTick = TimeSpan.FromMilliseconds(5);
         private static readonly TimeSpan HelloPace = TimeSpan.FromMilliseconds(250);
         private static readonly TimeSpan CheckpointPace = TimeSpan.FromMilliseconds(50);
@@ -281,6 +349,7 @@ public static class BlobClient
         private readonly Dictionary<long, (long SentAtMs, int Retransmits, bool SampleRtt)> _outstanding = new();
         private readonly SendCounter _send;
         private readonly RecoveryBudget _recovery;
+        private readonly BlobNegotiation _negotiation;
         private long _maxRequested = -1;
         private long _helloSince = -1;
         private long _helloLastTicks;
@@ -293,17 +362,35 @@ public static class BlobClient
         private long _verified;
         private long _lastVerifiedTicks;
 
+        private bool _v4; // verified-run path, active once a version-4 Welcome delivered the Head
+        private long _runCount;
+        private long _lowestIncomplete;
+        private readonly Dictionary<long, RunStage> _staging = new();
+
+        private sealed class RunStage(int length)
+        {
+            public readonly byte[]?[] Chunks = new byte[length][];
+            public readonly byte[]?[] Cvs = new byte[length][];
+            public int Staged;
+            public byte[]? Proof;                 // sibling CVs, bottom-up; length 0 for single-run files
+            public long ProofSentAt = -1;         // when a covering request last left
+            public long FullyStagedAt = -1;         // when the last chunk staged without a proof yet
+            public int ProofRetransmits;
+            public bool CoveringRequested;        // a full-run Req went out (proof expected from it)
+        }
+
         public long TotalBytes => _totalBytes < 0 ? 0 : _totalBytes;
 
         public StreamDownloader(PinholeConnection conn, Sink sink, Action<long> onVerified, SendCounter send,
-            BlobWire.DownloadSession session, byte[] expectedRoot, RecoveryBudget recovery, byte[]? streamRoot = null,
-            BlobDownloadOptions? options = null)
+            BlobWire.DownloadSession session, byte[] expectedRoot, RecoveryBudget recovery, BlobNegotiation negotiation,
+            byte[]? streamRoot = null, BlobDownloadOptions? options = null)
         {
             _conn = conn;
             _sink = sink;
             _onVerified = onVerified;
             _send = send;
             _recovery = recovery;
+            _negotiation = negotiation;
             _session = session;
             _expectedRoot = expectedRoot;
             _stream = BlobWire.StreamId(streamRoot ?? expectedRoot);
@@ -373,6 +460,19 @@ public static class BlobClient
                     continue; // garbage, tampered ciphertext, or another stream's frame
                 }
 
+                // The first frame an encrypted session can ever open is its Welcome, and
+                // the Welcome travels unsealed — read its version off the wire to learn
+                // whether this connection runs the verified-run path. A provider that
+                // answers a v4 Hello with a v3 Welcome keeps the v3 downloader.
+                if (_negotiation.Encrypted && _negotiation.SessionVersion == 0
+                    && BlobWire.Frame.TryParse(mem.Span, out BlobWire.Frame bootstrap)
+                    && bootstrap.Type == BlobWire.TypeWelcome && bootstrap.Stream == _stream
+                    && bootstrap.SessionId is { } welcomed
+                    && welcomed.AsSpan().SequenceEqual(_session.SessionId))
+                {
+                    _negotiation.AdoptWelcomeVersion(bootstrap.Version);
+                }
+
                 await writer.WriteAsync(new ReceivedFrame(f, arrivedAtMs), ct).ConfigureAwait(false);
                 if (f.Type == BlobWire.TypeBye)
                 {
@@ -393,7 +493,7 @@ public static class BlobClient
                     {
                         // Pathlessness is a wait; Closed is a route verdict — the caller's
                         // recovery loop re-dials and resumes from the checkpoints.
-                        throw new BlobTransportLostException("the connection closed before the transfer finished");
+                        throw TransportLost("the connection closed before the transfer finished");
                     }
 
                     // Receive work precedes loss decisions. A delayed verifier may
@@ -429,7 +529,15 @@ public static class BlobClient
                         if (pathPresent && now - _helloSince > _recovery.StallLimit((long)FirstHeadTimeout.TotalMilliseconds))
                         {
                             _recovery.Begin(_helloSince);
-                            throw new TimeoutException("the provider did not answer the ticket");
+                            // A v3-only provider does not hang up the engine connection:
+                            // its blob layer refuses the version-4 Hello and then stays
+                            // silent while the path looks healthy. The first-head
+                            // timeout is therefore also a v4 refusal signal — surface
+                            // it as one so the outer loop re-dials at v3 instead of
+                            // spending the whole budget on version-4 retries.
+                            throw !_negotiation.HeadSeen && _negotiation.HelloVersion == BlobWire.CurrentVersion
+                                ? new BlobV4RefusedException("the provider did not answer the version-4 hello")
+                                : new TimeoutException("the provider did not answer the ticket");
                         }
 
                         // Retries reuse the same downloader nonce. Welcome carries the
@@ -437,7 +545,7 @@ public static class BlobClient
                         if (pathPresent && now - _helloLastTicks >= (long)HelloPace.TotalMilliseconds)
                         {
                             _helloLastTicks = now;
-                            TrySend(BlobWire.Hello(_stream, _session.SessionId));
+                            TrySend(BlobWire.Hello(_stream, _session.SessionId, _negotiation.HelloVersion));
                         }
                     }
                     else
@@ -484,7 +592,7 @@ public static class BlobClient
 
                         if (!more || !frames.TryRead(out f))
                         {
-                            throw new BlobTransportLostException("the connection went quiet before the transfer finished");
+                            throw TransportLost("the connection went quiet before the transfer finished");
                         }
                     }
 
@@ -532,25 +640,79 @@ public static class BlobClient
                 case BlobWire.TypeHead:
                     if (_totalChunks < 0)
                     {
+                        _negotiation.MarkHeadSeen();
+                        if (_negotiation.SessionVersion == BlobWire.CurrentVersion)
+                        {
+                            // Hostile-Head bound: refuse a declared size that could pin
+                            // unbounded memory before the first byte is even requested.
+                            if (frame.TotalBytes > MaxDeclaredTotalBytes)
+                            {
+                                throw new InvalidDataException(
+                                    $"the provider declared {frame.TotalBytes:N0} bytes, above the {MaxDeclaredTotalBytes:N0} transfer bound");
+                            }
+
+                            _v4 = true;
+                            _sink.UseVerifiedRuns();
+                        }
+
                         _totalBytes = frame.TotalBytes;
                         _totalChunks = frame.TotalChunks;
                         _sink.Init(_totalBytes, _totalChunks);
-                        // Resume on the wire from the checkpoint's first gap.
-                        _maxRequested = _sink.Applied - 1;
-                        if (_sink.Applied > 0)
+                        if (_v4)
                         {
-                            _verified = Math.Min(_sink.Applied * Blake3.ChunkSize, _totalBytes);
-                            _onVerified(_verified);
+                            StartRunPath();
+                        }
+                        else
+                        {
+                            // Resume on the wire from the checkpoint's first gap.
+                            _maxRequested = _sink.Applied - 1;
+                            if (_sink.Applied > 0)
+                            {
+                                _verified = Math.Min(_sink.Applied * Blake3.ChunkSize, _totalBytes);
+                                _onVerified(_verified);
+                            }
                         }
                     }
                     break;
                 case BlobWire.TypeChunk:
                     ReceiveChunk(frame, received.ArrivedAtMs, Environment.TickCount64);
                     break;
+                case BlobWire.TypeProof:
+                    if (_v4)
+                    {
+                        ReceiveProof(frame, Environment.TickCount64);
+                    }
+                    break;
                 case BlobWire.TypeBye:
                     throw new InvalidDataException("the provider cancelled this stream");
             }
         }
+
+        private void StartRunPath()
+        {
+            _runCount = RunVerify.RunCount(_totalChunks);
+            while (_lowestIncomplete < _runCount && _sink.RunCommitted(_lowestIncomplete))
+            {
+                _lowestIncomplete++;
+            }
+
+            // The march restarts at the lowest incomplete run: TopUp jumps over any
+            // committed run it meets (sparse resumes leave holes), so only missing
+            // runs are ever requested.
+            _maxRequested = _lowestIncomplete * RunVerify.RunChunks - 1;
+
+            _verified = _sink.CommittedBytes;
+            if (_verified > 0)
+            {
+                _lastVerifiedTicks = Environment.TickCount64;
+                _onVerified(_verified);
+            }
+        }
+
+        private Exception TransportLost(string message) =>
+            !_negotiation.HeadSeen && _negotiation.HelloVersion == BlobWire.CurrentVersion
+                ? new BlobV4RefusedException(message)
+                : new BlobTransportLostException(message);
 
         private bool WatchPath(long now)
         {
@@ -586,6 +748,21 @@ public static class BlobClient
                     // and exhaust recovery while that route is already healthy.
                     _outstanding[idx] = (now, 0, false);
                 }
+
+                foreach (RunStage stage in _staging.Values)
+                {
+                    // Same reasoning for the proof timers the run path keeps.
+                    if (stage.ProofSentAt >= 0)
+                    {
+                        stage.ProofSentAt = now;
+                        stage.ProofRetransmits = 0;
+                    }
+
+                    if (stage.FullyStagedAt >= 0)
+                    {
+                        stage.FullyStagedAt = now;
+                    }
+                }
             }
 
             return true;
@@ -612,7 +789,6 @@ public static class BlobClient
             }
 
             bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, bool SampleRtt) entry);
-            bool fresh = _sink.Apply(f.Index, f.ChunkData);
             if (hadReservation && entry.SampleRtt)
             {
                 // Karn's rule: only a first-attempt arrival measures the path's RTT — a
@@ -620,13 +796,181 @@ public static class BlobClient
                 _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(arrivedAtMs - entry.SentAtMs, 1)));
             }
 
-            _controller.OnChunkArrived(len, hadReservation, fresh, now);
-            if (fresh)
+            if (!_v4)
             {
+                bool fresh = _sink.Apply(f.Index, f.ChunkData);
+                _controller.OnChunkArrived(len, hadReservation, fresh, now);
+                if (fresh)
+                {
+                    _verified += len;
+                    _lastVerifiedTicks = now;
+                    _onVerified(_verified);
+                }
+
+                return;
+            }
+
+            if (_totalChunks == 1)
+            {
+                // A one-chunk file has no folds: the ticket root IS the root-flagged
+                // chunk hash, so the per-chunk check above is not enough — verify the
+                // bytes against the root directly and commit immediately.
+                if (!RunVerify.VerifySingleChunk(f.ChunkData, _expectedRoot))
+                {
+                    throw new InvalidDataException("chunk 0 failed root verification");
+                }
+
+                _controller.OnChunkArrived(len, hadReservation, true, now);
+                _sink.ApplyRun(0, 1, [f.ChunkData], Blake3.ChunkCv(f.ChunkData, 0, root: true));
                 _verified += len;
                 _lastVerifiedTicks = now;
                 _onVerified(_verified);
+                return;
             }
+
+            ReceiveRunChunk(f, len, hadReservation, now);
+        }
+
+        private void ReceiveRunChunk(BlobWire.Frame f, int len, bool hadReservation, long now)
+        {
+            long run = f.Index / RunVerify.RunChunks;
+            if (run < _lowestIncomplete || run * RunVerify.RunChunks > _maxRequested)
+            {
+                // Committed or never-requested territory: unsolicited, dropped silently.
+                _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                return;
+            }
+
+            if (!_staging.TryGetValue(run, out RunStage? stage))
+            {
+                if (_staging.Count >= MaxStagedRuns)
+                {
+                    // Beyond the staging bound: drop; the run is re-requested once the
+                    // horizon reaches it again.
+                    _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                    return;
+                }
+
+                stage = new RunStage(RunVerify.RunLength(run, _totalChunks));
+                _staging[run] = stage;
+            }
+
+            int slot = (int)(f.Index - run * RunVerify.RunChunks);
+            if (stage.Chunks[slot] is not null)
+            {
+                _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                return; // duplicate transmission
+            }
+
+            stage.Chunks[slot] = f.ChunkData;
+            stage.Cvs[slot] = f.ChunkCv;
+            stage.Staged++;
+            _controller.OnChunkArrived(len, hadReservation, fresh: true, now);
+            _verified += len;
+            _lastVerifiedTicks = now;
+            _onVerified(_verified);
+            TryCommitRun(run, stage, now);
+        }
+
+        private void ReceiveProof(BlobWire.Frame f, long now)
+        {
+            long run = f.Index;
+            if (run < _lowestIncomplete || run >= _runCount || run * RunVerify.RunChunks > _maxRequested)
+            {
+                return; // proof for a committed or unrequested run: unsolicited
+            }
+
+            if (!_staging.TryGetValue(run, out RunStage? stage))
+            {
+                if (_staging.Count >= MaxStagedRuns || f.SiblingCvs!.Length > RunVerify.MaxSiblings * RunVerify.CvSize)
+                {
+                    return;
+                }
+
+                stage = new RunStage(RunVerify.RunLength(run, _totalChunks));
+                _staging[run] = stage;
+            }
+
+            if (stage.Proof is not null)
+            {
+                return; // first proof wins; honest retries carry identical bytes
+            }
+
+            stage.Proof = f.SiblingCvs!;
+            _lastVerifiedTicks = now;
+            TryCommitRun(run, stage, now);
+        }
+
+        // A run commits when all its chunks are staged AND its proof is present: the
+        // proof must fold the staged CVs and the sibling chain to the ticket root.
+        // Only then do the run's bytes touch the sink — never before.
+        private void TryCommitRun(long run, RunStage stage, long now)
+        {
+            int length = RunVerify.RunLength(run, _totalChunks);
+            if (stage.Staged != length)
+            {
+                return;
+            }
+
+            if (stage.Proof is null)
+            {
+                // The proof rides the request that delivers the run's last chunk
+                // (covering or piecewise-completing); a proof one frame behind in the
+                // queue is the common case, so never chase it eagerly — a full-run
+                // fetch here re-requested every piecewise run wholesale. Only a proof
+                // lost on the wire is healed, by the PTO sweep below.
+                stage.FullyStagedAt = stage.FullyStagedAt < 0 ? now : stage.FullyStagedAt;
+                return;
+            }
+
+            var leaves = new byte[length * RunVerify.CvSize];
+            for (int i = 0; i < length; i++)
+            {
+                stage.Cvs[i]!.CopyTo(leaves.AsSpan(i * RunVerify.CvSize));
+            }
+
+            if (!RunVerify.VerifyRun(leaves, stage.Proof, run, _totalChunks, _expectedRoot))
+            {
+                throw new InvalidDataException($"run {run} failed root verification");
+            }
+
+            // The verified run's node CV (the root-flagged fold for a single-run file,
+            // where it IS the file root; a plain CV otherwise) feeds the final fold.
+            var runCv = new byte[RunVerify.CvSize];
+            if (!RunVerify.FoldRun(leaves, length, rootOnFinal: _runCount == 1, runCv))
+            {
+                throw new InvalidOperationException("the run fold rejected its verified leaves");
+            }
+
+            var chunks = new byte[length][];
+            for (int i = 0; i < length; i++)
+            {
+                chunks[i] = stage.Chunks[i]!;
+            }
+
+            _staging.Remove(run);
+            _sink.ApplyRun(run, length, chunks, runCv);
+            if (run == _lowestIncomplete)
+            {
+                while (_lowestIncomplete < _runCount && _sink.RunCommitted(_lowestIncomplete))
+                {
+                    _lowestIncomplete++;
+                }
+            }
+
+            _lastVerifiedTicks = now;
+        }
+
+        private void RequestRunProof(long run, RunStage stage, long now)
+        {
+            stage.CoveringRequested = true;
+            stage.ProofSentAt = now;
+            stage.ProofRetransmits = 0;
+            // The provider attaches the run's proof to any request that serves the
+            // run's last chunk, so a one-chunk request fetches it in two frames. A
+            // full-run burst here would put the proof — the frame we are missing —
+            // at the tail of the largest burst the path has just proven it drops.
+            Send(BlobWire.Request(_stream, run * RunVerify.RunChunks + RunVerify.RunLength(run, _totalChunks) - 1, 1));
         }
 
         private long ChunkLength(long index) =>
@@ -639,12 +983,32 @@ public static class BlobClient
             // its reservation while the hole it leaves is never re-requested — measured
             // wire waste AND a guaranteed stall once a leading chunk is lost with a
             // window wider than the buffer. The horizon slides with the applied prefix.
-            long span = Math.Min(_sink.ReorderSpan, _totalChunks);
-            long horizon = Math.Min(_totalChunks, _sink.Applied + span);
+            // On the verified-run path the horizon is run-granular instead (the lowest
+            // incomplete run plus the staging bound) and no request may cross a run
+            // boundary: a request that spans a whole run from its start boundary is the
+            // one the provider answers with a proof.
+            long horizon = _v4
+                ? Math.Min(_totalChunks, (_lowestIncomplete + MaxStagedRuns) * RunVerify.RunChunks)
+                : Math.Min(_totalChunks, _sink.Applied + Math.Min(_sink.ReorderSpan, _totalChunks));
             while (_maxRequested + 1 < horizon)
             {
                 long start = _maxRequested + 1;
-                int desired = (int)Math.Min(_controller.MaxRunChunks, horizon - start);
+                long run = start / RunVerify.RunChunks;
+                long limit = horizon;
+                if (_v4)
+                {
+                    if (_sink.RunCommitted(run))
+                    {
+                        // A resumed sparse commit: everything in this run is already
+                        // verified on disk — jump the march past it.
+                        _maxRequested = Math.Min(horizon, (run + 1) * RunVerify.RunChunks) - 1;
+                        continue;
+                    }
+
+                    limit = Math.Min(horizon, (run + 1) * RunVerify.RunChunks); // never cross the run end
+                }
+
+                int desired = (int)Math.Min(_controller.MaxRunChunks, limit - start);
                 int count = Math.Min(desired, _controller.AffordableChunks(desired));
                 if (count < 1)
                 {
@@ -669,6 +1033,20 @@ public static class BlobClient
 
                 Send(BlobWire.Request(_stream, start, count));
                 _maxRequested = start + count - 1;
+                if (_v4 && start == run * RunVerify.RunChunks
+                    && start + count == Math.Min((run + 1) * RunVerify.RunChunks, _totalChunks))
+                {
+                    // One request covered the whole run: this is the one that earns
+                    // the proof. Anything less and the proof is fetched on full staging.
+                    if (!_staging.TryGetValue(run, out RunStage? stage))
+                    {
+                        stage = new RunStage(RunVerify.RunLength(run, _totalChunks));
+                        _staging[run] = stage;
+                    }
+
+                    stage.CoveringRequested = true;
+                    stage.ProofSentAt = now;
+                }
             }
         }
 
@@ -692,6 +1070,45 @@ public static class BlobClient
                 // per-chunk PTO and the reorder horizon.
                 _outstanding[idx] = (now, retransmits + 1, false);
                 if (Send(BlobWire.Request(_stream, idx, 1))) _controller.OnRetransmit(now);
+            }
+
+            if (_v4)
+            {
+                SweepStaleProofs(now);
+            }
+        }
+
+        // A fully staged run whose proof never landed gets its whole run re-requested:
+        // the provider resends the chunks (duplicates, dropped on arrival) and the
+        // proof. Like the single-chunk sweep this is healing traffic — no reservation.
+        private void SweepStaleProofs(long now)
+        {
+            foreach ((long run, RunStage stage) in _staging)
+            {
+                if (stage.Proof is not null || stage.Staged != RunVerify.RunLength(run, _totalChunks))
+                {
+                    continue;
+                }
+
+                // The patience clock starts at whichever came last: the covering
+                // request leaving, or the run's final chunk staging without a proof.
+                long since = Math.Max(stage.ProofSentAt, stage.FullyStagedAt);
+                if (since < 0)
+                {
+                    continue;
+                }
+
+                if (now - since < (long)_controller.PtoFor(stage.ProofRetransmits).TotalMilliseconds)
+                {
+                    continue;
+                }
+
+                stage.ProofSentAt = now;
+                stage.ProofRetransmits++;
+                if (Send(BlobWire.Request(_stream, run * RunVerify.RunChunks + RunVerify.RunLength(run, _totalChunks) - 1, 1)))
+                {
+                    _controller.OnRetransmit(now);
+                }
             }
         }
 
@@ -739,13 +1156,28 @@ public static class BlobClient
         public virtual void Reject() => Abandon();
         public virtual void Checkpoint() { }
         public virtual void Abandon() { }
+
+        // ---------------------------------------------------------------- verified runs (v4)
+        // Activated by the downloader after a version-4 Welcome delivered the Head and
+        // before Init. On this path the sink never sees an unverified byte: whole runs
+        // arrive already chained to the ticket root.
+        public virtual void UseVerifiedRuns() { }
+
+        public virtual void ApplyRun(long runIndex, int runLength, byte[][] chunks, byte[] runCv) { }
+
+        public virtual bool RunCommitted(long runIndex) => false;
+
+        public virtual long CommittedBytes => 0;
     }
 
     internal sealed class FileSink(string target, byte[] root) : Sink
     {
         private const string Magic = "PBPART01";
         private static readonly byte[] MagicBytes = System.Text.Encoding.ASCII.GetBytes(Magic);
+        private const string RunMagic = "PBPART02"; // v4: committed runs + fold state, no prefix re-hash
+        private static readonly byte[] RunMagicBytes = System.Text.Encoding.ASCII.GetBytes(RunMagic);
         private const long ReorderWindow = 512;
+        private const int MaxResumableSparseRuns = 64; // staging keeps ~16; parsed leniently, still bounded
 
         public override long ReorderSpan => ReorderWindow;
 
@@ -756,17 +1188,43 @@ public static class BlobClient
         private long _totalBytes;
         private long _totalChunks;
 
+        // v4 verified-run state. Disk only ever holds verified bytes: writes happen at
+        // run commit, and the checkpoint describes exactly those runs plus the fold
+        // state needed to finish the root without re-reading anything.
+        private bool _runMode;
+        private long _runCount;
+        private bool[] _committedRuns = [];
+        private readonly Dictionary<long, byte[]> _runSparse = new(); // committed runs beyond the fold prefix
+        private uint[] _runStack = [];                                // contiguous-prefix fold stack over run CVs
+        private long[] _runStackRuns = [];
+        private int _runStackDepth;
+        private long _runPrefix;          // contiguous committed prefix, in runs
+        private long _committedBytes;
+        private int _runStateVersion;
+        private int _runCheckpointedVersion;
+
         public bool Resumed { get; private set; }
 
         internal long CheckpointWrites { get; private set; }
 
+        // v3 resume re-hashes the whole prefix from disk; the v4 resume is O(1). This
+        // counter makes the difference observable: only the v3 path ever moves it.
+        internal long RehashedPrefixChunks { get; private set; }
+
         private long _checkpointedApplied = -1;
+
+        public override void UseVerifiedRuns() => _runMode = true;
 
         public override void Init(long totalBytes, long totalChunks)
         {
             _totalBytes = totalBytes;
             _totalChunks = totalChunks;
             Directory.CreateDirectory(_partDir);
+            if (_runMode)
+            {
+                InitRunMode();
+                return;
+            }
 
             long prefix = TryLoadPrefix();
             Resumed = prefix > 0;
@@ -779,12 +1237,27 @@ public static class BlobClient
                 _data.Seek(i * Blake3.ChunkSize, SeekOrigin.Begin);
                 _data.ReadExactly(chunk);
                 _tree.Update(chunk);
+                RehashedPrefixChunks++;
             }
 
             Applied = prefix;
             // The on-disk state (or its absence at prefix 0) already claims exactly this
             // prefix; the dirty check in Checkpoint relies on that bookkeeping.
             _checkpointedApplied = prefix;
+        }
+
+        private void InitRunMode()
+        {
+            _runCount = RunVerify.RunCount(_totalChunks);
+            _committedRuns = new bool[_runCount];
+            _runStack = new uint[8 * RunVerify.MaxSiblings];
+            _runStackRuns = new long[RunVerify.MaxSiblings];
+            LoadRunState();
+            _data = new FileStream(Path.Combine(_partDir, "data"), FileMode.OpenOrCreate, FileAccess.ReadWrite,
+                FileShare.None, Blake3.ChunkSize, FileOptions.Asynchronous);
+            // No prefix re-hash: every committed run was verified against the ticket
+            // root before it was written, so resuming is O(1) in the state file.
+            _runCheckpointedVersion = _runStateVersion;
         }
 
         public override bool Apply(long index, byte[] data)
@@ -812,13 +1285,94 @@ public static class BlobClient
             return true;
         }
 
+        public override void ApplyRun(long runIndex, int runLength, byte[][] chunks, byte[] runCv)
+        {
+            long first = runIndex * RunVerify.RunChunks;
+            for (int i = 0; i < runLength; i++)
+            {
+                byte[] chunk = chunks[i];
+                _data.Seek((first + i) * Blake3.ChunkSize, SeekOrigin.Begin);
+                _data.Write(chunk, 0, chunk.Length);
+                _committedBytes += chunk.Length;
+            }
+
+            _committedRuns[runIndex] = true;
+            Applied += runLength;
+            if (runIndex == _runPrefix && runIndex < _runCount - 1)
+            {
+                // Extends the contiguous prefix: fold it into the stack and pull in any
+                // runs that committed early and were waiting in the sparse set.
+                PushRunCv(runCv);
+                _runPrefix++;
+                while (_runPrefix < _runCount - 1 && _runSparse.Remove(_runPrefix, out byte[]? next))
+                {
+                    PushRunCv(next);
+                    _runPrefix++;
+                }
+            }
+            else
+            {
+                // Committed out of order, or the final run: the final run stays out of
+                // the stack so the last fold can carry the ROOT flag (a plain push of a
+                // power-of-two run count would merge the top pair without it).
+                _runSparse[runIndex] = runCv;
+            }
+
+            _runStateVersion++;
+        }
+
+        public override bool RunCommitted(long runIndex) => _committedRuns[runIndex];
+
+        public override long CommittedBytes => _committedBytes;
+
+        private void PushRunCv(byte[] cv)
+        {
+            Span<uint> words = stackalloc uint[8];
+            RunVerify.LoadCv(cv, words);
+            Crypto.Blake3.PushCv(words, 1, _runStack, _runStackRuns, ref _runStackDepth, Crypto.Blake3.IvWords, 0);
+        }
+
         private void Feed(byte[] data)
         {
             _tree.Update(data);
             Applied++;
         }
 
-        public override byte[] Complete() => _totalBytes == 0 ? Blake3.Hash([]) : _tree.RootHash();
+        public override byte[] Complete()
+        {
+            if (!_runMode)
+            {
+                return _totalBytes == 0 ? Blake3.Hash([]) : _tree.RootHash();
+            }
+
+            if (_totalBytes == 0)
+            {
+                return Blake3.Hash([]);
+            }
+
+            if (_runCount == 1)
+            {
+                // Single-run files verified the root directly at commit (the run's own
+                // ROOT-flagged fold equals the ticket root); no final fold exists.
+                return _runSparse[0];
+            }
+
+            // All runs committed: the stack holds runs 0..n-2 folded, the sparse set
+            // holds exactly the final run. Fold the final run's CV up the spine with
+            // ROOT on the last fold — FoldRunsToRoot's finish, kept incrementally.
+            Span<uint> acc = stackalloc uint[8];
+            RunVerify.LoadCv(_runSparse[_runCount - 1], acc);
+            Span<uint> parent = stackalloc uint[8];
+            for (int i = _runStackDepth - 1; i >= 0; i--)
+            {
+                Crypto.Blake3.ParentWords(_runStack.AsSpan(8 * i, 8), acc, Crypto.Blake3.IvWords, 0, root: i == 0, parent);
+                parent.CopyTo(acc);
+            }
+
+            var digest = new byte[RunVerify.CvSize];
+            RunVerify.WordsToBytes(acc, digest);
+            return digest;
+        }
 
         public override void Commit()
         {
@@ -845,6 +1399,12 @@ public static class BlobClient
 
         public override void Checkpoint()
         {
+            if (_runMode)
+            {
+                CheckpointRuns();
+                return;
+            }
+
             // Dirty check (A-10): the control loop ticks this every 50 ms even while
             // stalled, and each write is two fsyncs and a rename. The state is a pure
             // function of Applied, so an unmoved cursor means the file is already right.
@@ -871,6 +1431,210 @@ public static class BlobClient
             File.Move(temporary, Path.Combine(_partDir, "state"), overwrite: true);
             _checkpointedApplied = Applied;
             CheckpointWrites++;
+        }
+
+        // Same dirty-check discipline as the v3 checkpoint: the state is a pure
+        // function of the committed-run set, so an unchanged version writes nothing.
+        private void CheckpointRuns()
+        {
+            if (Applied == 0 || Applied >= _totalChunks || _runCheckpointedVersion == _runStateVersion)
+            {
+                return;
+            }
+
+            int bitmapBytes = (int)((_runCount + 7) / 8);
+            var state = new byte[60 + bitmapBytes + 4 + _runStackDepth * 40 + 4 + _runSparse.Count * 40];
+            RunMagicBytes.CopyTo(state);
+            root.CopyTo(state, 8);
+            BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(40), _totalBytes);
+            BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(48), _runCount);
+            BinaryPrimitives.WriteInt32LittleEndian(state.AsSpan(56), bitmapBytes);
+            for (long r = 0; r < _runCount; r++)
+            {
+                if (_committedRuns[r])
+                {
+                    state[60 + r / 8] |= (byte)(1 << (int)(r % 8));
+                }
+            }
+
+            int pos = 60 + bitmapBytes;
+            BinaryPrimitives.WriteInt32LittleEndian(state.AsSpan(pos), _runStackDepth);
+            pos += 4;
+            for (int i = 0; i < _runStackDepth; i++)
+            {
+                BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(pos), _runStackRuns[i]);
+                RunVerify.WordsToBytes(_runStack.AsSpan(8 * i, 8), state.AsSpan(pos + 8));
+                pos += 40;
+            }
+
+            BinaryPrimitives.WriteInt32LittleEndian(state.AsSpan(pos), _runSparse.Count);
+            pos += 4;
+            foreach ((long runIndex, byte[] cv) in _runSparse)
+            {
+                BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(pos), runIndex);
+                cv.CopyTo(state, pos + 8);
+                pos += 40;
+            }
+
+            _data.Flush(flushToDisk: true);
+            string temporary = Path.Combine(_partDir, "state.tmp");
+            using (var snapshot = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                snapshot.Write(state);
+                snapshot.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, Path.Combine(_partDir, "state"), overwrite: true);
+            _runCheckpointedVersion = _runStateVersion;
+            CheckpointWrites++;
+        }
+
+        private void LoadRunState()
+        {
+            string statePath = Path.Combine(_partDir, "state");
+            if (!File.Exists(statePath) || !File.Exists(Path.Combine(_partDir, "data")))
+            {
+                return;
+            }
+
+            try
+            {
+                byte[] state = File.ReadAllBytes(statePath);
+                if (state.Length < 64 || !state.AsSpan(0, 8).SequenceEqual(RunMagicBytes)
+                    || !state.AsSpan(8, 32).SequenceEqual(root.AsSpan()))
+                {
+                    return; // absent, v3-format (PBPART01), or foreign: restart clean
+                }
+
+                long totalBytes = BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(40));
+                long runCount = BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(48));
+                if (totalBytes != _totalBytes || runCount != _runCount || runCount < 0)
+                {
+                    return;
+                }
+
+                int bitmapBytes = BinaryPrimitives.ReadInt32LittleEndian(state.AsSpan(56));
+                if (bitmapBytes != (_runCount + 7) / 8 || 60 + bitmapBytes + 4 > state.Length)
+                {
+                    return;
+                }
+
+                int pos = 60 + bitmapBytes;
+                int stackCount = BinaryPrimitives.ReadInt32LittleEndian(state.AsSpan(pos));
+                pos += 4;
+                if (stackCount is < 0 or > RunVerify.MaxSiblings || pos + stackCount * 40 + 4 > state.Length)
+                {
+                    return;
+                }
+
+                long prefix = 0;
+                for (int i = 0; i < stackCount; i++)
+                {
+                    long runs = BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(pos));
+                    byte[] cv = state.AsSpan(pos + 8, RunVerify.CvSize).ToArray();
+                    if (runs < 1 || prefix + runs >= runCount)
+                    {
+                        ResetRunState(); // the fold stack covers strictly less than the whole file
+                        return;
+                    }
+
+                    RunVerify.LoadCv(cv, _runStack.AsSpan(8 * i, 8));
+                    _runStackRuns[i] = runs;
+                    prefix += runs;
+                    pos += 40;
+                }
+
+                _runStackDepth = stackCount;
+                int sparseCount = BinaryPrimitives.ReadInt32LittleEndian(state.AsSpan(pos));
+                pos += 4;
+                if (sparseCount is < 0 or > MaxResumableSparseRuns || pos + sparseCount * 40 != state.Length)
+                {
+                    ResetRunState();
+                    return;
+                }
+
+                long highest = prefix - 1;
+                for (int i = 0; i < sparseCount; i++)
+                {
+                    long runIndex = BinaryPrimitives.ReadInt64LittleEndian(state.AsSpan(pos));
+                    if (runIndex <= prefix || runIndex >= runCount || _runSparse.ContainsKey(runIndex))
+                    {
+                        ResetRunState();
+                        return;
+                    }
+
+                    _runSparse[runIndex] = state.AsSpan(pos + 8, RunVerify.CvSize).ToArray();
+                    highest = Math.Max(highest, runIndex);
+                    pos += 40;
+                }
+
+                // Cross-check the bitmap against the fold state before trusting it.
+                for (long r = 0; r < runCount; r++)
+                {
+                    bool bit = (state[60 + r / 8] & (1 << (int)(r % 8))) != 0;
+                    bool derived = r < prefix || _runSparse.ContainsKey(r);
+                    if (bit != derived)
+                    {
+                        ResetRunState();
+                        return;
+                    }
+                }
+
+                // The data file must cover the highest committed run's extent; a
+                // truncated data file voids the state (mirror of the v3 rule that a
+                // short prefix restarts from zero).
+                long extent = Math.Min(_totalBytes, (highest + 1) * RunVerify.RunChunks * Blake3.ChunkSize);
+                if (highest < 0 || new FileInfo(Path.Combine(_partDir, "data")).Length < extent)
+                {
+                    ResetRunState();
+                    return;
+                }
+
+                for (long r = 0; r < prefix; r++)
+                {
+                    _committedRuns[r] = true;
+                }
+
+                foreach (long r in _runSparse.Keys)
+                {
+                    _committedRuns[r] = true;
+                }
+
+                _runPrefix = prefix;
+
+                long committedChunks = 0;
+                for (long r = 0; r < _runCount; r++)
+                {
+                    if (_committedRuns[r])
+                    {
+                        long first = r * RunVerify.RunChunks;
+                        int len = RunVerify.RunLength(r, _totalChunks);
+                        committedChunks += len;
+                        _committedBytes += Math.Min(_totalBytes, (first + len) * Blake3.ChunkSize) - first * Blake3.ChunkSize;
+                    }
+                }
+
+                Applied = committedChunks;
+                Resumed = committedChunks > 0;
+                _runStateVersion = 1;
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or UnauthorizedAccessException)
+            {
+                ResetRunState();
+            }
+        }
+
+        private void ResetRunState()
+        {
+            _runSparse.Clear();
+            Array.Clear(_committedRuns);
+            Array.Clear(_runStack);
+            Array.Clear(_runStackRuns);
+            _runStackDepth = 0;
+            _runPrefix = 0;
+            _committedBytes = 0;
+            Applied = 0;
+            Resumed = false;
+            _runStateVersion = 0;
         }
 
         private long TryLoadPrefix()
@@ -909,14 +1673,35 @@ public static class BlobClient
         }
     }
 
-    private sealed class MemorySink : Sink
+    internal sealed class MemorySink : Sink
     {
+        // Directory manifests are the only memory sink; a lying Head can never size
+        // the process's heap past this bound (terminal failure, not OOM).
+        internal const long MaxManifestBytes = 64 * 1024 * 1024;
+
         private readonly Dictionary<long, byte[]> _received = new();
         private readonly Dictionary<long, byte[]> _applied = new();
+        private bool[] _committedRuns = [];
+        private bool _runMode;
         private long _totalBytes = -1;
         public byte[] Data { get; private set; } = Array.Empty<byte>();
 
-        public override void Init(long totalBytes, long totalChunks) => _totalBytes = totalBytes;
+        public override void UseVerifiedRuns() => _runMode = true;
+
+        public override void Init(long totalBytes, long totalChunks)
+        {
+            _totalBytes = totalBytes;
+            if (_runMode)
+            {
+                if (totalBytes > MaxManifestBytes)
+                {
+                    throw new InvalidDataException(
+                        $"the manifest declares {totalBytes:N0} bytes, above the {MaxManifestBytes:N0} in-memory bound");
+                }
+
+                _committedRuns = new bool[RunVerify.RunCount(totalChunks)];
+            }
+        }
 
         public override bool Apply(long index, byte[] data)
         {
@@ -934,6 +1719,20 @@ public static class BlobClient
 
             return true;
         }
+
+        public override void ApplyRun(long runIndex, int runLength, byte[][] chunks, byte[] runCv)
+        {
+            long first = runIndex * RunVerify.RunChunks;
+            for (int i = 0; i < runLength; i++)
+            {
+                _applied[first + i] = chunks[i];
+            }
+
+            _committedRuns[runIndex] = true;
+            Applied += runLength;
+        }
+
+        public override bool RunCommitted(long runIndex) => _committedRuns[runIndex];
 
         public override byte[] Complete()
         {
