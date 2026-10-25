@@ -7,12 +7,6 @@ using System.Xml;
 
 namespace Pinhole;
 
-/// <summary>UPnP Internet Gateway Device client: SSDP discovery, device-description parsing,
-/// and the SOAP actions a pinhole needs (AddAnyPortMapping with AddPortMapping fallback,
-/// GetExternalIPAddress, DeletePortMapping). The same technique iroh's portmapper uses —
-/// asking the router for an explicit UDP/TCP mapping turns many hard home NATs into easy ones
-/// before hole punching even starts. Every failure is silent: a router that does not speak
-/// UPnP simply contributes no mapping.</summary>
 internal sealed class UpnpIgdClient : IDisposable
 {
     private const string IgdSearchTarget1 = "urn:schemas-upnp-org:device:InternetGatewayDevice:1";
@@ -28,9 +22,6 @@ internal sealed class UpnpIgdClient : IDisposable
     });
     private readonly HttpClient _http = CreateHttpClient();
 
-    /// <summary>Asks the network's IGD for a mapping to <paramref name="internalPort"/>
-    /// and returns the lease, or null when no gateway answered or none accepted the request.
-    /// <paramref name="ssdpUnicast"/> overrides multicast discovery (test seam).</summary>
     public async Task<UpnpMapping?> TryMapAsync(int internalPort, TimeSpan lease,
         IPEndPoint? ssdpUnicast, CancellationToken ct, ProtocolType protocol = ProtocolType.Udp)
     {
@@ -440,7 +431,6 @@ internal sealed class UpnpIgdClient : IDisposable
 
     public void Dispose() => _http.Dispose();
 
-    /// <summary>A live router mapping and the SOAP handles to keep it that way.</summary>
     internal sealed class UpnpMapping(HttpClient http, Uri controlUrl, string serviceType, IPEndPoint external,
         int internalPort, IPAddress internalClient, int wireLease, TimeSpan lease, ProtocolType protocol) : IPortMapLease
     {
@@ -491,7 +481,6 @@ internal sealed class UpnpIgdClient : IDisposable
         public void Dispose() => http.Dispose();
     }
 
-    /// <summary>A UPnP SOAP fault carrying its errorCode (718 conflict, 725 leases, ...).</summary>
     internal sealed class UpnpFaultException(int code) : Exception
     {
         public int Code { get; } = code;

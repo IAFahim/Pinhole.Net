@@ -5,12 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>A TCP dial round can fail transiently (slow greeting under runner load,
-/// a listener rebinding, a refused connect). Those failures must not freeze the
-/// endpoint for the five-second success-throttle window: the dial budget is only
-/// a few seconds long, and Windows CI has seen one failed round eat the whole
-/// budget (TimeoutException instead of the pinned-key InvalidOperationException in
-/// TcpSocketHardeningTests, and the ::1 TcpOnly timeout in TcpSessionTests).</summary>
 public sealed class TcpDialRetryTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(12);

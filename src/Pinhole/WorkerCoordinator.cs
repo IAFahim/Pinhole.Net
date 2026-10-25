@@ -8,8 +8,6 @@ using System.Text.Json.Serialization;
 
 namespace Pinhole;
 
-/// <summary>HTTPS room metadata and credential exchange. Application data continues
-/// through the existing node, including its pinned-key handshake and TURN permissions.</summary>
 internal sealed class WorkerCoordinator
 {
     private static readonly SocketsHttpHandler Handler = new() { AllowAutoRedirect = false };

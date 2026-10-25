@@ -3,9 +3,6 @@ using System.Security.Cryptography;
 
 namespace Pinhole;
 
-/// <summary>Per-stream proof state. Confirm must be called only after a sealed PONG
-/// was authenticated by the session dispatcher; a reusable handshake is not proof
-/// that this stream reaches the key holder. One stream can name only one peer.</summary>
 internal sealed class TcpPeerProof
 {
     private readonly long _challenge = BinaryPrimitives.ReadInt64LittleEndian(RandomNumberGenerator.GetBytes(8)) & 0x3fff_ffff_ffff_ffff;

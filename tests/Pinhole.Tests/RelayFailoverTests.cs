@@ -7,13 +7,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#30 — recovery across independent relay failures and changed allocations. All
-/// TURN servers here run with short allocation lifetimes so a killed server is detected by
-/// the refresh loop in seconds, not minutes, and all of them enforce the RFC receive-side
-/// permission gate (StrictInbound, the FakeTurnServer default): a relayed frame is only
-/// delivered to an allocation that permitted the sender's relayed address, exactly like a
-/// real coturn. Every relayed scenario in this file therefore also proves the permission
-/// bootstrap (own-server permits, announce-learned permits) works under strict rules.</summary>
 public sealed class RelayFailoverTests
 {
     private readonly ITestOutputHelper _output;
@@ -37,8 +30,6 @@ public sealed class RelayFailoverTests
         return (dialerSide, listenerSide);
     }
 
-    /// <summary>Non-throwing exchange probe for polling a wounded session: true when the
-    /// marker made it across within the local budget.</summary>
     private static async Task<bool> TryExchangeAsync(PinholeConnection from, PinholeConnection to, string marker)
     {
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -60,10 +51,6 @@ public sealed class RelayFailoverTests
         }
     }
 
-    /// <summary>Binds a relay-only node: every direct datagram dies in the virtual internet,
-    /// so the session physically cannot exist without the TURN path. The dial budget matches
-    /// <see cref="RelayHandshake"/> so the engine does not condemn its own relay-first dial
-    /// under suite load.</summary>
     private static Task<PinholeNode> RelayOnlyNodeAsync(VirtualLab lab, VirtualNat nat,
         Func<PinholeOptions, PinholeOptions>? tweak = null)
     {
@@ -74,8 +61,6 @@ public sealed class RelayFailoverTests
         });
     }
 
-    /// <summary>Settle-tolerant exchange: polls the probe until the marker lands or the
-    /// budget dies. Use anywhere a freshly connected relay path may still be confirming.</summary>
     private static async Task<bool> ExchangeUntilAsync(PinholeConnection from, PinholeConnection to, string marker, TimeSpan budget)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -130,10 +115,6 @@ public sealed class RelayFailoverTests
         _output.WriteLine($"healed in {sw.Elapsed.TotalMilliseconds:F0} ms on the surviving relay");
     }
 
-    /// <summary>The 1.9.0 known gap, closed: a relay restarting in place changes BOTH peers'
-    /// relayed addresses. With no direct path and no fresh ticket, the pair must re-find each
-    /// other — reallocation announcements plus the authenticated address records of #29 —
-    /// and the same session object must come back to life.</summary>
     [Fact]
     public async Task RelayRestartInPlace_BothAllocationsChange_SessionHealsWithoutFreshTicket()
     {
@@ -198,9 +179,6 @@ public sealed class RelayFailoverTests
         }
     }
 
-    /// <summary>Peers with different relay preferences (an operator A trusts X and Y, an
-    /// operator B trusts Y and Z) still meet through their one common usable relay — the
-    /// same-server send routing carries the punch, no shared configuration needed.</summary>
     [Fact]
     public async Task DifferingRelayLists_MeetThroughTheCommonRelay()
     {
@@ -223,8 +201,6 @@ public sealed class RelayFailoverTests
         _output.WriteLine($"met through relay Y ({y.Control.Port}); X and Z carry no session");
     }
 
-    /// <summary>A rate-limiting or quota-refusing relay must cost bounded retries, never a
-    /// reconnect storm — and the moment it accepts again, the node recovers its allocation.</summary>
     [Fact]
     public async Task QuotaRefusal_RetriesAreBoundedAndRecoveryIsImmediate()
     {
@@ -261,9 +237,6 @@ public sealed class RelayFailoverTests
         _output.WriteLine($"quota refusal cost {rejections} rejected attempts across ladder steps; recovery was immediate");
     }
 
-    /// <summary>Every relay down at once: the session enters an explained pending state (it
-    /// must NOT close and must NOT silently claim health), and when infrastructure returns
-    /// it recovers on its own.</summary>
     [Fact]
     public async Task AllRelaysTemporarilyDown_SessionPendsThenRecoversOnRestoration()
     {
@@ -326,10 +299,6 @@ public sealed class RelayFailoverTests
         }
     }
 
-    /// <summary>HTTPS relay DNS failures are contained: a hostname that never resolves costs
-    /// that relay candidate and its reconnect backoff — never the bind, never the direct
-    /// path. (TURN relays are configured by IP by design, so unreachable DNS applies to the
-    /// iroh leg.)</summary>
     [Fact]
     public async Task UnresolvableIrohHostname_DirectPathUnaffected()
     {

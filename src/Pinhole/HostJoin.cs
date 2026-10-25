@@ -6,26 +6,12 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>Host side of the minimal code-share API (#45 M2): one node, one short code,
-/// one accepted peer. The code maps to the host's full connection string through a
-/// <c>Pinhole.Rendezvous</c> code directory or HTTPS coordinator; the underlying transport, tickets, keys,
-/// NAT punching, racing, and recovery are exactly the existing engine's.</summary>
 public sealed class PinholeHost : IAsyncDisposable
 {
-    /// <summary>The invitation code: 9 base32 characters, 45 bits of cryptographic
-    /// randomness. Guessing it against a directory is the online attack, and the
-    /// directory answers at its own rate.</summary>
     public string Code { get; }
 
-    /// <summary>The full <c>pinhole1:</c> invitation. Sharing this out of band
-    /// (chat, voice) authenticates the host key end to end without trusting the
-    /// code directory; the short code is the convenience path.</summary>
     public string FullInvitation => _node.ConnectionString;
 
-    /// <summary>A human-comparable fingerprint of the invitation (16 base32 chars,
-    /// 80 bits). Hosts and joiners display it and compare out of band to detect a
-    /// malicious directory substituting a different key. This is a fingerprint
-    /// check, not a PAKE: it detects, it does not prevent.</summary>
     public string ConfirmationCode { get; }
 
     private readonly PinholeNode _node;
@@ -45,8 +31,7 @@ public sealed class PinholeHost : IAsyncDisposable
         Code = code;
         _token = token;
         _refreshInterval = refreshInterval;
-        string raw = Fingerprint(Encoding.UTF8.GetBytes(node.ConnectionString));
-        ConfirmationCode = $"{raw[..4]}-{raw[4..8]}-{raw[8..12]}-{raw[12..16]}";
+        ConfirmationCode = FormatConfirmation(ConfirmationFingerprint(node.PeerId, node.StaticPublicKey, node.EndpointPublicKey));
         _keepalive = KeepaliveAsync();
     }
 
@@ -57,20 +42,14 @@ public sealed class PinholeHost : IAsyncDisposable
         _token = string.Empty;
         Code = worker.Code;
         _refreshInterval = refreshInterval;
-        string raw = Fingerprint(Encoding.UTF8.GetBytes(node.ConnectionString));
-        ConfirmationCode = $"{raw[..4]}-{raw[4..8]}-{raw[8..12]}-{raw[12..16]}";
+        ConfirmationCode = FormatConfirmation(ConfirmationFingerprint(node.PeerId, node.StaticPublicKey, node.EndpointPublicKey));
         _workerConnection = worker.ConnectHostAsync(node, _shutdown.Token);
         _keepalive = KeepaliveAsync();
     }
 
-    /// <summary>Waits for a joiner to complete the pinned-key handshake. The returned
-    /// connection is the engine's own <see cref="PinholeConnection"/>: datagrams,
-    /// roaming, recovery, and disposal behave exactly as with ticket dials.</summary>
     public Task<PinholeConnection> AcceptAsync(CancellationToken ct = default) =>
         _workerConnection is { } paired ? paired.WaitAsync(ct) : _node.AcceptAsync(ct);
 
-    /// <summary>Stops the keepalive, deletes the code from the directory (best effort,
-    /// bounded), and disposes the underlying node and its sessions.</summary>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
@@ -131,12 +110,22 @@ public sealed class PinholeHost : IAsyncDisposable
         }
     }
 
-    internal static string Fingerprint(byte[] invitation)
+    internal static string ConfirmationFingerprint(ulong peerId, byte[]? staticKey, byte[]? endpointKey)
     {
         Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(invitation, hash);
+        var payload = new MemoryStream(24 + (staticKey?.Length ?? 0) + (endpointKey?.Length ?? 0));
+        payload.Write(Encoding.ASCII.GetBytes("pinhole-confirmation-v1"));
+        payload.WriteByte((byte)((staticKey is null ? 0 : 1) | (endpointKey is null ? 0 : 2)));
+        Span<byte> tmp = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(tmp, peerId);
+        payload.Write(tmp);
+        if (staticKey is not null) payload.Write(staticKey);
+        if (endpointKey is not null) payload.Write(endpointKey);
+        SHA256.HashData(payload.GetBuffer().AsSpan(0, (int)payload.Length), hash);
         return FormatBase32(hash[..10]); // 80 bits, formatted by the caller in groups
     }
+
+    internal static string FormatConfirmation(string raw) => $"{raw[..4]}-{raw[4..8]}-{raw[8..12]}-{raw[12..16]}";
 
     internal static string NewCode()
     {
@@ -173,63 +162,32 @@ public sealed class PinholeHost : IAsyncDisposable
     }
 }
 
-/// <summary>Settings for hosting a code-share session.</summary>
 public sealed record PinholeHostSettings
 {
-    /// <summary>Endpoints of <c>Pinhole.Rendezvous</c> introducers that provide the code
-    /// directory. Supply these or <see cref="CoordinatorUrl"/>; there is no default
-    /// coordination service.</summary>
     public IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; } = [];
 
-    /// <summary>HTTPS URL of a Pinhole Cloudflare coordinator. It supplies room
-    /// pairing and expiring TURN credentials. HTTP is accepted only for loopback
-    /// development. Short codes trust this coordinator to supply the peer's key.</summary>
     public Uri? CoordinatorUrl { get; init; }
 
-    /// <summary>Options for the underlying node. Leave null for the transport defaults
-    /// (STUN, relays, discovery). A coordinator supplies its own STUN/TURN defaults.
-    /// Explicit empty <see cref="PinholeOptions.Relays"/> disables relay allocation.
-    /// The host's connection string published
-    /// under the code is whatever this node advertises.</summary>
     public PinholeOptions? NodeOptions { get; init; }
 
-    /// <summary>How often the registration is refreshed so the directory's TTL cannot
-    /// expire it. Default 40 s (the default directory TTL is 120 s). Set this to at most
-    /// a third of your directory's TTL when running one with a shorter sweep.</summary>
     public TimeSpan RefreshInterval { get; init; } = TimeSpan.FromSeconds(40);
 }
 
-/// <summary>Settings for joining a code-share session.</summary>
 public sealed record PinholeJoinSettings
 {
-    /// <summary>Endpoints of <c>Pinhole.Rendezvous</c> introducers that provide the code
-    /// directory. Supply these or <see cref="CoordinatorUrl"/>.</summary>
     public IReadOnlyList<IPEndPoint> RendezvousEndpoints { get; init; } = [];
 
-    /// <summary>HTTPS URL of the same Pinhole Cloudflare coordinator used by the
-    /// host. HTTP is accepted only for loopback development.</summary>
     public Uri? CoordinatorUrl { get; init; }
 
-    /// <summary>Node options for the dialer (defaults follow the transport).</summary>
     public PinholeOptions? NodeOptions { get; init; }
 
-    /// <summary>How long to keep polling the directory for a code that has not been
-    /// registered yet (host still starting, or datagram loss). Default 30 s. The
-    /// underlying dial deadline remains <see cref="PinholeOptions.ConnectTimeout"/>.</summary>
     public TimeSpan WaitTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Interval between directory polls while waiting. Default 1 s.</summary>
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(1);
 }
 
-/// <summary>Entry points for the minimal host/join API (#45 M2). Names map to the
-/// conceptual <c>Pinhole.HostAsync/JoinAsync</c> sketch; a static class avoids colliding
-/// with the <c>Pinhole</c> namespace itself.</summary>
 public static class PinholeSession
 {
-    /// <summary>Hosts a session: binds a node, claims a fresh invitation code in the
-    /// directory, and keeps it alive until disposal. Callers read <see cref="PinholeHost.Code"/>,
-    /// share it, and <see cref="PinholeHost.AcceptAsync"/> the joiner.</summary>
     public static async Task<PinholeHost> HostAsync(PinholeHostSettings settings, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -264,10 +222,6 @@ public static class PinholeSession
         }
     }
 
-    /// <summary>Joins a session by invitation code: resolves the host's connection
-    /// string from the directory and dials it with the engine's pinned-key handshake.
-    /// The returned connection is a regular <see cref="PinholeConnection"/>; dispose it
-    /// (or the node beneath it) to close.</summary>
     public static async Task<PinholeConnection> JoinAsync(
         string code, PinholeJoinSettings settings, CancellationToken ct = default)
     {
@@ -302,16 +256,10 @@ public static class PinholeSession
             throw;
         }
     }
-    /// <summary>The minimal API promises pull-style receives out of the box, so a null
-    /// NodeOptions gets a modest datagram buffer; explicit options are used verbatim
-    /// (an app living on the Received event may prefer capacity zero).</summary>
     private static PinholeOptions? WithOptions(PinholeOptions? options) =>
         options ?? new PinholeOptions { ReceiveBufferCapacity = 256 };
 }
 
-/// <summary>Client half of the code-directory wire (PUTC/GETC/DELC). One short-lived
-/// socket per operation, the same dual-mode and Windows-connreset handling as the
-/// peer-ID lookup client.</summary>
 internal sealed class CodeDirectory
 {
     internal static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(40);
@@ -330,8 +278,6 @@ internal sealed class CodeDirectory
         _servers = servers.ToArray();
     }
 
-    /// <summary>Claims a code; returns the directory-issued token, or null when the
-    /// code is already live.</summary>
     public async Task<string?> PutAsync(string code, string invitation, CancellationToken ct)
     {
         string message = $"PUTC {code} {EncodeInvitation(invitation)}";
@@ -341,9 +287,6 @@ internal sealed class CodeDirectory
             : null;
     }
 
-    /// <summary>Outcome of a token-bearing refresh: confirmed, refused (the code belongs
-    /// to another host now), or gone (the directory lost the code — restart or eviction —
-    /// and the registration should reconcile by claiming again).</summary>
     public enum RefreshOutcome
     {
         Confirmed,
@@ -377,15 +320,14 @@ internal sealed class CodeDirectory
     public Task DeleteAsync(string code, string token, CancellationToken ct = default) =>
         SendExpectAsync($"DELC {code} {token}", "OKCD", ["TokB", "NOCODE"], CancellationToken.None);
 
-    /// <summary>Polls for a code until it appears or the deadline passes. Returns the
-    /// decoded invitation, or null on timeout. A record that does not decode is treated
-    /// as absence — the directory stores opaque bytes and never validates them.</summary>
     public async Task<string?> ResolveAsync(string code, TimeSpan deadline, TimeSpan pollInterval, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < deadline)
         {
-            string? record = await SendExpectAsync($"GETC {code}", "OKCC ", ["WAITC"], ct).ConfigureAwait(false) is { } reply
+            string? record = await SendExpectAsync(
+                $"GETC {code}", "OKCC ", ["WAITC"], ct,
+                reply => AnswerGetcChallenge(code, reply)).ConfigureAwait(false) is { } reply
                 && reply.StartsWith("OKCC ", StringComparison.Ordinal)
                 ? reply["OKCC ".Length..]
                 : null;
@@ -411,13 +353,14 @@ internal sealed class CodeDirectory
         return null;
     }
 
-    /// <summary>Sends one request to every configured server and returns the first
-    /// accepted reply line — a success (starts with <paramref name="want"/>) or a named
-    /// refusal (exactly a terminator). Null means timeout. Replies from endpoints that are
-    /// not configured servers are dropped: an off-path sprayer that guesses the ephemeral
-    /// port must not be able to inject an OKCC/OKCG verdict. (A request-id echo that also
-    /// defeats source spoofing needs a wire-version bump; tracked with handshake v4.)</summary>
-    private async Task<string?> SendExpectAsync(string message, string want, string[] terminators, CancellationToken ct)
+    private static string? AnswerGetcChallenge(string code, string reply)
+    {
+        string[] parts = reply.Split(' ');
+        return parts.Length == 3 && parts[1] == code ? $"GETC {parts[1]} {parts[2]}" : null;
+    }
+
+    private async Task<string?> SendExpectAsync(string message, string want, string[] terminators, CancellationToken ct,
+        Func<string, string?>? answerChallenge = null)
     {
         using Socket udp = NewSocket();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -451,6 +394,18 @@ internal sealed class CodeDirectory
             }
 
             string reply = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
+            if (answerChallenge is not null && reply.StartsWith("CHAL ", StringComparison.Ordinal))
+            {
+                // The cookie proves this endpoint receives; it is keyed to the endpoint
+                // itself, so the retry goes back to the challenging server only.
+                if (answerChallenge(reply) is { } retry)
+                {
+                    await udp.SendToAsync(Encoding.ASCII.GetBytes(retry), SocketFlags.None, from, deadline.Token).ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
             if (reply.StartsWith(want, StringComparison.Ordinal))
             {
                 return reply;

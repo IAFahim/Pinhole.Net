@@ -6,81 +6,38 @@ using Org.BouncyCastle.Crypto.Signers;
 
 namespace Pinhole;
 
-/// <summary>An application-supplied address-lookup provider, following iroh's address-lookup
-/// design: the node signs its current reachability and pushes it to one or more providers;
-/// a dialer whose cached addresses are dead asks the same providers for the peer's current
-/// record and verifies it against the key pinned in its connection string. Implement this
-/// to front an existing directory you trust or operate — signed DNS, pkarr, or an
-/// iroh-style lookup service — over whatever transport they speak; the built-in
-/// <c>Pinhole.Rendezvous</c> UDP introducer (see <see cref="PinholeOptions.RendezvousEndpoints"/>)
-/// is one such provider. Both operations are best-effort: providers are availability
-/// dependencies, never authorities — nothing a provider returns is trusted before its
-/// Ed25519 signature verifies against the pinned endpoint key.</summary>
 public interface IPinholeLookupProvider
 {
-    /// <summary>Delivers the node's current signed record (opaque bytes from
-    /// <see cref="AddressRecord"/> encoding). Fire-and-fortry semantics: returning normally
-    /// means "accepted for serving", throwing means "unreachable" and costs the publisher a
-    /// backoff interval, never a failure.</summary>
     Task PublishAsync(ReadOnlyMemory<byte> signedRecord, CancellationToken ct);
 
-    /// <summary>Returns the peer's current signed record, or null when this provider does
-    /// not know the peer. The bytes are untrusted until verified by the caller.</summary>
     Task<byte[]?> ResolveAsync(ulong peerId, CancellationToken ct);
 }
 
-/// <summary>A peer's signed statement of where it is reachable right now: direct and
-/// server-reflexive endpoints, bound to its Ed25519 endpoint key with a monotonic sequence
-/// and a freshness expiry. Records carry public keys and addresses only — never session
-/// keys, pre-shared secrets, or TURN credentials — so a public directory learns reachability
-/// metadata but holds nothing that could impersonate the peer or decrypt its traffic.
-/// Verification is always against an externally pinned key (<see cref="TryParseVerified"/>);
-/// parsing without one exists only for transport, not for trust.</summary>
 public sealed class AddressRecord
 {
-    /// <summary>Ed25519 public keys are 32 bytes.</summary>
     public const int EndpointKeyLength = 32;
 
-    /// <summary>Ed25519 signatures are 64 bytes.</summary>
     public const int SignatureLength = 64;
 
-    /// <summary>The most endpoints one record may carry.</summary>
     public const int MaxEndpoints = 16;
 
-    /// <summary>The most relayed endpoints one record may carry.</summary>
     public const int MaxRelayedEndpoints = 4;
 
     private const byte WireVersion1 = 1;
     private const byte WireVersion2 = 2;
 
-    /// <summary>The publisher's peer ID — a locator hint. A record whose ID matches the
-    /// dialer's expectation but whose key does not is discarded: IDs never authorize peers.</summary>
     public ulong PeerId { get; init; }
 
-    /// <summary>The publisher's Ed25519 endpoint public key. Must equal the key the verifier
-    /// pinned out-of-band (from a v3 connection string) or the record is rejected.</summary>
     public byte[] EndpointKey { get; init; } = [];
 
-    /// <summary>Monotonic publish sequence (unix-time milliseconds at signing). A record at
-    /// or below the highest sequence already adopted for the peer is a replay or rollback.</summary>
     public ulong Sequence { get; init; }
 
-    /// <summary>When the record stops being fresh. Verification fails at or after this
-    /// instant, so a stale record can only deny availability, never redirect.</summary>
     public DateTimeOffset ExpiresAtUtc { get; init; }
 
-    /// <summary>Direct and server-reflexive endpoints the publisher is reachable on.</summary>
     public IReadOnlyList<IPEndPoint> Endpoints { get; init; } = [];
 
-    /// <summary>The publisher's TURN relayed addresses (v2 records). These are plain
-    /// endpoints — the ADDRESS a peer may send at through its own allocation on the same
-    /// server — never the credentials: a relay candidate's username/password stays out of
-    /// any public record. Resolvers only adopt relayed endpoints on relay servers they are
-    /// themselves configured to use, where their own credentials already apply.</summary>
     public IReadOnlyList<IPEndPoint> RelayedEndpoints { get; init; } = [];
 
-    /// <summary>Canonical unsigned body: everything but the signature, in a fixed layout so
-    /// both endpoints sign and verify identical bytes.</summary>
     public byte[] Encode()
     {
         if (Endpoints.Count > MaxEndpoints)
@@ -113,9 +70,6 @@ public sealed class AddressRecord
         return payload.ToArray();
     }
 
-    /// <summary>Body plus its Ed25519 signature — the bytes <see cref="IPinholeLookupProvider"/>
-    /// transports. Signing is the publisher's job (the node's endpoint identity), so this
-    /// stays internal to the library.</summary>
     internal byte[] EncodeSigned(RelayIdentity signer)
     {
         byte[] body = Encode();
@@ -125,11 +79,6 @@ public sealed class AddressRecord
         return wire;
     }
 
-    /// <summary>Strict verified parse: the record must carry exactly the expected peer ID and
-    /// endpoint key, be unexpired, and bear a valid Ed25519 signature over its canonical
-    /// body. Anything else — wrong key, forged signature, tampered fields, stale freshness,
-    /// malformed layout — returns false. This is the only way library code adopts endpoints
-    /// from a lookup provider.</summary>
     public static bool TryParseVerified(
         ReadOnlySpan<byte> wire,
         ulong expectedPeerId,
@@ -249,8 +198,6 @@ public sealed class AddressRecord
         }
     }
 
-    /// <summary>Reads a length-prefixed endpoint list at <paramref name="pos"/>; false when
-    /// the list is malformed or over its cap. Returns the position after the list.</summary>
     private static bool TryReadEndpointList(ReadOnlySpan<byte> body, int cap, ref int pos, int count, out IPEndPoint[] endpoints)
     {
         endpoints = [];
@@ -284,17 +231,10 @@ public sealed class AddressRecord
     }
 }
 
-/// <summary>The node's Ed25519 endpoint identity derivation: the X25519 session-identity
-/// seed is also the root from which the endpoint (and relay-handshake) key is expanded, so
-/// one persisted 32-byte seed restores the full key set — X25519 static key, Ed25519
-/// endpoint key, and the peer ID derived from the latter.</summary>
 internal static class EndpointIdentity
 {
     public const string DerivationLabel = "pinhole-endpoint-ed25519-v1";
 
-    /// <summary>HKDF expansion of the identity seed into the Ed25519 endpoint seed — a
-    /// distinct domain from the X25519 static key (which uses the seed directly), so neither
-    /// key can ever be computed from the other's public half.</summary>
     public static byte[]? DeriveEndpointSeed(byte[]? identitySeed) =>
         identitySeed is null
             ? null

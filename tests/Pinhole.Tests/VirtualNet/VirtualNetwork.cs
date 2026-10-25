@@ -2,12 +2,6 @@ using System.Net;
 
 namespace Pinhole.Tests;
 
-/// <summary>An in-process internet for the topology lab: datagram routing between attached
-/// sockets through per-test NATs, with drop/delay/reorder shaping on the links. Zero-delay
-/// packets are delivered synchronously on the sender's thread (preserving causal order,
-/// exactly like loopback UDP); delayed packets ride a scheduler thread, where jitter
-/// produces reorder. Every packet's fate is counted, so a failing scenario reports its
-/// physics, not just its outcome.</summary>
 internal sealed class VirtualNetwork : IDisposable
 {
     private readonly object _gate = new();
@@ -24,9 +18,6 @@ internal sealed class VirtualNetwork : IDisposable
     public long DroppedByPolicy;
     public long Unroutable;
 
-    /// <summary>Sockets attached but not yet disposed — the lab's leak ledger. A disposed
-    /// socket still swallows whatever arrives for it (a vanished host absorbs, like a real
-    /// network), but the count must return to baseline after every cleanup cycle.</summary>
     public int LiveSockets => _liveSockets;
     private int _liveSockets;
     internal void SocketAttached() => Interlocked.Increment(ref _liveSockets);
@@ -38,7 +29,6 @@ internal sealed class VirtualNetwork : IDisposable
         _scheduler.Start();
     }
 
-    /// <summary>Installs a shaping rule; first match wins, rules see post-NAT addresses.</summary>
     public void AddRule(LinkRule rule)
     {
         lock (_gate)
@@ -55,11 +45,6 @@ internal sealed class VirtualNetwork : IDisposable
         }
     }
 
-    /// <summary>Attaches a socket directly to the internet at <paramref name="address"/> —
-    /// the endpoint peers dial is the endpoint the engine bound. A port-0 bind is assigned
-    /// an ephemeral port, exactly as an OS socket would be: the engine's candidate
-    /// machinery (local port, STUN-observed reflexives) is meaningless at port 0, and a
-    /// real stack never leaves a bound socket there.</summary>
     public VirtualUdpSocket CreateHost(IPEndPoint address)
     {
         lock (_gate)
@@ -81,7 +66,6 @@ internal sealed class VirtualNetwork : IDisposable
 
     private int _nextEphemeralPort = 50000;
 
-    /// <summary>Attaches a socket on <paramref name="nat"/>'s private side.</summary>
     public VirtualUdpSocket CreateBehindNat(VirtualNat nat) => nat.Attach();
 
     // Called by sockets: one datagram leaves an attached socket toward dest.
@@ -152,8 +136,6 @@ internal sealed class VirtualNetwork : IDisposable
         ScheduleCrossing(rule, source, dest, payload);
     }
 
-    /// <summary>Applies the rule's propagation delay/jitter (or delivers immediately on a
-    /// zero-delay link, preserving causal order like loopback UDP).</summary>
     private void ScheduleCrossing(LinkRule? rule, IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
         TimeSpan delay = rule?.Delay ?? TimeSpan.Zero;
@@ -268,7 +250,6 @@ internal sealed class VirtualNetwork : IDisposable
         }
     }
 
-    /// <summary>A one-line physics report for failure messages and the goodput log.</summary>
     public string Counters()
     {
         lock (_gate)
@@ -319,11 +300,6 @@ internal sealed class VirtualNetwork : IDisposable
     private readonly record struct ScheduledPacket(
         DateTimeOffset Due, IPEndPoint Source, IPEndPoint Dest, byte[] Payload);
 
-    /// <summary>One shared finite-bandwidth FIFO (the bottleneck link): packets enter on
-    /// arrival (a full queue tail-drops), and <see cref="Drain"/> releases exactly as many
-    /// bytes as the elapsed time × rate paid for. Queue delay is emergent — a burst sits in
-    /// the queue until the link can send it — so a small queue turns bursts into loss and a
-    /// deep one into bufferbloat, the two regimes the #27 baseline must record.</summary>
     internal sealed class Shaper(VirtualNetwork net, long bitsPerSecond, int queuePackets)
     {
         private readonly object _gate = new();
@@ -350,8 +326,6 @@ internal sealed class VirtualNetwork : IDisposable
             }
         }
 
-        /// <summary>Called by the scheduler: pays out credit for the elapsed time and
-        /// releases whole packets while their byte-cost fits.</summary>
         public List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Drain(DateTimeOffset now)
         {
             lock (_gate)

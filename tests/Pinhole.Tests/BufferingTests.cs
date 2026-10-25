@@ -3,10 +3,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Issue #13: opt-in buffered receiving closes the accept/subscribe race — a
-/// datagram that arrived before the app first reads is delivered by the first read. All
-/// semantics here are local queueing over the same unreliable transport; nothing about
-/// network reliability changes.</summary>
 public sealed class BufferingTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);

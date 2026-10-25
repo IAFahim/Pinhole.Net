@@ -4,9 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Path MTU discovery (RFC 8899-style): padded token-checked pings climb from the
-/// 1237-byte wire floor, a pong confirms a size, and an over-MTU black hole keeps the
-/// floor while normal payloads keep flowing.</summary>
 public sealed class PmtudTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -25,8 +22,6 @@ public sealed class PmtudTests
         ConnectTimeout = TimeSpan.FromSeconds(8),
     };
 
-    /// <summary>A v4-loopback-only dial string (with the node's static key): the path, and
-    /// therefore the probe ceiling, is deterministic.</summary>
     private static string LoopbackString(PinholeNode listener) => new ConnectionString(
         listener.PeerId,
         [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))],

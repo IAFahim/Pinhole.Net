@@ -6,8 +6,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Independent RFC byte fixtures and SOAP fixtures through an injected HTTP
-/// handler. These test protocol semantics without making router or socket claims.</summary>
 public sealed class TcpPortMappingTests
 {
     private static byte[] PcpTcpRequest => Convert.FromHexString(

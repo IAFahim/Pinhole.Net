@@ -6,9 +6,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>RecoveryTimeout must bound unavailable routes without bounding healthy
-/// transfer time. These tests exercise the actual downloader over the virtual socket
-/// seam, including cancellation of pending dials and release of request reservations.</summary>
 public sealed class BlobRecoveryDeadlineTests
 {
     private static readonly TimeSpan Ceiling = TimeSpan.FromSeconds(10);

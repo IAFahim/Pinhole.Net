@@ -4,6 +4,15 @@ Verified 2026-10-11 during the physical phone trials and QUIC probe runs.
 Read this before running any device or network work; it exists so agents stop
 re-deriving the environment (or wrongly declaring it blocked) each session.
 
+## Code style rule: NO `///` XML doc comments
+
+The maintainer finds them noise. Every `///` line was stripped repo-wide once
+(2026-10-25) — **never write `///` doc comments in this repo, on any member,
+public or internal.** `Directory.Build.props` suppresses the missing-doc
+warnings (CS1591 & co.) so builds stay clean without them. State a constraint
+in a plain `//` comment only where the code cannot say it itself; anything a
+user needs lives in `docs/*.md`, not in the source.
+
 ## This machine's environment (Arch/Omarchy desktop)
 
 - **adb is not on PATH.** It lives at `/home/i/.android-sdk/platform-tools/adb`.

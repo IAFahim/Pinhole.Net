@@ -6,11 +6,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#20 — the congestion controller against the recorded fixed-window baseline.
-/// The controller is receiver-side only and the wire is unchanged: every claim here is a
-/// blob-layer property measured through the same virtual internet the #27 baselines used.
-/// Thin-queue performance compares both modes on the same host; random-loss throughput
-/// remains a logged observation. The measured values go to BLOBS.md and BASELINES.md.</summary>
 public sealed class CongestionTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;
@@ -154,6 +149,32 @@ public sealed class CongestionTests(ITestOutputHelper output)
         Assert.InRange(controller.WindowBytes, 4096, maximum);
         controller.OnPathChanged();
         Assert.InRange(controller.WindowBytes, 4096, maximum);
+    }
+
+    [Fact]
+    public void TryStartRun_WhenTheSharedBudgetRefuses_LeavesThePacerCreditIntact()
+    {
+        // A-11: the pacer's credit was deducted before the shared budget was asked, so a
+        // refused reservation burned credit for bytes that were never sent — under
+        // contention on the pie the pacer starved itself. Conservation: a refused run
+        // leaves the pacer, the window, and the budget exactly as they were.
+        var budget = new BlobFlowBudget(64 * 1024);
+        var controller = new BlobController(1024 * 1024, budget, stats: null, fixedWindow: false);
+
+        // A rival download holds the entire shared pie.
+        Assert.True(budget.TryReserve(64 * 1024));
+
+        // Seed the pacer clock, then accrue a full run's worth of credit (capped at four
+        // chunks for the 32 KiB initial window) and attempt a run the budget refuses.
+        Assert.False(controller.TryStartRun(2048, 0));
+        Assert.False(controller.TryStartRun(2048, 10_000));
+        Assert.Equal(64 * 1024, budget.UsedBytes);
+
+        // The refusal must not have burned the credit: with the pie freed, the same
+        // burst leaves immediately instead of waiting for the pacer to refill.
+        budget.Release(64 * 1024);
+        Assert.True(controller.TryStartRun(4096, 10_000));
+        Assert.Equal(4096, budget.UsedBytes);
     }
 
     [Fact]

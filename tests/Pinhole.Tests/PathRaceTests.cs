@@ -5,11 +5,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#28: viable direct and relay paths are raced within one connection deadline —
-/// the dialer's punch loop already offers PUNCs to every candidate (direct and relay) on
-/// the same 200 ms tick while the relay allocation warms concurrently; these tests PROVE
-/// the race semantics with clocks: whichever path answers first carries the session,
-/// inside a fraction of the deadline, and neither path's slowness blocks the other.</summary>
 public sealed class PathRaceTests(ITestOutputHelper output)
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(15); // the engine default

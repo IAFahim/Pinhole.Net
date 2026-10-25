@@ -4,32 +4,17 @@ using System.Threading.Channels;
 
 namespace Pinhole;
 
-/// <summary>Options for iroh-compatible discovery and raw datagram connectivity.</summary>
 public sealed class IrohTransportOptions
 {
-    /// <summary>Socket, STUN, iroh relay, port-mapping, network-watch, and deadline settings.
-    /// Pinhole session encryption, TURN, lookup providers, LAN discovery, keepalive, and
-    /// PMTU/path-validation settings are not used: the protocol above owns its wire traffic.</summary>
     public PinholeOptions Network { get; init; } = new();
-    /// <summary>A persisted 32-byte Ed25519 secret seed, exactly as iroh SecretKey.fromBytes.
-    /// Null creates a fresh identity. This is distinct from Pinhole's derived endpoint seed.</summary>
     public byte[]? SecretKeySeed { get; init; }
-    /// <summary>The HTTP pkarr service used by native iroh DNS discovery. HTTPS by default;
-    /// HTTP is accepted only on loopback for self-contained tests.</summary>
     public Uri DiscoveryUrl { get; init; } = new("https://dns.iroh.link/pkarr");
-    /// <summary>Publish signed endpoint reachability at bind and periodically (default true),
-    /// letting native iroh peers find this endpoint by ID alone. Set false for offline use.</summary>
     public bool PublishAddress { get; init; } = true;
-    /// <summary>Include direct and reflexive IP addresses when publishing (default true),
-    /// so endpoint-ID lookup supplies direct candidates. Set false for relay-only publication.</summary>
     public bool PublishDirectAddresses { get; init; } = true;
-    /// <summary>Bounded raw receive queue; oldest packets are dropped when full. Default 256.</summary>
     public int ReceiveBufferCapacity { get; init; } = 256;
     internal HttpMessageHandler? DiscoveryHandler { get; init; }
 }
 
-/// <summary>A direct UDP path or identity-addressed iroh relay path. Direct paths do not
-/// identify or authenticate their sender; the protocol above must do that.</summary>
 public sealed class IrohPath
 {
     private readonly IPEndPoint? _direct;
@@ -41,13 +26,9 @@ public sealed class IrohPath
         Key = key;
         EndpointId = key is null ? null : Convert.ToHexString(key).ToLowerInvariant();
     }
-    /// <summary>The direct UDP address, or null for a relayed path.</summary>
     public IPEndPoint? DirectAddress => _direct is null ? null : CloneEndpoint(_direct);
-    /// <summary>The relay URL, or null for a direct path.</summary>
     public Uri? RelayUrl { get; }
-    /// <summary>The destination/source endpoint ID on a relay path; null on direct UDP.</summary>
     public string? EndpointId { get; }
-    /// <summary>Creates a direct path.</summary>
     public static IrohPath Direct(IPEndPoint address)
     {
         ArgumentNullException.ThrowIfNull(address);
@@ -55,7 +36,6 @@ public sealed class IrohPath
         IPAddress ip = address.Address.IsIPv4MappedToIPv6 ? address.Address.MapToIPv4() : address.Address;
         return new IrohPath(CloneEndpoint(new IPEndPoint(ip, address.Port)), null, null);
     }
-    /// <summary>Creates a relay path addressed by a native iroh endpoint ID.</summary>
     public static IrohPath Relay(Uri url, string endpointId) =>
         new(null, IrohAddress.ValidateRelay(url), IrohEncoding.ParseKey(endpointId));
 
@@ -65,19 +45,13 @@ public sealed class IrohPath
             : new IPAddress(endpoint.Address.GetAddressBytes()), endpoint.Port);
 }
 
-/// <summary>One unchanged network datagram and the path on which it arrived.</summary>
 public sealed class IrohDatagram
 {
     internal IrohDatagram(IrohPath path, byte[] payload) { Path = path; Payload = payload; }
-    /// <summary>The return path; a relay source ID is not a replacement for protocol authentication.</summary>
     public IrohPath Path { get; }
-    /// <summary>The raw UDP/relayed bytes, without Pinhole headers or encryption.</summary>
     public ReadOnlyMemory<byte> Payload { get; }
 }
 
-/// <summary>A resolved set of paths to one iroh endpoint. Preparing a route does not
-/// authenticate or establish the protocol above it. That protocol owns handshakes,
-/// retransmission, and path validation.</summary>
 public sealed class IrohRoute
 {
     private readonly IrohTransport _transport;
@@ -89,15 +63,10 @@ public sealed class IrohRoute
         Paths = Array.AsReadOnly(address.RelayUrls.Select(x => IrohPath.Relay(x, address.EndpointId))
             .Concat(address.DirectAddresses.Select(IrohPath.Direct)).ToArray());
     }
-    /// <summary>The endpoint identity and resolved addresses.</summary>
     public IrohAddress Address { get; }
-    /// <summary>The initial candidate paths.</summary>
     public IReadOnlyList<IrohPath> Paths { get; }
-    /// <summary>The path selected by the protocol above, or null while racing candidates.</summary>
     public IrohPath? SelectedPath => Volatile.Read(ref _selected);
 
-    /// <summary>Sends unchanged bytes on the selected path, or races all initial paths.
-    /// Success means at least one local send was accepted, not that a peer received it.</summary>
     public void Send(ReadOnlySpan<byte> payload)
     {
         if (SelectedPath is { } path) { _transport.SendTo(path, payload); return; }
@@ -112,9 +81,6 @@ public sealed class IrohRoute
         if (!sent) throw new IOException("no usable iroh path", failure);
     }
 
-    /// <summary>Selects a path AFTER the protocol above authenticates/validates it.
-    /// A newly validated direct address may replace stale candidates after roaming.
-    /// Passing null resumes the initial candidate race. No inbound packet selects a path automatically.</summary>
     public void SelectPath(IrohPath? path)
     {
         if (path?.RelayUrl is not null && path.EndpointId != Address.EndpointId)
@@ -123,9 +89,6 @@ public sealed class IrohRoute
     }
 }
 
-/// <summary>Iroh-compatible endpoint addressing, signed discovery, and raw UDP/relay
-/// connectivity in managed C#. Supply your packet protocol above this virtual datagram
-/// socket. It adds no Pinhole framing, session handshake, or payload encryption.</summary>
 public sealed class IrohTransport : IAsyncDisposable, IDisposable
 {
     private readonly NodeEngine _engine;
@@ -153,8 +116,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         _engine = new NodeEngine(network, _identity, OnDatagram);
     }
 
-    /// <summary>Binds one UDP socket, discovers its addresses, and authenticates with
-    /// iroh relay infrastructure. Does not start or embed an application protocol.</summary>
     public static async Task<IrohTransport> BindAsync(IrohTransportOptions? options = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -188,9 +149,7 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         catch { transport.Dispose(); throw; }
     }
 
-    /// <summary>The native iroh Ed25519 endpoint ID (canonical hex).</summary>
     public string EndpointId => Convert.ToHexString(_identity.PublicKey).ToLowerInvariant();
-    /// <summary>A current native iroh address/ticket snapshot, including direct and live relay paths.</summary>
     public IrohAddress Address
     {
         get
@@ -202,13 +161,9 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
                 candidates.Where(x => x.Kind == CandidateKind.IrohRelay).Select(x => x.RelayUrl!).ToArray());
         }
     }
-    /// <summary>The bound UDP port.</summary>
     public int LocalPort => _engine.LocalPort;
-    /// <summary>Whether any relay is currently authenticated and connected.</summary>
     public bool HasRelay => _engine.HasRelay;
 
-    /// <summary>Resolves a native iroh ticket, or looks up a bare endpoint ID through
-    /// signed pkarr discovery. The record is verified against the requested endpoint key.</summary>
     public async Task<IrohAddress> ResolveAsync(string ticketOrEndpointId, CancellationToken ct = default)
     {
         ThrowIfDisposed();
@@ -220,9 +175,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         return await _discovery.ResolveAsync(address.EndpointId, deadline.Token).ConfigureAwait(false);
     }
 
-    /// <summary>Resolves an endpoint and prepares its UDP/relay candidate paths. This
-    /// returns a network route; your protocol must complete the peer handshake on it.
-    /// For a relay-only address, at least one relay must connect within the dial deadline.</summary>
     public async Task<IrohRoute> ConnectAsync(string ticketOrEndpointId, CancellationToken ct = default)
     {
         ThrowIfDisposed();
@@ -263,8 +215,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         catch (Exception ex) when (ex is OperationCanceledException or IOException or InvalidOperationException) { }
     }
 
-    /// <summary>Sends one unchanged packet on an explicit path. Neither local send success
-    /// nor relay routing authenticates the remote peer. The protocol above owns those checks.</summary>
     public void SendTo(IrohPath path, ReadOnlySpan<byte> payload)
     {
         ThrowIfDisposed();
@@ -275,8 +225,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         _engine.SendRaw(path, payload);
     }
 
-    /// <summary>Receives a raw datagram, including packets that arrived before the first
-    /// read. The bounded queue drops its oldest entry under overload.</summary>
     public async ValueTask<IrohDatagram> ReceiveAsync(CancellationToken ct = default)
     {
         ThrowIfDisposed();
@@ -287,8 +235,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
     private void OnDatagram(IrohPath path, ReadOnlyMemory<byte> payload) =>
         _received.Writer.TryWrite(new IrohDatagram(path, payload.ToArray()));
 
-    /// <summary>Publishes reachability in the same signed DNS format used by native iroh.
-    /// Native DNS/Pkarr discovery can subsequently resolve this endpoint ID.</summary>
     public Task PublishAddressAsync(CancellationToken ct = default)
     {
         ThrowIfDisposed();
@@ -316,8 +262,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>Refreshes STUN/port mappings and rebinds when necessary. Protocol state and
-    /// peer path validation above this transport remain the application's responsibility.</summary>
     public Task RoamNowAsync(CancellationToken ct = default)
     {
         ThrowIfDisposed();
@@ -325,7 +269,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    /// <summary>Closes the raw socket/relays and unblocks pending receives. Idempotent.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
@@ -334,7 +277,6 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         _received.Writer.TryComplete();
         _http.Dispose();
     }
-    /// <summary>Closes the transport and waits for its address-publishing worker.</summary>
     public async ValueTask DisposeAsync()
     {
         Dispose();

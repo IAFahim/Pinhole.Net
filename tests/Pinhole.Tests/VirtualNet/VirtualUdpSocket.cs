@@ -4,11 +4,6 @@ using Pinhole;
 
 namespace Pinhole.Tests;
 
-/// <summary>A UDP socket attached to a <see cref="VirtualNetwork"/> — the test double the
-/// engine's <see cref="IUdpSocket"/> seam consumes. Address semantics mirror a dual-mode OS
-/// socket exactly: v4 peers appear as v4-mapped IPv6 sockaddrs on receive, and v4-mapped
-/// destinations are unwrapped on send, so the engine's address comparisons behave as they
-/// do against a real network.</summary>
 internal sealed class VirtualUdpSocket : IUdpSocket
 {
     private readonly VirtualNetwork _net;
@@ -25,8 +20,6 @@ internal sealed class VirtualUdpSocket : IUdpSocket
         _net.SocketAttached();
     }
 
-    /// <summary>The address this socket lives at: public when internet-attached, private
-    /// (behind <see cref="Nat"/>) otherwise.</summary>
     internal IPEndPoint Address { get; }
 
     internal VirtualNat? Nat { get; }

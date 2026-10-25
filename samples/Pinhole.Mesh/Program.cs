@@ -258,7 +258,6 @@ internal static class MeshNode
         }
     }
 
-    /// <summary>One established connection: learns the peer's index from the first SECRET frame it delivers.</summary>
     private sealed class ConnContext(PinholeConnection conn)
     {
         public readonly PinholeConnection Conn = conn;
@@ -407,7 +406,6 @@ internal sealed record RoundReport
     public Dictionary<int, bool> Udp { get; init; } = new();
 }
 
-/// <summary>A minimal signaling channel: announce a file, wait until a directory holds N announcements.</summary>
 internal interface ISignal : IAsyncDisposable
 {
     Task AnnounceAsync(string path, string json);
@@ -426,7 +424,6 @@ internal static class Signal
                 Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? throw new InvalidOperationException("GITHUB_TOKEN not set"));
 }
 
-/// <summary>Local-filesystem signaling for same-machine mesh runs (MESH_SIGNAL_DIR=...).</summary>
 internal sealed class FileSignal(string root) : ISignal
 {
     public Task AnnounceAsync(string path, string json)
@@ -465,7 +462,6 @@ internal sealed class FileSignal(string root) : ISignal
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
-/// <summary>GitHub Contents-API signaling on a per-run branch; lets unrelated CI machines meet.</summary>
 internal sealed class GithubSignal(string repo, string branch, string token) : ISignal
 {
     private readonly HttpClient _http = new();

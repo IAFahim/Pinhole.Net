@@ -9,10 +9,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>The sendme-parity feature: serve a file or directory from one machine, download
-/// it from another with a single ticket — verified chunk by chunk while streaming, resumed
-/// across restarts, healed through datagram loss, and (by default) encrypted so the relays
-/// forward nothing but ciphertext.</summary>
 public sealed class BlobsTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
@@ -49,9 +45,6 @@ public sealed class BlobsTests
         return dir;
     }
 
-    /// <summary>Teardown delete that tolerates Windows' close-then-release handle lag: a
-    /// transfer torn down mid-flight may still hold an output file open for a beat after
-    /// the last await returns, and one refused delete would fail an otherwise-passing test.</summary>
     private static void DeleteDir(string dir)
     {
         for (int attempt = 0; ; attempt++)
@@ -993,9 +986,6 @@ public sealed class BlobsTests
 
     // ---------------------------------------------------------------- wire-oracle adversarial provider
 
-    /// <summary>A hand-rolled provider speaking the real wire — engine crypto handshake
-    /// from a raw socket, then blob frames sealed under the connection's true cipher —
-    /// used to inject hostile frames into a genuine download.</summary>
     private sealed class BlobsOracle : IDisposable
     {
         public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -1009,14 +999,9 @@ public sealed class BlobsTests
 
         public IPEndPoint Ep => (IPEndPoint)Sock.LocalEndPoint!;
 
-        /// <summary>The ticket's connection string, pinning this oracle's static key.</summary>
         public string DialString => new ConnectionString(
             PeerId, [new PinholeCandidate(Pinhole.CandidateKind.Direct, Ep)], NatHint.Unknown, Identity.PublicKey).ToString();
 
-        /// <summary>Answers the downloader's engine handshake, then serves the stream
-        /// adversarially: a genuine Head, one forged chunk frame claiming a far-future
-        /// counter with a garbage tag, then every genuine chunk. The download must
-        /// complete anyway — the watermark must not have moved for the forgery.</summary>
         public async Task ServeAdversariallyAsync(byte[] psk, byte[] root, byte[] content, CancellationToken ct = default)
         {
             var peer = new IPEndPoint(IPAddress.Loopback, 0);
@@ -1135,9 +1120,6 @@ public sealed class BlobsTests
             return SendSealedAsync(to, sealedBlob, ct);
         }
 
-        /// <summary>Wraps one blob payload in a genuine engine Data frame — sealed under
-        /// the session keys, so the client's engine accepts it; only the inner blob layer
-        /// sees hostility.</summary>
         private async Task SendSealedAsync(EndPoint to, ReadOnlyMemory<byte> blobPayload, CancellationToken ct,
             byte frameType = 0x52)
         {
@@ -1267,5 +1249,69 @@ public sealed class BlobsTests
             deadline.Cancel();
         }
         finally { DeleteDir(dir); }
+    }
+
+    [Fact]
+    public void FileCheckpoint_IsDirtyChecked_NoWriteStormWhileStalled()
+    {
+        // A-10: the control loop ticks Checkpoint every 50 ms even while the download
+        // is stalled; each write is two fsyncs and a rename, so an unmoved Applied
+        // cursor must not produce another one.
+        string dir = TempDir();
+        var sink = new BlobClient.FileSink(Path.Combine(dir, "file.bin"), RandomNumberGenerator.GetBytes(32));
+        try
+        {
+            byte[] chunk = RandomBytes(Blake3.ChunkSize);
+            sink.Init(Blake3.ChunkSize * 3, 3);
+
+            sink.Apply(0, chunk);
+            sink.Checkpoint();
+            Assert.Equal(1, sink.CheckpointWrites);
+
+            // Stalled: Applied has not moved; a full second of checkpoint ticks (20 at
+            // the 50 ms pace) must not touch the disk again.
+            for (int i = 0; i < 20; i++)
+            {
+                sink.Checkpoint();
+            }
+            Assert.Equal(1, sink.CheckpointWrites);
+
+            sink.Apply(1, chunk);
+            sink.Checkpoint();
+            Assert.Equal(2, sink.CheckpointWrites);
+            Assert.Equal(2, sink.Applied);
+        }
+        finally
+        {
+            sink.Reject();
+            DeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task Provider_FailsFastWhenTheFileChangesAfterHashing()
+    {
+        // A-12: hash-then-serve is a TOCTOU window. A file mutated in between used to
+        // stream bytes that cannot verify, with no diagnostic on the provider. Now the
+        // provider refuses to serve a tree whose source moved, and the downloader's
+        // recovery budget — not a corrupt-chunk abort — is what runs out.
+        string dir = TempDir();
+        try
+        {
+            string src = Path.Combine(dir, "mutating.bin");
+            await File.WriteAllBytesAsync(src, RandomBytes(4096));
+            await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
+
+            await File.WriteAllBytesAsync(src, RandomBytes(8192)); // the hashed tree no longer exists
+
+            await Assert.ThrowsAsync<TimeoutException>(() =>
+                BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
+                    options: new BlobDownloadOptions { NodeOptions = Offline(), RecoveryTimeout = TimeSpan.FromSeconds(2) })
+                .WaitAsync(Timeout));
+        }
+        finally
+        {
+            DeleteDir(dir);
+        }
     }
 }

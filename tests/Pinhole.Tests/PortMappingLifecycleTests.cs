@@ -4,8 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Lease lifecycle contracts, with delayed protocol completions and an
-/// independent recording lease. No OS sockets or production mapping codec is used.</summary>
 public sealed class PortMappingLifecycleTests
 {
     // The choreography here runs on sub-second lease lifetimes; the budget only needs to

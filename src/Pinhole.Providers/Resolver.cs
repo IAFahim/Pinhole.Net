@@ -3,11 +3,10 @@ using System.Net.Sockets;
 
 namespace Pinhole.Providers;
 
-/// <summary>Tolerant resolution of the free infrastructure: one dead provider costs its own
-/// candidates, never the whole list.</summary>
 public static class Resolver
 {
-    /// <summary>All free STUN servers, best-effort resolved.</summary>
+    private static readonly TimeSpan CatalogBudget = TimeSpan.FromSeconds(5);
+
     public static async Task<IPEndPoint[]> FreeStunAsync(CancellationToken ct = default)
     {
         (string host, int port)[] sources =
@@ -19,13 +18,9 @@ public static class Resolver
             ("global.stun.twilio.com", 3478),
         ];
 
-        Task<IPEndPoint[]>[] tasks = sources.Select(s => TryResolve(s.host, s.port, ct)).ToArray();
-        IPEndPoint[][] results = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return results.SelectMany(r => r).ToArray();
+        return await ResolveWithinBudgetAsync(sources, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Every server a stranger's relayed traffic could arrive from when both sides
-    /// stick to the free defaults — used to pre-open TURN permissions for unknown dialers.</summary>
     public static async Task<IPEndPoint[]> FreeRelayServersAsync(CancellationToken ct = default)
     {
         (string host, int port)[] sources =
@@ -36,9 +31,37 @@ public static class Resolver
             ("global.turn.twilio.com", 3478),
         ];
 
-        Task<IPEndPoint[]>[] tasks = sources.Select(s => TryResolve(s.host, s.port, ct)).ToArray();
-        IPEndPoint[][] results = await Task.WhenAll(tasks).ConfigureAwait(false);
-        return results.SelectMany(r => r).ToArray();
+        return await ResolveWithinBudgetAsync(sources, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<IPEndPoint[]> ResolveWithinBudgetAsync((string Host, int Port)[] sources, CancellationToken ct)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(CatalogBudget);
+        Task<IPEndPoint[]>[] tasks = sources.Select(s => TryResolve(s.Host, s.Port, budget.Token)).ToArray();
+        try
+        {
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // the caller cancelled: that halts the caller, it is not tolerated
+        }
+        catch (OperationCanceledException)
+        {
+            // The budget elapsed: keep whatever resolved in time, drop the rest.
+        }
+
+        var resolved = new List<IPEndPoint>();
+        foreach (Task<IPEndPoint[]> task in tasks)
+        {
+            if (task.IsCompletedSuccessfully)
+            {
+                resolved.AddRange(task.Result);
+            }
+        }
+
+        return resolved.ToArray();
     }
 
     private static async Task<IPEndPoint[]> TryResolve(string host, int port, CancellationToken ct)
@@ -48,9 +71,11 @@ public static class Resolver
             IPAddress[] addrs = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
             return addrs.Select(ip => new IPEndPoint(ip, port)).ToArray();
         }
-        catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+        catch (SocketException)
         {
             return Array.Empty<IPEndPoint>();
         }
+        // OperationCanceledException propagates: caller cancellation must halt the caller,
+        // and the catalog budget is classified by ResolveWithinBudgetAsync, not swallowed here.
     }
 }

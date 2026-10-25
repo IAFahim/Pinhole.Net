@@ -6,15 +6,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#27: the bottleneck and recovery baselines the congestion-control work (#20)
-/// will be judged against. Every scenario runs the real blob stack through the virtual
-/// internet's finite-bandwidth link — one shared FIFO drained at a fixed rate, tail-dropped
-/// when full — so these numbers mean the same thing every run: goodput through a real
-/// queue, healing from queue-induced loss, seed-to-seed variance, and how a fat RTT flows
-/// against a thin one over one bottleneck. Exact numbers are machine-dependent and go to
-/// the logs and docs/BASELINES.md; the assertions are completion, integrity, and physical
-/// sanity (measured rate cannot exceed the link). TCP competition is explicitly out of the
-/// lab's reach — there is no real TCP peer in-process — and is documented as such.</summary>
 public sealed class BottleneckTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;

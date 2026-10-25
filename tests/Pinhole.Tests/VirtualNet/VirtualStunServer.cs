@@ -4,10 +4,6 @@ using System.Net.Sockets;
 
 namespace Pinhole.Tests;
 
-/// <summary>An RFC 5389 STUN responder attached to a <see cref="VirtualNetwork"/> address.
-/// It reports the source it observes — which, behind a virtual NAT, is the NAT's public
-/// mapping, so the engine's reflexive discovery and its symmetric-NAT detection (two
-/// servers, divergent mappings) run against real address translation physics.</summary>
 internal sealed class VirtualStunServer : IDisposable
 {
     private const uint Cookie = 0x2112A442;

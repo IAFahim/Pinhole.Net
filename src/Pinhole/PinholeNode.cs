@@ -6,12 +6,6 @@ using System.Threading.Channels;
 
 namespace Pinhole;
 
-/// <summary>A Pinhole endpoint: a primary UDP socket, bounded interface sources,
-/// zero or more relay allocations, and every
-/// connection this peer is part of — all multiplexed over the same port.
-///
-/// Bind, hand out the connection string, dial or accept. How the string travels between the
-/// two peers — clipboard, your server, your game lobby — is the application's concern.</summary>
 public sealed class PinholeNode : IAsyncDisposable, IDisposable
 {
     private const string InvalidCodeMessage = "Invalid connection string. Copy your friend's current connection string and try again.";
@@ -38,12 +32,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         _irohDiscovery = new IrohDiscovery(_irohHttp, options.IrohDiscoveryUrl);
     }
 
-    /// <summary>Binds the UDP socket, probes the configured free STUN servers for the
-    /// reflexive candidate, connects to the configured iroh HTTPS relays, and allocates any
-    /// configured TURN relays as additional fallback paths. Infrastructure left unspecified
-    /// in <paramref name="options"/> gets the free defaults — customizing one setting never
-    /// drops the rest; explicit empty lists disable their provider. Unreachable
-    /// infrastructure costs candidates, never the bind.</summary>
     public static async Task<PinholeNode> BindAsync(PinholeOptions? options = null, CancellationToken ct = default)
     {
         PinholeOptions resolved = await PinholeOptions.ResolveAsync(options, ct).ConfigureAwait(false);
@@ -71,10 +59,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return node;
     }
 
-    /// <summary>Announces on the LAN when <see cref="PinholeOptions.EnableLanDiscovery"/>
-    /// is set: the node becomes <c>&lt;peer-id&gt;._pinhole._udp.local</c> on the local
-    /// link, answerable by <see cref="DiscoverLanPeersAsync"/>. Enabled by default.
-    /// A multicast-less environment simply stays unannounced.</summary>
     private void StartLanAnnouncement()
     {
         if (!_options.EnableLanDiscovery)
@@ -108,12 +92,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
             .Distinct()
             .ToList();
 
-    /// <summary>Asks the local link for pinhole nodes and collects who answers during the
-    /// window (both query responses and unsolicited announcements count). Each result is a
-    /// dialable peer — v2 strings carrying the announcer's static key when it runs
-    /// encryption. The handshake proves possession of that key; authenticate a device's
-    /// identity separately if the LAN is untrusted. Discovery metadata is not signed.
-    /// Needs no node of your own; two queries a second apart cover ordinary loss.</summary>
     public static async Task<IReadOnlyList<LanPeer>> DiscoverLanPeersAsync(TimeSpan window, CancellationToken ct = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(window, TimeSpan.FromMilliseconds(100));
@@ -121,38 +99,16 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return await LanDiscovery.BrowseAsync(channel, window, ct).ConfigureAwait(false);
     }
 
-    /// <summary>This peer's stable ID — random per bind, or stable across restarts when a
-    /// persisted <see cref="PinholeOptions.IdentityKeySeed"/> is configured (the ID is the
-    /// hash of the endpoint key the seed derives).</summary>
     public ulong PeerId => _engine.PeerId;
 
-    /// <summary>The bound UDP port.</summary>
     public int LocalPort => _engine.LocalPort;
 
-    /// <summary>The TCP sidecar's listening port, normally <see cref="LocalPort"/>.
-    /// Null when TCP is disabled, unavailable, or the listening bind failed. Outbound
-    /// TCP attempts may still work. This does not establish firewall reachability.</summary>
     public int? TcpListeningPort => _engine.TcpListeningPort;
 
-    /// <summary>This node's long-term X25519 public key (32 bytes), embedded in every
-    /// connection string this node publishes — peers pin the handshake's answering key
-    /// against it, which is what makes sessions man-in-the-middle proof. Null when
-    /// <see cref="PinholeOptions.Encryption"/> is <see cref="PinholeEncryption.Disabled"/>.
-    /// Persist a seed via <see cref="PinholeOptions.IdentityKeySeed"/> for identity across restarts.</summary>
     public byte[]? StaticPublicKey => _engine.StaticPublicKey;
 
-    /// <summary>This node's Ed25519 endpoint public key (32 bytes), embedded in v3 connection
-    /// strings: the key its signed address records are verified against, which is what lets
-    /// a peer holding an old ticket adopt this node's rediscovered addresses without
-    /// trusting the lookup provider. Null when the node has no endpoint identity (neither a
-    /// persisted seed, iroh relays, nor signed publication).</summary>
     public byte[]? EndpointPublicKey => _engine.EndpointPublicKey;
 
-    /// <summary>A self-contained discovery artifact: "pinhole1:..." carrying this peer's ID, its
-    /// static and endpoint keys, and direct/reflexive/relay candidates. When both peers run
-    /// lookup providers (see <see cref="PinholeOptions.RendezvousEndpoints"/>), an old string
-    /// keeps working across reboots and address changes — the peer's current record is
-    /// fetched and verified instead of a new ticket being exchanged.</summary>
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
@@ -160,10 +116,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         _engine.StaticPublicKey,
         _engine.EndpointPublicKey).ToString();
 
-    /// <summary>A native iroh endpoint ticket for this Pinhole node. To dial it securely,
-    /// its signed Pinhole key binding is published by default unless
-    /// <see cref="PinholeOptions.PublishIrohAddress"/> is disabled. This does not
-    /// change the Pinhole session wire protocol into a native iroh application session.</summary>
     public IrohAddress IrohAddress
     {
         get
@@ -177,8 +129,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>Publishes native iroh reachability with the authenticated Pinhole static-key
-    /// binding in user-data. The discovery service cannot substitute the handshake key.</summary>
     public Task PublishIrohAddressAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -213,9 +163,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>Dials a Pinhole session by native iroh ID or endpoint ticket. Requires a
-    /// signed discovery record with the peer's Pinhole static-key binding; native iroh
-    /// application endpoints without that binding are rejected.</summary>
     public async Task<PinholeConnection> ConnectIrohAsync(string ticketOrEndpointId, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -244,54 +191,27 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return await ConnectPeerAsync(new ConnectionString(id, candidates, NatHint.Unknown, pin, record.Key), deadline.Token).ConfigureAwait(false);
     }
 
-    /// <summary>The server-reflexive addresses observed at bind (one per responding STUN server).</summary>
     public IReadOnlyList<IPEndPoint> PublicEndpoints => _engine.ReflexiveSnapshot();
 
-    /// <summary>Local and STUN-observed endpoints for each additional source-bound
-    /// UDP socket. Observations are kept per socket and do not assert that a peer
-    /// can reach them. Empty when interface candidates are disabled/unavailable.</summary>
     public IReadOnlyList<PinholeInterfaceCandidates> InterfaceCandidates => _engine.InterfaceCandidatesSnapshot();
 
-    /// <summary>The external endpoint the network's router granted this socket (UPnP,
-    /// NAT-PMP, or PCP), or null. It is already advertised as a reflexive candidate in
-    /// <see cref="ConnectionString"/>; this property exists for diagnostics.</summary>
     public IPEndPoint? PortMappedEndpoint => _engine.MappedEndpointSnapshot();
 
-    /// <summary>The router-granted TCP endpoint, or null when no TCP lease is live.
-    /// Included in candidates; a granted lease does not grant host firewall permission.</summary>
     public IPEndPoint? TcpPortMappedEndpoint => _engine.MappedEndpointSnapshot(tcp: true);
 
-    /// <summary>Global IPv6 UDP endpoints with a live router firewall-pinhole lease.
-    /// These are already host candidates; no address translation occurs. A grant
-    /// does not prove peer reachability or grant permission in the host firewall.</summary>
     public IReadOnlyList<IPEndPoint> IPv6FirewallEndpoints => _engine.IPv6FirewallSnapshot();
 
-    /// <summary>Global IPv6 TCP endpoints with a live router firewall-pinhole lease.
-    /// Empty when TCP listening or IPv6 pinholes are unavailable or disabled.</summary>
     public IReadOnlyList<IPEndPoint> TcpIPv6FirewallEndpoints => _engine.IPv6FirewallSnapshot(tcp: true);
 
-    /// <summary>The NAT classification embedded in future connection strings: a manual
-    /// <see cref="SetNatHint"/> override when one is set, otherwise the classification the
-    /// engine derives by itself from multi-server STUN observations — two servers observing
-    /// the same mapping is a cone NAT, divergent mappings a symmetric one whose reflexive
-    /// candidates are useless to dialers. One exception: while a router port mapping is
-    /// live, the advertised candidates include an endpoint that is punchable from anywhere,
-    /// so the honest hint is <see cref="NatHint.Cone"/> even behind a symmetric NAT.</summary>
     public NatHint NatHint => _natHint != Pinhole.NatHint.Unknown
         ? _natHint
         : _engine.MappedEndpointSnapshot() is not null ? NatHint.Cone : _engine.ObservedNatHint;
 
-    /// <summary>Whether this node currently has a live iroh, DERP, or TURN relay available.
-    /// This can change as relays disconnect or reconnect; it does not guarantee a peer is reachable.</summary>
     public bool HasRelay => _engine.HasRelay;
 
-    /// <summary>Every live connection this node is part of, keyed by nothing — a snapshot list.</summary>
     public IReadOnlyList<PinholeConnection> Connections =>
         _engine.ConnectionsSnapshot().Select(c => c.Public!).ToArray();
 
-    /// <summary>Waits for a peer to dial this node's connection string and returns the
-    /// connection. Multiple waiters each get their own incoming connection. Once a peer
-    /// arrives, its handshake uses the configured <see cref="PinholeOptions.ConnectTimeout"/>.</summary>
     public async Task<PinholeConnection> AcceptAsync(CancellationToken ct = default)
     {
         if (_engine.Incoming is not { } incoming)
@@ -314,11 +234,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return c.Public!;
     }
 
-    /// <summary>Dials a peer from its connection string. The chain runs internally — direct
-    /// punch first, relay as the standing fallback — and the task completes when connected on
-    /// either path. Surrounding whitespace and codes without the pinhole1: prefix are accepted.
-    /// Malformed codes throw FormatException, self-dials throw ArgumentException, and failed
-    /// attempts throw TimeoutException. Use TryConnectAsync to get a result for these expected failures.</summary>
     public async Task<PinholeConnection> ConnectAsync(string connectionString, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(connectionString);
@@ -333,9 +248,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         return await ConnectPeerAsync(cs, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Dials a pasted connection code and returns either a connection or a failure
-    /// with a reason and message. Accepts surrounding whitespace and an omitted pinhole1: prefix.
-    /// Cancellation still throws OperationCanceledException; unexpected errors are not hidden.</summary>
     public async Task<PinholeConnectResult> TryConnectAsync(string? connectionString, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
@@ -411,31 +323,18 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     private static string PathName(ConnState c) => c.Path == PathKind.Relay ? "relay" : "direct";
 
-    /// <summary>Re-probes the world right now: re-probes STUN, rebinds the socket if its
-    /// network is gone, re-allocates relays, and re-announces to every peer. Connections
-    /// survive as the same objects. Also fires automatically (debounced) when the machine's
-    /// network configuration changes.</summary>
     public Task RoamNowAsync(CancellationToken ct = default) => _engine.RecoverAsync(forceRebind: false, ct);
 
     internal NodeEngine Engine => _engine;
 
-    /// <summary>Overrides the NAT hint embedded in future connection strings (symmetric
-    /// NATs tell dialers to skip the hopeless punch). The override beats the automatic
-    /// classification; passing <see cref="NatHint.Unknown"/> returns to automatic mode,
-    /// where the engine classifies from multi-server STUN observations by itself. Set from
-    /// <see cref="NatDetector"/> results when the app knows better than the observations.</summary>
     public void SetNatHint(NatHint hint) => _natHint = hint;
 
-    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
-    /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
     public async ValueTask DisposeAsync()
     {
         Dispose();
         if (_irohPublisher is { } publisher) await publisher.ConfigureAwait(false);
     }
 
-    /// <summary>Shuts the node down: every connection is closed (best-effort bye to each peer),
-    /// the LAN goodbye is sent if announcing, relays are released, and the socket is disposed. Idempotent.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

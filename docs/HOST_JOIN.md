@@ -80,9 +80,12 @@ disclosed. Two authenticated paths exist alongside:
    substituted record fails the handshake loudly. Existing ticket flows are
    unchanged.
 2. **Confirmation code.** Both sides display `host.ConfirmationCode`
-   (joiners derive the same value from the invitation they dialed — 80 bits,
-   `XXXX-XXXX-XXXX-XXXX`). Compare aloud; a substituted-key directory makes
-   the two displays differ. This is a fingerprint check, not a PAKE.
+   (joiners read the same value from the joined connection's
+   `RemoteConfirmationCode` — 80 bits, `XXXX-XXXX-XXXX-XXXX`). It
+   fingerprints only the host's stable identity (peer ID, static key,
+   endpoint key), never its candidate addresses, so a roam or STUN
+   refresh does not move it. Compare aloud; a substituted-key directory
+   makes the two displays differ. This is a fingerprint check, not a PAKE.
 
 ## Running a directory
 
@@ -98,7 +101,12 @@ Wire additions (space-framed ASCII, same style as REG/WANT):
 - `PUTC <code> <b64url-record>` → claims a free code, answers `OKCG <token>`;
   a live code answers `TokB`.
 - `PUTC <code> <b64url-record> <token>` → token-holder refresh, `OKCG <token>`.
-- `GETC <code>` → `OKCC <b64url-record>` or `WAITC` when absent/expired.
+- `GETC <code>` → `CHAL <code> <cookie>` when the code is live: the record is
+  large and the requester's source is spoofable, so return routability is
+  proven first; `WAITC` when absent/expired.
+- `GETC <code> <cookie>` → echoes the cookie (bound to the requester's
+  endpoint and the code, valid for two minutes): `OKCC <b64url-record>` or
+  `WAITC`. A bad cookie is re-challenged, never answered with the record.
 - `DELC <code> <token>` → deletes, `OKCD`; wrong token `TokB`.
 
 Bounds: ≤4096 codes, code records ≤8 KiB base64url,

@@ -6,24 +6,15 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace Pinhole;
 
-/// <summary>How a node treats encryption on the wire.
-/// <see cref="Required"/> (default) refuses plaintext peers entirely; <see cref="Optional"/>
-/// still speaks crypto with current peers but accepts pre-1.6 plaintext ones; <see cref="Disabled"/>
-/// reproduces the pre-1.6 wire (and never embeds a static key in connection strings).</summary>
 public enum PinholeEncryption
 {
-    /// <summary>Encrypt and authenticate every session; a peer that will not is refused.</summary>
     Required = 0,
 
-    /// <summary>Encrypt with current peers; accept pre-1.6 plaintext peers when they cannot.</summary>
     Optional = 1,
 
-    /// <summary>No encryption — the documented pre-1.6 behavior. Traffic is readable and peer
-    /// identity unauthenticated; connection strings carry no static key.</summary>
     Disabled = 2,
 }
 
-/// <summary>Wire-layout constants the handshake and sealed frames share with the engine.</summary>
 internal static class CryptoWire
 {
     public const int HeaderLength = 9;   // type byte + sender peer id (u64 LE)
@@ -42,10 +33,6 @@ internal static class CryptoWire
     public const int HsckBody = TokenLength + ConfirmLength;                        // 20 → frame 29
 }
 
-/// <summary>The node's long-term X25519 identity: the public half is embedded in every
-/// connection string (v2) and pins the far end of each handshake against man-in-the-middle
-/// substitution. Generate once and persist via <see cref="PinholeOptions.IdentityKeySeed"/>
-/// if peer identity should survive restarts.</summary>
 internal sealed class NodeIdentity
 {
     public const int KeyLength = 32;
@@ -66,15 +53,12 @@ internal sealed class NodeIdentity
 
     internal byte[] ExportPrivateSeed() => (byte[])_private.Clone();
 
-    /// <summary>A fresh ephemeral keypair for one connection's handshake.</summary>
     public static (byte[] Private, byte[] Public) NewEphemeral()
     {
         byte[] priv = RandomNumberGenerator.GetBytes(KeyLength);
         return (priv, new X25519PrivateKeyParameters(priv, 0).GeneratePublicKey().GetEncoded());
     }
 
-    /// <summary>Raw X25519. An all-zero shared secret means the peer public key was a
-    /// low-order point (a small-subgroup probe), which we refuse rather than negotiate with.</summary>
     internal static byte[] X25519Agree(ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> peerPublic)
     {
         var agreement = new X25519Agreement();
@@ -96,9 +80,6 @@ internal sealed class NodeIdentity
     }
 }
 
-/// <summary>The session keys one handshake produced. Role names are canonical — "lo" is the
-/// side with the smaller peer ID — so both endpoints derive identical keys no matter who
-/// dialed, and simultaneous dials converge instead of colliding.</summary>
 internal sealed class SessionKeys
 {
     public required byte[] TranscriptHash { get; init; }  // 32
@@ -110,18 +91,12 @@ internal sealed class SessionKeys
     public required byte[] HiConfirm { get; init; }       // 16, hi's handshake MAC
 }
 
-/// <summary>Key schedule for the v2 handshake: a triple-DH (Noise-style, signatures not
-/// needed) over one ephemeral and one static X25519 key per side, folded through HKDF-SHA256
-/// with the transcript hash as salt. Pure function of its inputs — oracle-tested against an
-/// independent implementation.</summary>
 internal static class KeySchedule
 {
     public const string TranscriptLabel = "pinhole-hs1";
     public const string Info = "pinhole-session-v1";
     public const string RekeyInfo = "pinhole-rekey-v1";
 
-    /// <summary>One side's derivation. Inputs are that side's private halves and the peer's
-    /// public halves; the peer-id ordering makes the result identical on both ends.</summary>
     public static SessionKeys Derive(
         ulong myPeerId,
         ReadOnlySpan<byte> myEphPrivate,
@@ -195,11 +170,6 @@ internal static class KeySchedule
         HMACSHA256.HashData(key, transcript)[..CryptoWire.ConfirmLength];
 }
 
-/// <summary>One direction of an established session: a strictly-increasing frame counter
-/// (so AES-GCM nonces never repeat), an epoch ratchet that chains the key forward every
-/// 2^28 frames, and — on the receive side — an IPsec-style replay window. Thread-safe:
-/// sends may come from any app thread, receives from any transport thread, disposal from
-/// any of them; the direction lock serializes all three.</summary>
 internal sealed class FrameSealer : IDisposable
 {
     private const int DefaultEpochFrames = 1 << 28;
@@ -222,13 +192,6 @@ internal sealed class FrameSealer : IDisposable
     private ulong _highest;
     private ulong _bitmap;
 
-    /// <summary>Builds one direction of a session.</summary>
-    /// <param name="keys">the handshake's derived session keys.</param>
-    /// <param name="iAmLo">whether this side is the "lo" role (smaller peer ID).</param>
-    /// <param name="sending">true for the send direction, false for the receive direction.</param>
-    /// <param name="epochFrames">frames per epoch. Replay retention covers one epoch back,
-    /// which holds exactly while this value is ≥ the 64-frame window — true of the
-    /// production default (2^28) by six orders of magnitude.</param>
     public FrameSealer(SessionKeys keys, bool iAmLo, bool sending, int epochFrames = DefaultEpochFrames)
     {
         _transcriptHash = keys.TranscriptHash;
@@ -238,11 +201,6 @@ internal sealed class FrameSealer : IDisposable
         _key = loToHi ? keys.LoToHiKey : keys.HiToLoKey;
     }
 
-    /// <summary>Seals one frame body. <paramref name="headerAndToken"/> is the 13-byte frame
-    /// prefix (type + sender peer id + token); the associated data is that prefix plus the
-    /// frame counter, so type, sender, token, and ordering are all tamper-evident. The
-    /// destination receives [counter][ciphertext||tag]. The whole operation runs under the
-    /// direction lock: the counter assignment, the epoch key, and the cipher must move together.</summary>
     public int Seal(Span<byte> destination, ReadOnlySpan<byte> headerAndToken, ReadOnlySpan<byte> plaintext)
     {
         lock (_gate)
@@ -286,17 +244,6 @@ internal sealed class FrameSealer : IDisposable
         }
     }
 
-    /// <summary>Opens one sealed frame. <paramref name="frame"/> is the full wire frame
-    /// ([header][token][counter][ciphertext||tag]); the plaintext is written to
-    /// <paramref name="plaintext"/> and its length returned. Returns false on tampering,
-    /// replay, an unreachable epoch, or disposal — each costs the frame, nothing more.
-    /// The frame is authenticated <em>before</em> any state moves (RFC 4303 §3.4.3: the
-    /// anti-replay window marks a sequence number only once its packet has
-    /// authenticated): the token rides the wire in the clear, so a forger can present any
-    /// counter it likes, and a window watermark or epoch ratchet committed on an
-    /// unauthenticated counter would let one forged packet starve every legitimate frame
-    /// behind it. The previous epoch's cipher is retained for the replay window, so a
-    /// frame reordered across an epoch boundary still opens under the key that sealed it.</summary>
     public bool Open(ReadOnlySpan<byte> frame, Span<byte> plaintext, out int plaintextLength)
     {
         plaintextLength = 0;
@@ -419,8 +366,6 @@ internal sealed class FrameSealer : IDisposable
         }
     }
 
-    /// <summary>Pure eligibility check — decides nothing, mutates nothing. A frame is
-    /// eligible when it extends the window or lands on an unmarked slot inside it.</summary>
     private bool ReplayEligible(ulong counter)
     {
         if (counter > _highest)
@@ -432,8 +377,6 @@ internal sealed class FrameSealer : IDisposable
         return delta < Window && (_bitmap >> (int)delta & 1) == 0;
     }
 
-    /// <summary>Marks an authenticated frame in the window. Called only after the GCM tag
-    /// has verified, exactly like RFC 4303 marks a sequence number after its ICV passes.</summary>
     private void CommitReplay(ulong counter)
     {
         if (counter > _highest)
@@ -449,9 +392,6 @@ internal sealed class FrameSealer : IDisposable
     }
 }
 
-/// <summary>Per-connection crypto state: the pending handshake until the triple-DH
-/// completes, then the two sealers. Handshake fields are guarded by the connection's gate;
-/// the sealers are internally thread-safe.</summary>
 internal sealed class ConnectionCrypto
 {
     private readonly byte[] _ephPrivate;
@@ -467,8 +407,6 @@ internal sealed class ConnectionCrypto
     public SessionKeys? Keys { get; private set; }         // connection gate; set once
     public FrameSealer? Send { get; private set; }
     public FrameSealer? Recv { get; private set; }
-    /// <summary>A confirm MAC from the peer verified — the far end holds the static key the
-    /// handshake named, so the session is authenticated.</summary>
     public bool PeerConfirmed { get; private set; }
     public long Rejected; // Interlocked: tampered, replayed, or downgraded frames dropped
 
@@ -491,9 +429,6 @@ internal sealed class ConnectionCrypto
 
     public bool Established => Keys is not null;
 
-    /// <summary>Records the peer's handshake keys (first frame wins; a mismatched retry is a
-    /// stale or substituted handshake and is refused) and derives the session when both
-    /// halves are present. False means: ignore this frame, the handshake state is unchanged.</summary>
     public bool TryPeerKeys(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat)
     {
         if (Keys is not null)
@@ -523,15 +458,6 @@ internal sealed class ConnectionCrypto
         }
     }
 
-    /// <summary>Latches the peer's handshake keys when a stray frame from their earlier
-    /// connection already occupies the latch: roaming peers re-dial from fresh connections
-    /// while retried PUNCs of the old one are still in flight, and first-seen-wins would
-    /// wedge the two forever. A PACK outranks the stale latch only by carrying this
-    /// handshake's confirm MAC — computed from the static key's private half, which no
-    /// substitute holds — so the swap is proof-gated, not heuristic. An explicit dial
-    /// may also adopt a key-confirmed incoming husk before authenticated traffic or
-    /// application exposure. Active sessions never re-key; a failing confirm leaves
-    /// the latch untouched.</summary>
     public bool TrySupersedeUnconfirmed(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm,
         bool allowUnexposedIncoming = false)
     {
@@ -570,15 +496,10 @@ internal sealed class ConnectionCrypto
         }
     }
 
-    /// <summary>Times this connection recovered from a stale key latch by verifying the
-    /// genuine handshake's confirm over it. Surfaced in handshake summaries as healing
-    /// evidence.</summary>
     public long SupersededLatches; // Interlocked
 
-    /// <summary>This side's confirm MAC — carried in the PACK/Hsck reply, verified by the peer.</summary>
     public byte[] MyConfirm() => MyPeerId < PeerPeerId ? Keys!.LoConfirm : Keys!.HiConfirm;
 
-    /// <summary>The confirm value the peer must produce; null before derivation.</summary>
     public byte[]? ExpectedPeerConfirm() => Keys is null ? null : MyPeerId < PeerPeerId ? Keys.HiConfirm : Keys.LoConfirm;
 
     public bool VerifyPeerConfirm(ReadOnlySpan<byte> confirm) =>
@@ -586,8 +507,6 @@ internal sealed class ConnectionCrypto
 
     public void MarkPeerConfirmed() => PeerConfirmed = true;
 
-    /// <summary>One frame dropped as replayed, tampered, or otherwise unverified: the
-    /// session layer's rejection counter, mirrored into the diagnostics meter (#25).</summary>
     public void CountRejected()
     {
         Interlocked.Increment(ref Rejected);

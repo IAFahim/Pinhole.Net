@@ -5,12 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Issue #12: a silently dead direct path (NAT expiry, firewall, dropped packets —
-/// no send error, no notification) must be detected by the engine itself and handled with
-/// the existing machinery: relay fallback, honest death, upgrade-back. Thresholds are
-/// injected small so the suite never sleeps real seconds. Relay traffic never certifies a
-/// direct path, one lost probe never degrades a live one, and monitoring counters stay
-/// separate from caller Ping/RTT stats.</summary>
 public sealed class PathValidationTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);

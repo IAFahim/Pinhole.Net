@@ -8,12 +8,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>#25: connection attempts, recovery, and failure causes are measured through
-/// .NET's own diagnostics stack (System.Diagnostics.Metrics, meter "Pinhole.Net") — the
-/// same surface OpenTelemetry, dotnet-counters, and MeterListener see. These tests attach
-/// a listener and assert the instruments a real consumer would observe. Counters are
-/// process-global, so every assertion is a before/after delta: parallel tests may add
-/// their own measurements, but they can never mask ours.</summary>
 public sealed class TelemetryTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -31,8 +25,6 @@ public sealed class TelemetryTests
         EnablePortMapping = false,
     };
 
-    /// <summary>Collects every measurement from the Pinhole.Net meter published while it
-    /// is alive. Counters accumulate; histograms keep their raw recordings.</summary>
     private sealed class MeterSnapshot : IDisposable
     {
         private readonly MeterListener _listener;

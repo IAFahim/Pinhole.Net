@@ -4,36 +4,17 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Pinhole;
 
-/// <summary>The verdict of a NAT detection pass.</summary>
 public enum NatType
 {
-    /// <summary>Not enough evidence: no server answered, or only one did (a single mapping
-    /// proves nothing about mapping behavior).</summary>
     Unknown,
 
-    /// <summary>Every server observed the same mapped endpoint: the NAT reuses one mapping
-    /// regardless of the tested destinations (endpoint-independent mapping).
-    /// Filtering and the other peer's network still decide direct reachability.</summary>
     Cone,
 
-    /// <summary>Different servers observed different mapped endpoints: the NAT creates a
-    /// mapping per destination. Direct traversal depends on the other peer's filtering
-    /// behavior and any explicit port mapping; relay fallback may be needed.</summary>
     Symmetric,
 }
 
-/// <summary>Classifies the local NAT by comparing what several STUN servers observe of the
-/// SAME socket. This is the cheap, honest test: it separates symmetric NATs (per-destination
-/// mappings) from endpoint-independent mappings. Finer
-/// subtyping requires a cooperating alternate-address server; use <see cref="InspectAsync"/>
-/// for a separate, bounded diagnostic pass when one is available.</summary>
 public static class NatDetector
 {
-    /// <summary>Measure mapping and positive filtering evidence with a cooperating RFC 5780
-    /// STUN server. Uses a fresh diagnostic UDP socket, never the application's socket.
-    /// At most seven requests, each bounded by two seconds; unsupported servers and
-    /// unanswered alternate responses produce unknown results. Does not prove punching
-    /// success, future allocation, NAT count or another source socket's behavior.</summary>
     public static async Task<NatBehaviorReport> InspectAsync(IPEndPoint server, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(server);
@@ -50,7 +31,6 @@ public static class NatDetector
             node.Engine.ProbeBindingAsync, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Runs detection against the free public STUN catalog.</summary>
     [SuppressMessage("ApiDesign", "RS0026", Justification = "These existing optional cancellation-token overloads must retain their published source and reflection contracts.")]
     public static async Task<NatType> DetectAsync(CancellationToken ct = default)
     {
@@ -58,9 +38,6 @@ public static class NatDetector
         return await DetectAsync(defaults.ResolvedStun, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Runs detection against explicit servers. Needs at least two responsive
-    /// servers to conclude anything; each probe reuses one socket, because the mapping
-    /// under test belongs to the socket, not the request.</summary>
     [SuppressMessage("ApiDesign", "RS0026", Justification = "These existing optional cancellation-token overloads must retain their published source and reflection contracts.")]
     public static async Task<NatType> DetectAsync(IReadOnlyList<IPEndPoint> servers, CancellationToken ct = default)
     {

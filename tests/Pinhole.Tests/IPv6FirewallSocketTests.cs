@@ -5,8 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Real socket checks. These must run on platform CI/a network-capable
-/// workspace; the offline fixture suite does not select or substitute for them.</summary>
 public sealed class IPv6FirewallSocketTests
 {
     [Fact]

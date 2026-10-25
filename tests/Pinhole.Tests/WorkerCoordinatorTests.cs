@@ -148,9 +148,6 @@ public sealed class WorkerCoordinatorTests
         Assert.Equal(data, (await a.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray());
     }
 
-    /// <summary>Small HTTP fixture, deliberately refusing WebSockets to cover the
-    /// polling fallback. The production JS room's admission/auth rules have their
-    /// own tests; this fixture exercises the real C# node and credential plumbing.</summary>
     private sealed class CoordinatorStub : IAsyncDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);

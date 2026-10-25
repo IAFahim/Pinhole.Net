@@ -3,32 +3,21 @@ using System.Net.Sockets;
 
 namespace Pinhole;
 
-/// <summary>Mapping behavior observed with one socket and cooperating alternate STUN endpoints.</summary>
 public enum NatMappingBehavior
 {
-    /// <summary>The required observations are unavailable.</summary>
     Unknown,
-    /// <summary>The primary and alternate addresses observed the same mapped endpoint.</summary>
     EndpointIndependent,
-    /// <summary>The alternate address changed the mapping, but changing its port did not.</summary>
     AddressDependent,
-    /// <summary>Changing the alternate address's port changed the mapping again.</summary>
     AddressAndPortDependent,
 }
 
-/// <summary>Positive filtering evidence on a fresh diagnostic socket. Silence is unknown.</summary>
 public enum NatFilteringBehavior
 {
-    /// <summary>No alternate response establishes filtering behavior; loss and unsupported servers remain possible.</summary>
     Unknown,
-    /// <summary>A response arrived from an address and port the socket had not contacted.</summary>
     EndpointIndependent,
-    /// <summary>After unanswered different-address tests, a response arrived from another port of the contacted address.</summary>
     AddressDependent,
 }
 
-/// <summary>A bounded RFC 5780 diagnostic pass, for the reported socket and instant only.
-/// It is not the application socket and does not predict another peer's reachability.</summary>
 public sealed class NatBehaviorReport
 {
     internal NatBehaviorReport(IPEndPoint local, NatMappingBehavior mapping, NatFilteringBehavior filtering,
@@ -41,23 +30,14 @@ public sealed class NatBehaviorReport
         ProbesSent = probes; Elapsed = elapsed; MeasuredAtUtc = DateTimeOffset.UtcNow;
     }
 
-    /// <summary>The actual local diagnostic socket endpoint; wildcard addresses mean OS-selected routing.</summary>
     public IPEndPoint LocalEndpoint { get; }
-    /// <summary>Observed destination dependence of mappings.</summary>
     public NatMappingBehavior Mapping { get; }
-    /// <summary>Positive alternate-source response evidence; unknown does not mean blocked.</summary>
     public NatFilteringBehavior Filtering { get; }
-    /// <summary>Primary, alternate-address/same-port, and (when needed) alternate-address/alternate-port mappings, in order.</summary>
     public IReadOnlyList<IPEndPoint> MappingObservations { get; }
-    /// <summary>The primary reply advertised a consistent response origin and distinct alternate address/port.</summary>
     public bool SupportsAlternates { get; }
-    /// <summary>Both alternate filtering tests remained unanswered after bounded retries. This is not proof of filtering.</summary>
     public bool AlternateRepliesMissing { get; }
-    /// <summary>Total binding requests, including filtering retries.</summary>
     public int ProbesSent { get; }
-    /// <summary>Total measurement time.</summary>
     public TimeSpan Elapsed { get; }
-    /// <summary>UTC completion time; behavior can change immediately afterward.</summary>
     public DateTimeOffset MeasuredAtUtc { get; }
 }
 

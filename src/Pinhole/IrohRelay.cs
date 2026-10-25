@@ -23,8 +23,6 @@ internal sealed class RelayIdentity
         PeerId = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(PublicKey));
     }
 
-    /// <summary>Signs an arbitrary body with the Ed25519 endpoint key — used for signed
-    /// address records, distinct from the relay handshake's challenge authentication.</summary>
     public byte[] SignBody(ReadOnlySpan<byte> body)
     {
         var signer = new Ed25519Signer();
@@ -78,12 +76,6 @@ internal sealed class IrohRelay : IKeyedRelay
     public event Action<IKeyedRelay>? Changed;
     public string? LastError { get; private set; }
 
-    /// <summary>Reconnect delay after the given number of consecutive failed connections:
-    /// capped exponential backoff with ±10% jitter, the same practice iroh uses — a relay
-    /// outage must not produce a synchronized retry storm from every client. Brief blips
-    /// still heal fast: the first retry lands near one second, the delay doubles per
-    /// consecutive failure up to thirty, and the count resets on the first successful
-    /// authentication.</summary>
     internal static TimeSpan RetryDelay(int failedAttempts)
     {
         long baseMs = Math.Min(1000L << Math.Min(failedAttempts, 5), 30_000);

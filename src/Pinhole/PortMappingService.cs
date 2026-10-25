@@ -3,7 +3,6 @@ using System.Net.Sockets;
 
 namespace Pinhole;
 
-/// <summary>A router-granted lease, including the current granted lifetime.</summary>
 internal interface IPortMapLease : IDisposable
 {
     IPEndPoint External { get; }
@@ -12,9 +11,6 @@ internal interface IPortMapLease : IDisposable
     Task ReleaseAsync(CancellationToken ct);
 }
 
-/// <summary>One serialized, best-effort router-mapping worker. Stale discovery results
-/// never become candidates, expired leases are withdrawn, and an old mapping is released
-/// before its replacement is requested. UDP and TCP use independent instances.</summary>
 internal sealed class PortMappingService : IDisposable
 {
     private static readonly TimeSpan RetryDiscoveryAfter = TimeSpan.FromSeconds(60);
@@ -107,8 +103,6 @@ internal sealed class PortMappingService : IDisposable
         _nextActionTicks = port == 0 ? long.MaxValue : 0;
     }
 
-    /// <summary>The engine's maintenance tick also withdraws a lease while a renewal
-    /// is still pending. The worker keeps its own deadlines when maintenance is disabled.</summary>
     public void Tick(long nowTicks)
     {
         lock (_gate)

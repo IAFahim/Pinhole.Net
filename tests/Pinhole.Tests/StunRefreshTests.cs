@@ -5,9 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Periodic reflexive refresh — the re-discovery iroh also performs on a timer:
-/// NAT mappings move with no OS network event, so the node re-probes STUN, replaces a moved
-/// mapping, and re-advertises its candidates without disturbing paths that already work.</summary>
 public sealed class StunRefreshTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);

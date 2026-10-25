@@ -30,10 +30,6 @@ internal enum FrameType : byte
 // string (public by design) lets a stranger dial, but not spoof, hijack, or kill an
 // established session.
 
-/// <summary>Per-peer state. One node multiplexes these over its shared UDP sources and TCP sidecar;
-/// every frame carries the sender's peer ID so the receiver demuxes without a socket pair per
-/// conversation. Frame handlers run on the receive thread, state transitions take
-/// <see cref="Gate"/>, counters are Interlocked.</summary>
 internal sealed class ConnState
 {
     public required ulong PeerId { get; init; }
@@ -145,8 +141,6 @@ internal sealed partial class NodeEngine : IDisposable
     public const int MaxPayload = 1200;
     private const int HeaderSize = CryptoWire.HeaderLength;
 
-    /// <summary>Upper bound on connections a stranger flood can materialize. Applications
-    /// dialing peers themselves are not bounded by this — only unknown-peer PUNCs are.</summary>
     internal const int MaxConnections = 1024;
     private readonly int _maxConns; // production cap unless PinholeOptions.MaxConnectionsOverride says otherwise
 
@@ -291,13 +285,8 @@ internal sealed partial class NodeEngine : IDisposable
 
     public ulong PeerId => _peerId;
 
-    /// <summary>This node's long-term X25519 public key (32 bytes), embedded in v2 connection
-    /// strings and used to authenticate every session's far end; null on plaintext nodes.</summary>
     public byte[]? StaticPublicKey => _identity?.PublicKey;
 
-    /// <summary>This node's Ed25519 endpoint public key (32 bytes), embedded in v3 connection
-    /// strings and used to sign its address records; null when neither a persisted identity
-    /// seed nor iroh relays gave the node an endpoint identity.</summary>
     public byte[]? EndpointPublicKey => _endpointIdentity?.PublicKey;
     internal RelayIdentity? EndpointRelayIdentity => _endpointIdentity;
 
@@ -467,8 +456,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>The router-granted external endpoint (UPnP/NAT-PMP/PCP), or null. This is
-    /// already included in the advertised candidates; exposed for diagnostics and tests.</summary>
     public IPEndPoint? MappedEndpointSnapshot(bool tcp = false)
     {
         return (tcp ? _tcpPortMap : _portMap)?.Current;
@@ -515,9 +502,6 @@ internal sealed partial class NodeEngine : IDisposable
         ReannounceAndRepunch(); // a new permission may make an already advertised host reachable
     }
 
-    /// <summary>NAT classification derived from multi-server STUN observations: servers
-    /// that observe divergent mappings mean per-destination (symmetric) NAT. Manual hints
-    /// set through <see cref="PinholeNode.SetNatHint"/> always win over this observation.</summary>
     public NatHint ObservedNatHint
     {
         get
@@ -529,8 +513,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Port-mapping callback: swap the mapped candidate and gently re-announce to
-    /// every peer — the working paths keep working and only learn the new candidate.</summary>
     private void OnPortMappingChanged(IPEndPoint? mapped) => OnPortMappingChanged(mapped, tcp: false);
     private void OnTcpPortMappingChanged(IPEndPoint? mapped) => OnPortMappingChanged(mapped, tcp: true);
 
@@ -572,10 +554,6 @@ internal sealed partial class NodeEngine : IDisposable
         PublishAddressRecordSoon();
     }
 
-    /// <summary>Caller must hold <see cref="_gate"/>. Split out so the STUN refresh can
-    /// swap the reflexive set and rebuild the advertised candidates as ONE critical
-    /// section — otherwise an observer can see the new <c>PublicEndpoints</c> while the
-    /// connection string still carries the old mapping.</summary>
     private void RefreshLocalCandidatesNoLock()
     {
         SynchronizeMappedLeasesNoLock();
@@ -760,8 +738,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Probes every configured server in parallel; slow or dead servers cost
-    /// nothing because the whole batch is bounded by the bind budget.</summary>
     public async Task ProbeStunAllAsync(CancellationToken ct)
     {
         IPEndPoint[] observed = await ProbeStunObservedAsync(ct).ConfigureAwait(false);
@@ -780,12 +756,6 @@ internal sealed partial class NodeEngine : IDisposable
         RefreshLocalCandidates();
     }
 
-    /// <summary>Classifies the NAT from the raw multi-server observations: two servers
-    /// seeing the same mapping means endpoint-independent (cone) mapping, divergent ones
-    /// mean per-destination (symmetric), which changes punch pacing. Address families are
-    /// compared separately: different IPv4 and IPv6 endpoints are normal on dual-stack.
-    /// One observation can never distinguish the behaviors, and a pass where too few
-    /// servers answered never clears an earlier, better-informed classification.</summary>
     private void ObserveNatHint(IPEndPoint[] observedPerServer)
     {
         if (observedPerServer.Length < 2)
@@ -802,9 +772,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>The raw observation behind a probe pass: one task per configured server, the
-    /// whole batch bounded by the bind budget, and the endpoints that answered. Late probes
-    /// (past the budget) are simply not part of the result.</summary>
     private async Task<IPEndPoint[]> ProbeStunObservedAsync(CancellationToken ct)
     {
         IReadOnlyList<IPEndPoint> servers = BasicStunServers();
@@ -1072,11 +1039,6 @@ internal sealed partial class NodeEngine : IDisposable
         ReannounceIfRelayAddressesChanged();
     }
 
-    /// <summary>A relay (re)allocation changes this node's relayed addresses. Connected peers
-    /// still hold the old ones, and a relayed-only session's only route is through them — so
-    /// a changed set must be blasted to every peer immediately. This closes the old "TURN
-    /// restart requires a fresh ticket" gap: the peer's announce handler adopts our new
-    /// relay candidates and re-punches without any out-of-band action.</summary>
     private void ReannounceIfRelayAddressesChanged()
     {
         HashSet<IPEndPoint> current = new();
@@ -1109,12 +1071,14 @@ internal sealed partial class NodeEngine : IDisposable
 
     private async Task AllocateSlotAsync(RelaySlot slot, CancellationToken ct)
     {
+        TurnClient? retired = null;
         try
         {
             TurnClient client = await TurnClient.AllocateAsync(slot.Config.Server, slot.Config.Username, slot.Config.Credential, ct).ConfigureAwait(false);
             client.Received += HandleRelayData;
             lock (_gate)
             {
+                retired = slot.Client;
                 slot.Client = client;
                 slot.Backoff = RelayRetryBackoff;
             }
@@ -1149,16 +1113,22 @@ internal sealed partial class NodeEngine : IDisposable
                 slot.Backoff = TimeSpan.FromTicks(Math.Min(slot.Backoff.Ticks * 2, RelayMaxBackoff.Ticks));
             }
         }
+        finally
+        {
+            // Ownership transfer: the client this slot no longer references — the dead one
+            // from a lost allocation, or a live one this re-allocation replaced — must not
+            // keep a refresh loop and a Received subscription alive (A-06).
+            if (retired is not null)
+            {
+                retired.Received -= HandleRelayData;
+                await retired.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     private static TimeSpan Jitter(TimeSpan delay) =>
         delay * (1 + (RandomNumberGenerator.GetInt32(0, 41) - 20) / 100.0); // ±20%
 
-    /// <summary>A stranger's relayed traffic can only be delivered to our allocation if we
-    /// permit its source IP. Strangers dial through the free relays, so pre-opening the
-    /// catalog's server IPs makes "connect from a connection string alone" work. With no
-    /// TURN relay configured there is no allocation to permit anything on, and the catalog
-    /// is never looked up.</summary>
     private async Task PermitCatalogRelaysAsync(CancellationToken ct)
     {
         if ((_options.Relays ?? _options.ResolvedRelays).Count == 0)
@@ -1182,9 +1152,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Permits a learned peer's TURN server (and relayed address) on every alive
-    /// allocation of ours — announced relay candidates are the only in-band way the accept
-    /// side learns where a dialer's relayed traffic will come from.</summary>
     private async Task PermitPeerRelayServerAsync(PinholeCandidate relay)
     {
         foreach (TurnClient client in AliveRelayClients())
@@ -1231,8 +1198,6 @@ internal sealed partial class NodeEngine : IDisposable
         return _conns.Values.ToArray();
     }
 
-    /// <summary>Monitoring/test accessor: the peer's latest advertised candidates, copied
-    /// under the engine gate (the live list is rebuilt by every announce).</summary>
     internal PinholeCandidate[] PeerCandidatesSnapshot(ulong peerId)
     {
         lock (_gate)
@@ -1243,10 +1208,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ signed address records
 
-    /// <summary>Keeps the node's signed address record fresh at every lookup provider:
-    /// publish, wait one interval (plus jitter), repeat. A publish nobody acknowledges
-    /// doubles the wait up to <see cref="PublishMaxBackoff"/>; the first success resets it —
-    /// bounded provider access even when every provider is down.</summary>
     private async Task PublishLoopAsync(CancellationToken ct)
     {
         TimeSpan backoff = PublishInterval;
@@ -1274,9 +1235,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>One signed record of the node's current direct/reflexive reachability,
-    /// delivered to every provider. Single-flight: a loop heartbeat and an event kick
-    /// racing each other collapse into one datagram burst.</summary>
     private async Task<bool> PublishAddressRecordAsync(CancellationToken ct)
     {
         if (_endpointIdentity is null || _lookup.Count == 0 || _disposed)
@@ -1308,9 +1266,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Event-triggered publish (route change, rebind, port-mapping change): debounced,
-    /// rate-limited to one burst per five seconds so candidate churn never becomes a
-    /// provider flood. The heartbeat loop is separate and unaffected.</summary>
     private void PublishAddressRecordSoon()
     {
         if (_lookup.Count == 0 || _endpointIdentity is null || !_options.Listen || _disposed)
@@ -1407,9 +1362,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Races every lookup provider for the peer's current record and returns the
-    /// first one that verifies against the pinned endpoint key — a lying or stale provider
-    /// result is simply not first-verified. The overall budget bounds provider access.</summary>
     private async Task<AddressRecord?> ResolveVerifiedRecordAsync(ulong peerId, byte[] pinnedKey, CancellationToken ct)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
@@ -1449,11 +1401,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Adopts a verified record's endpoints into a live dial's candidate list. The
-    /// record already passed signature, pin, and expiry checks; the per-peer sequence cache
-    /// adds rollback protection — a record strictly older than the newest adopted for the
-    /// peer is a rollback, while re-adopting the same sequence is an idempotent retry (a
-    /// redial inside one publish interval still finds its record useful).</summary>
     internal bool AcceptRecordSequence(ulong peerId, ulong sequence)
     {
         if (_recordSequence.TryGetValue(peerId, out ulong seen) && sequence < seen)
@@ -1469,11 +1416,6 @@ internal sealed partial class NodeEngine : IDisposable
         return true;
     }
 
-    /// <summary>Runs beside a dial: while the punch loop races the ticket's own (possibly
-    /// dead) candidates, this asks the lookup providers where the peer is now and, when a
-    /// record verifies against the ticket's pinned endpoint key, merges its fresh endpoints
-    /// into the punch. Best-effort by construction — no result simply leaves the dial on its
-    /// original candidates.</summary>
     private async Task ResolveViaLookupAsync(ConnState c, byte[] pinnedKey, CancellationToken ct)
     {
         try
@@ -1779,13 +1721,6 @@ internal sealed partial class NodeEngine : IDisposable
         await Task.CompletedTask.ConfigureAwait(false);
     }
 
-    /// <summary>Removes never-established connections whose punch budget expired. A husk
-    /// holds a table slot otherwise: crypto strangers never run a punch loop, condemned
-    /// punches stay as Dead entries, and a full table refuses every later inbound
-    /// stranger. Real sessions (handshake completed once) are untouched — their Dead
-    /// state is deliberately revivable. No Bye is sent (an unauthenticated source must
-    /// not be able to draw one out) and no closed-handshake tombstone is recorded (junk
-    /// peer ids must not evict real handshakes from the ring).</summary>
     private void ReapUnestablishedHusks()
     {
         long budget = (long)_options.ConnectTimeout.TotalMilliseconds;
@@ -1999,9 +1934,6 @@ internal sealed partial class NodeEngine : IDisposable
     // plain TickCount64 so RTT stats and monitoring counters never mix.
     private const long ProbeMarker = unchecked((long)0x8000000000000000);
 
-    /// <summary>One scheduler for the whole node: no per-connection timers and nothing on
-    /// the send path. Dies with the node's shutdown token. Carries both recurring chores:
-    /// direct-path validation and the periodic STUN refresh.</summary>
     private async Task MaintenanceLoopAsync(CancellationToken ct)
     {
         double intervalMs = _options.PathValidationProbeInterval.TotalMilliseconds;
@@ -2095,12 +2027,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Periodic re-discovery (iroh performs the same refresh): NAT mappings move with
-    /// no OS event, so re-probe every STUN server and, when the observed reflexive set moved,
-    /// replace it and re-advertise the new candidates to every peer over its current path.
-    /// Open direct paths keep working — their endpoints come from the peer's own frames, not
-    /// from STUN — and a fully silent probe batch changes nothing: a lost network is
-    /// <see cref="RecoverAsync"/>'s call, not this timer's.</summary>
     private async Task RefreshReflexiveAsync(CancellationToken ct)
     {
         if (_disposed || Interlocked.Exchange(ref _stunRefreshing, 1) != 0)
@@ -2176,10 +2102,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Detects the silent direct-path death a send error never reports: NAT expiry,
-    /// a router, or a firewall dropping packets in both directions. After the idle window
-    /// with no direct-path RECEIVE, probes run until enough consecutive answers fail to
-    /// arrive, then the path is declared suspect exactly as a send failure would be.</summary>
     private void ValidatePath(ConnState c)
     {
         long now = Environment.TickCount64;
@@ -2235,13 +2157,6 @@ internal sealed partial class NodeEngine : IDisposable
         SendPathProbe(c);
     }
 
-    /// <summary>The relay leg of a degraded session gets the same liveness honesty the
-    /// direct path gets: silence beyond <see cref="PinholeOptions.PathValidationIdle"/> is
-    /// probed with the token ping (which rides the relay), and persistent silence escalates
-    /// through <see cref="NotifyPathSuspect"/> — whose permit re-validation retires a ghost
-    /// allocation (a restarted relay) instead of black-holing until the minutes-long TURN
-    /// refresh cadence notices. Reuses the direct probe slots: a connection validates one
-    /// leg at a time, and a leg switch resets the counters.</summary>
     private void ValidateRelayPath(ConnState c)
     {
         long now = Environment.TickCount64;
@@ -2360,9 +2275,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>One heartbeat per interval on every live connection — a caller ping, so
-    /// its pongs refresh the NAT mapping both ways and feed RTT, and it counts in caller
-    /// stats because the app asked for it.</summary>
     private void MaybeKeepalive(ConnState c)
     {
         long intervalMs = (long)_options.KeepaliveInterval.TotalMilliseconds;
@@ -2383,11 +2295,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ path MTU discovery
 
-    /// <summary>Drives one connection's RFC 8899-style climb: padded pings step the wire
-    /// size upward, a matching pong confirms a size, and three unanswered probes abandon a
-    /// size for a long cooldown. Only direct paths are probed — relays tunnel whatever they
-    /// are handed — and leaving the direct path forgets everything: a new path may have a
-    /// smaller MTU than the last one proved.</summary>
     private void DiscoverPathMtu(ConnState c)
     {
         long now = Environment.TickCount64;
@@ -2482,10 +2389,6 @@ internal sealed partial class NodeEngine : IDisposable
         SendPmtuProbe(c, target!, nonce, size);
     }
 
-    /// <summary>The next wire size worth probing: one step above what is confirmed, capped
-    /// by the remote address family's Ethernet plateau. Zero means the ceiling is proven.
-    /// The endpoint form decides the family — the dual-mode socket reports even IPv4 peers
-    /// as v4-mapped IPv6 sockaddrs, and mapping back recovers the true 1472-byte budget.</summary>
     private static int NextPmtuSizeLocked(ConnState c)
     {
         int ceiling = PmtuCeilingLocked(c);
@@ -2498,9 +2401,6 @@ internal sealed partial class NodeEngine : IDisposable
             ? PmtuCeilingV4
             : PmtuCeilingV6;
 
-    /// <summary>One padded Ping: the nonce in front, zero padding behind, sized so the
-    /// whole sealed frame lands on the probe size. The peer echoes the nonce in its Pong —
-    /// small, cheap, and proof the full-size datagram traversed the path.</summary>
     private void SendPmtuProbe(ConnState c, SocketAddress target, long nonce, int size)
     {
         Span<byte> body = stackalloc byte[size - PmtuOverhead];
@@ -2591,9 +2491,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>The path-maintenance variant: same wire probe, but transport-internal
-    /// probes must not inflate the app-visible ping stats — <c>PingsSent</c> counts the
-    /// pings the app asked for, exactly as the keepalive contract documents.</summary>
     internal void PingUncounted(ConnState c) => SendPingFrame(c);
 
     private bool SendPingFrame(ConnState c)
@@ -2619,7 +2516,6 @@ internal sealed partial class NodeEngine : IDisposable
         return true;
     }
 
-    /// <summary>Sends on the connection's current path: direct when open, relay when degraded.</summary>
     private void RouteFrame(ConnState c, ReadOnlySpan<byte> frame)
     {
         if (c.Path == PathKind.Direct && c.DirectRemote is { } direct)
@@ -2763,11 +2659,6 @@ internal sealed partial class NodeEngine : IDisposable
         if (!tcp.Send(frame[..length])) tcp.Dispose();
     }
 
-    /// <summary>Sends to the peer's relayed address through our allocation on the SAME
-    /// server whenever one exists — a relayed address lives on its server, so the target IP
-    /// is itself the routing hint. Cross-server forwarding is legal TURN, but the receiver's
-    /// allocation only holds permissions for relay servers it knows about, so same-server is
-    /// the route that arrives. Falls back to any alive allocation when we have none there.</summary>
     private void SendViaRelayTo(ReadOnlySpan<byte> frame, IPEndPoint peer, IPAddress? viaServer = null)
     {
         List<TurnClient> alive = AliveRelayClients();
@@ -3131,10 +3022,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static byte[] CryptoScratch() => s_cryptoScratch ??= new byte[RecvBufferSize];
 
-    /// <summary>Post-handshake frames must prove the per-connection token the peer learned
-    /// during the Punc/Pack exchange. Without it, anyone holding the connection string
-    /// (which carries the peer ID but never the token) could close a session with a forged
-    /// Bye or re-point its direct path with a forged Data from their own address.</summary>
     private static bool TokenOk(ConnState c, ReadOnlySpan<byte> frame) =>
         c.RemoteTokenKnown
         && frame.Length >= HeaderSize + 4
@@ -3414,9 +3301,6 @@ internal sealed partial class NodeEngine : IDisposable
         AnnounceTo(c, target: arrival);
     }
 
-    /// <summary>The crypto handshake is unrecoverably broken (stripped, substituted, or
-    /// unconfirmed by a peer whose string vouches for a key). The connection dies honestly
-    /// instead of limping on in plaintext.</summary>
     private void HandshakeFailed(ConnState c, string reason)
     {
         lock (c.Gate)
@@ -3707,11 +3591,6 @@ internal sealed partial class NodeEngine : IDisposable
         SendOnArrival(arrival, frame[..length]);
     }
 
-    /// <summary>Builds a Ping padded to the guaranteed wire floor. Peers size their
-    /// path MTU from inbound Ping frames; a sub-floor Ping would shrink a legacy
-    /// peer's payload budget below zero (its ceiling arithmetic has no floor once a
-    /// Ping has been seen). The leading bytes carry the nonce/timestamp; the padding
-    /// behind them stays zero — the same shape <see cref="SendPmtuProbe"/> uses.</summary>
     private int BuildFloorPing(ConnState c, ReadOnlySpan<byte> leading, Span<byte> frame)
     {
         Span<byte> body = stackalloc byte[PmtuBaseWire - PmtuOverhead];
@@ -4053,11 +3932,6 @@ internal sealed partial class NodeEngine : IDisposable
         _ = PermitRelayAsync(c, peerRelayed);
     }
 
-    /// <summary>Relay-leg promotion, under the connection gate. The leg is proven usable
-    /// (permitted) and the peer cryptographically confirmed; a Punching or Dead session
-    /// becomes Degraded and hands its awaiter the connection. Callers re-run this whenever
-    /// either fact arrives second — the permit may pre-date the handshake, or the
-    /// handshake the permit.</summary>
     private void PromoteRelayLegNoLock(ConnState c)
     {
         if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
@@ -4116,14 +3990,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>One permission round trip with the evidence discipline the relay-recovery
-    /// review requires: a <see cref="Turn.TurnRejectException"/> is the server itself
-    /// refusing (allocation gone, credentials refused) — retire the client and reallocate
-    /// immediately, because a restarted relay otherwise leaves a ghost allocation
-    /// black-holing traffic until the minutes-long refresh cadence notices. Everything
-    /// else — a timeout, a transport fault — proves nothing: one lost UDP request must not
-    /// flap a healthy allocation, so it is retried a few times and then abandoned to the
-    /// next trigger, never retired.</summary>
     private async Task<bool> TryPermitAsync(TurnClient client, IPAddress peer, CancellationToken ct)
     {
         for (int attempt = 1; ; attempt++)
@@ -4166,8 +4032,6 @@ internal sealed partial class NodeEngine : IDisposable
         Telemetry.Recovery("relay-reallocate");
     }
 
-    /// <summary>The path looks dead (send errors or a simulated failure): re-punch toward the
-    /// known candidates; a usable relay keeps the session alive as Degraded.</summary>
     public void NotifyPathSuspect(ConnState c)
     {
         lock (c.Gate)
@@ -4244,10 +4108,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ roaming
 
-    /// <summary>Re-probes the world and, when the socket's network is gone, rebinds the
-    /// socket, re-allocates the relays, and re-announces to every peer. Connection objects
-    /// survive the whole maneuver. A single lost STUN probe proves nothing (servers
-    /// rate-limit); every configured server must go silent before a rebind happens.</summary>
     public async Task RecoverAsync(bool forceRebind, CancellationToken ct)
     {
         if (_disposed || Interlocked.Exchange(ref _recovering, 1) != 0)
@@ -4403,8 +4263,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     internal Task SimulateInterfaceLossAsync() => RecoverAsync(forceRebind: true, CancellationToken.None);
 
-    /// <summary>Test/diagnostic accessor: each managed TURN slot's server and live relayed
-    /// address (null when the slot has no allocation right now).</summary>
     internal IReadOnlyList<(IPEndPoint Server, IPEndPoint? Relayed)> RelayAllocations()
     {
         lock (_gate)
@@ -4413,8 +4271,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Test/diagnostic accessor: the relayed address this node currently sends the
-    /// peer's frames at, and whether that leg is confirmed usable.</summary>
     internal (IPEndPoint? Remote, bool Ready) PeerRelayLeg(ulong peerId)
     {
         lock (_gate)
@@ -4423,14 +4279,11 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Test/diagnostic accessor: how many TURN slots this node manages.</summary>
     internal int RelaysConfiguredCount
     {
         get { lock (_gate) return _relays.Count; }
     }
 
-    /// <summary>Test hook: pretends the relay backoff ladder has expired, so a test can
-    /// exercise retry behavior without waiting out the 30 s first step.</summary>
     internal void TestExpediteRelayRetry()
     {
         lock (_gate)
@@ -4443,8 +4296,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Test hook: one relay-ensure pass right now — the same pass a path-suspect
-    /// cycle, a dial, or the maintenance tick triggers, without waiting for their timers.</summary>
     internal Task ForceRelayEnsureAsync() => EnsureRelaysAsync(CancellationToken.None);
 
     internal void SimulateDirectPathDeath(ulong peerId)
@@ -4458,9 +4309,6 @@ internal sealed partial class NodeEngine : IDisposable
         NotifyPathSuspect(c);
     }
 
-    /// <summary>Test hook: the direct path to this peer becomes a silent black hole — frames
-    /// die in both directions with no send errors and no notifications. Exactly the failure
-    /// path validation exists to detect on its own.</summary>
     internal void SimulateSilentDirectPathLoss(ulong peerId)
     {
         if (Lookup(peerId) is { } c)
@@ -4469,8 +4317,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Test hook: the direct path works again (NAT rebind recovered, firewall rule
-    /// lifted). The engine's own probing re-opens it; no notification is pushed.</summary>
     internal void SimulateDirectPathRestore(ulong peerId)
     {
         if (Lookup(peerId) is { } c)
@@ -4479,7 +4325,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Test hook: restart the punch loop for a connection the budget gave up on.</summary>
     internal void RetryPunch(ulong peerId)
     {
         if (Lookup(peerId) is { } c)
@@ -4488,10 +4333,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>One line naming where a connection's handshake stands — the per-flight
-    /// counts that let stuck-dial forensics say WHICH flight died without tracing. A
-    /// connection removed at close keeps its last line here, so a timed-out dial's
-    /// post-mortem still names the flight that died instead of "no conn".</summary>
     internal string HandshakeSummary(ulong peerId)
     {
         if (Lookup(peerId) is { } c)
@@ -4504,8 +4345,6 @@ internal sealed partial class NodeEngine : IDisposable
             : "no conn";
     }
 
-    /// <summary>Records one handshake reject for forensics: the running total, the branch,
-    /// and — for token checks — the wanted/got pair plus the frame's source endpoint.</summary>
     private void Reject(ConnState c, int kind, uint wanted = 0, uint got = 0, in Arrival arrival = default)
     {
         Interlocked.Increment(ref c.HandshakeRejects);
@@ -4521,9 +4360,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    /// <summary>Key-agreement rejects get their own lens: whether a session was already
-    /// derived and the first bytes of the stored versus arriving ephemeral keys, which
-    /// names WHOSE keys the stale session belongs to.</summary>
     private static void RejectKeys(ConnState c, ReadOnlySpan<byte> arrivingEph)
     {
         Interlocked.Increment(ref c.HandshakeRejects);
@@ -4572,10 +4408,6 @@ internal sealed partial class NodeEngine : IDisposable
         _ => "",
     };
 
-    /// <summary>Receive-path liveness for stuck-dial forensics: datagrams the recv loop has
-    /// taken, how long ago the last one landed, and how many frames dispatch dropped for
-    /// want of a connection. Separates a frozen loop from a deaf socket from a lost table
-    /// entry in one line.</summary>
     internal string RecvDiagnostics() =>
         $"rx={Volatile.Read(ref _recvDatagrams)} last-rx-ago={(_recvLastTick == 0 ? -1 : Environment.TickCount64 - Volatile.Read(ref _recvLastTick))}ms no-conn-drops={Volatile.Read(ref _noConnDrops)}";
 
@@ -4643,10 +4475,6 @@ internal sealed partial class NodeEngine : IDisposable
         return frame;
     }
 
-    /// <summary>Builds one post-handshake frame into <paramref name="dst"/>: legacy
-    /// [header][token][body] or, once the session is derived, [header][token][counter][sealed
-    /// body]. The 13-byte plaintext prefix is the AEAD associated data, so the frame type,
-    /// sender id, and token are tamper-evident too. Returns the frame length.</summary>
     private int BuildFrame(ConnState c, FrameType type, ReadOnlySpan<byte> body, Span<byte> dst)
     {
         WriteHeader(dst, type);

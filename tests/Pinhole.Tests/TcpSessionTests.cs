@@ -5,8 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Real-socket integration. Requires normal loopback socket permission;
-/// the restricted editing session cannot run these, and they must pass before ship.</summary>
 public sealed class TcpSessionTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(12);

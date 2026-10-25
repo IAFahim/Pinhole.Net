@@ -2,8 +2,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Reconnect pacing, iroh's practice for the same problem: a relay outage must not
-/// synchronize every client into a retry storm, and brief blips must still heal fast.</summary>
 public sealed class BackoffTests
 {
     [Fact]

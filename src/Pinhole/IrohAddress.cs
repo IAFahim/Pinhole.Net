@@ -3,8 +3,6 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>An iroh endpoint's Ed25519 identity and IP/relay addresses. Encodes the native
-/// iroh 1.x <c>endpoint...</c> ticket, independently of Pinhole's connection strings.</summary>
 public sealed class IrohAddress
 {
     internal const int MaxAddresses = 64;
@@ -15,7 +13,6 @@ public sealed class IrohAddress
     private readonly IPEndPoint[] _direct;
     private readonly Uri[] _relays;
 
-    /// <summary>Creates an address from an endpoint ID (hex or unpadded base32) and known paths.</summary>
     public IrohAddress(string endpointId, IReadOnlyList<IPEndPoint>? directAddresses = null,
         IReadOnlyList<Uri>? relayUrls = null)
     {
@@ -27,18 +24,12 @@ public sealed class IrohAddress
             throw new ArgumentException($"an iroh address may have at most {MaxAddresses} paths");
     }
 
-    /// <summary>The 32-byte Ed25519 endpoint public key as canonical lowercase hex.</summary>
     public string EndpointId { get; }
-    /// <summary>Known direct UDP paths. A snapshot protects the address from caller mutation.</summary>
     public IReadOnlyList<IPEndPoint> DirectAddresses => Array.AsReadOnly(_direct.Select(Clone).ToArray());
-    /// <summary>Known home relay URLs.</summary>
     public IReadOnlyList<Uri> RelayUrls => Array.AsReadOnly(_relays);
 
-    /// <summary>Optional application metadata from signed iroh discovery (at most 245 UTF-8
-    /// bytes). Native endpoint tickets contain addresses only and do not encode this field.</summary>
     public string? UserData { get; init; }
 
-    /// <summary>Encodes an iroh 1.x EndpointTicket (postcard followed by unpadded base32).</summary>
     public override string ToString()
     {
         using var wire = new MemoryStream();
@@ -65,7 +56,6 @@ public sealed class IrohAddress
         return "endpoint" + IrohEncoding.Encode32(wire.ToArray());
     }
 
-    /// <summary>Parses an iroh 1.x endpoint ticket, or an endpoint ID with no addressing information.</summary>
     public static IrohAddress Parse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);

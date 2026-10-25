@@ -2,21 +2,11 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Pinhole.Rendezvous;
 
-/// <summary>A tiny UDP introducer: nodes REGister, waiters WANT a target, and both sides receive
-/// an INTRO when the target registers. A registration may attach a signed address record
-/// (base64url, ≤1 KB) which INTROs then carry verbatim — the introducer stores and forwards
-/// records but never validates them; adopters verify signatures against their pinned keys.
-/// Entries are TTL-swept and bounded so memory stays flat.
-///
-/// Host/join code directory (#45): hosts PUTC a short invitation code mapped to a
-/// connection-string record; joiners GETC it. Codes are capabilities — the introducer still
-/// never validates records — and a registration can only be deleted by presenting the
-/// token the server issued at PUT time, so a joiner who knows the code cannot tear down
-/// the host's registration.</summary>
 public sealed class RendezvousServer : IAsyncDisposable
 {
     public const int MaxNodes = 4096;
@@ -35,6 +25,12 @@ public sealed class RendezvousServer : IAsyncDisposable
     private readonly ConcurrentDictionary<ulong, (IPEndPoint Ep, DateTimeOffset Seen, string? Record)> _nodes = new();
     private readonly ConcurrentDictionary<ulong, List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>> _wants = new();
     private readonly ConcurrentDictionary<string, (string Record, string Token, DateTimeOffset Seen)> _codes = new();
+    private readonly byte[] _cookieKey = RandomNumberGenerator.GetBytes(32);
+    private long _datagramFaults;
+
+    internal Action? OnWaiterIntro;
+
+    public long DatagramFaults => Interlocked.Read(ref _datagramFaults);
 
     private RendezvousServer(Socket udp, TimeSpan ttl)
     {
@@ -119,6 +115,13 @@ public sealed class RendezvousServer : IAsyncDisposable
 
                 // One undeliverable reply must not stop the introducer for everyone else.
             }
+            catch (Exception)
+            {
+                // A-07: any other fault while handling one datagram — the sweeper racing
+                // the introduction loop, or an edge the parser missed — is charged to that
+                // datagram alone. The introducer keeps serving everyone else.
+                Interlocked.Increment(ref _datagramFaults);
+            }
         }
     }
 
@@ -139,9 +142,24 @@ public sealed class RendezvousServer : IAsyncDisposable
                 await Say(remote, $"OBS {remote}").ConfigureAwait(false);
                 if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>? waiters))
                 {
-                    foreach ((ulong waiterId, IPEndPoint waiterEp, _) in waiters)
+                    // Snapshot under the list's lock: the TTL sweeper mutates the same
+                    // list under that lock, and enumerating it unlocked throws when the
+                    // sweep lands mid-introduction (the concrete A-07 loop-killer).
+                    (ulong Id, IPEndPoint Ep, DateTimeOffset At)[] matched;
+                    lock (waiters)
                     {
-                        await IntroTo(waiterEp, id, _nodes[id]).ConfigureAwait(false);
+                        matched = waiters.ToArray();
+                    }
+
+                    if (!_nodes.TryGetValue(id, out (IPEndPoint Ep, DateTimeOffset Seen, string? Record) self))
+                    {
+                        self = (remote, DateTimeOffset.UtcNow, null);
+                    }
+
+                    foreach ((ulong waiterId, IPEndPoint waiterEp, _) in matched)
+                    {
+                        OnWaiterIntro?.Invoke();
+                        await IntroTo(waiterEp, id, self).ConfigureAwait(false);
                         await IntroTo(remote, waiterId, _nodes.TryGetValue(waiterId, out var waiterEntry)
                             ? waiterEntry
                             : (waiterEp, DateTimeOffset.UtcNow, null)).ConfigureAwait(false);
@@ -221,7 +239,28 @@ public sealed class RendezvousServer : IAsyncDisposable
                 if (_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) entry2)
                     && entry2.Seen > DateTimeOffset.UtcNow - _ttl)
                 {
-                    await Say(remote, $"OKCC {entry2.Record}").ConfigureAwait(false);
+                    // A ~14-byte GETC must not buy an 8 KiB record for a spoofed source
+                    // (A-07): prove return routability by echoing a cookie bound to the
+                    // requester's own endpoint before the record leaves.
+                    await Say(remote, $"CHAL {code} {ChallengeCookie(remote, code)}").ConfigureAwait(false);
+                }
+                else
+                {
+                    await Say(remote, "WAITC").ConfigureAwait(false);
+                }
+
+                break;
+            case ["GETC", var code, var cookie] when ValidCode(code):
+                if (!ValidCookie(remote, code, cookie))
+                {
+                    await Say(remote, $"CHAL {code} {ChallengeCookie(remote, code)}").ConfigureAwait(false);
+                    break;
+                }
+
+                if (_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) entry3)
+                    && entry3.Seen > DateTimeOffset.UtcNow - _ttl)
+                {
+                    await Say(remote, $"OKCC {entry3.Record}").ConfigureAwait(false);
                 }
                 else
                 {
@@ -313,8 +352,39 @@ public sealed class RendezvousServer : IAsyncDisposable
         }
     }
 
-    /// <summary>Codes are ASCII, bounded, and space-free — they key a dictionary and ride
-    /// the space-framed wire. Content is the host's choice; the SDK generates base32.</summary>
+    private string ChallengeCookie(IPEndPoint src, string code)
+    {
+        long minute = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
+        Span<byte> mac = stackalloc byte[32];
+        HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"pinhole-chal|{src}|{code}|{minute}"), mac);
+        return Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_'); // exactly 16 chars
+    }
+
+    private bool ValidCookie(IPEndPoint src, string code, string presented)
+    {
+        if (presented.Length != 16)
+        {
+            return false;
+        }
+
+        long minute = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
+        Span<byte> given = stackalloc byte[16];
+        Span<byte> mac = stackalloc byte[32];
+        Span<byte> expected = stackalloc byte[16];
+        Encoding.ASCII.GetBytes(presented, given);
+        for (long m = minute - 1; m <= minute; m++)
+        {
+            HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"pinhole-chal|{src}|{code}|{m}"), mac);
+            Encoding.ASCII.GetBytes(Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_'), expected);
+            if (CryptographicOperations.FixedTimeEquals(expected, given))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool ValidCode(string code)
     {
         if (code.Length is < 4 or > MaxCodeLength)
@@ -335,9 +405,6 @@ public sealed class RendezvousServer : IAsyncDisposable
 
     private static class Token
     {
-        /// <summary>16 random bytes as exactly 22 unpadded base64url characters — no
-        /// padding '=' to trim (which once silently left stack NULs inside the token) and
-        /// nothing that depends on span zero-initialization.</summary>
         public static string New()
         {
             Span<byte> raw = stackalloc byte[16];
@@ -345,8 +412,6 @@ public sealed class RendezvousServer : IAsyncDisposable
             return Convert.ToBase64String(raw).Replace('+', '-').Replace('/', '_').TrimEnd('=');
         }
 
-        /// <summary>Constant-time equality: a presented token is compared against the
-        /// stored secret, so comparison timing must not leak how many characters matched.</summary>
         public static bool Matches(string expected, string presented)
         {
             if (expected.Length != presented.Length || expected.Length > 128)
@@ -383,13 +448,9 @@ public sealed class RendezvousServer : IAsyncDisposable
     private Task Say(IPEndPoint to, string line) =>
         _udp.SendToAsync(new ArraySegment<byte>(Encoding.ASCII.GetBytes(line + '\n')), SocketFlags.None, to);
 
-    /// <summary>Introduces a subject to a waiter: the subject's signed record verbatim when
-    /// one is registered, else the legacy bare-endpoint form for pre-record clients.</summary>
     private Task IntroTo(IPEndPoint to, ulong subject, (IPEndPoint Ep, DateTimeOffset Seen, string? Record) entry) =>
         Say(to, entry.Record is { } record ? $"INTRO {subject:x16} {record}" : $"INTRO {subject:x16} {entry.Ep}");
 
-    /// <summary>Records are opaque here, but not arbitrary: base64url of bounded length, so a
-    /// hostile registration cannot bloat memory or smuggle spaces into the ASCII framing.</summary>
     private static bool ValidRecord(string record, int maxLength = MaxRecordLength)
     {
         if (record.Length < 1 || record.Length > maxLength)

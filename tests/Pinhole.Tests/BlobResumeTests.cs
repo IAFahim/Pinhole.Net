@@ -9,11 +9,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#32 — a download rides through recoverable disruptions on its own: one
-/// DownloadAsync call survives outages, route changes, and provider restarts, resuming
-/// from verified checkpoints without a new ticket and never reporting unverified bytes as
-/// progress. Terminal facts (rejection, tampering) still surface immediately;
-/// cancellation stays prompt; every session recreation mints fresh two-sided keys.</summary>
 public sealed class BlobResumeTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;

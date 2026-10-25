@@ -4,8 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Independent loopback router fixtures. These require OS socket permission
-/// and remain pending in the restricted editing session.</summary>
 public sealed class TcpRouterIntegrationTests
 {
     // Readiness polling, not a performance floor: mapping work serializes per transport

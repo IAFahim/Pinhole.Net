@@ -5,9 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Our tree-exposing BLAKE3 must be bit-compatible with BouncyCastle's digest —
-/// that oracle anchors every root we ever mint or verify, while the chunk CVs (which
-/// BouncyCastle cannot produce) are validated through the tree structure itself.</summary>
 public sealed class Blake3Tests
 {
     public static IEnumerable<object[]> Sizes() =>

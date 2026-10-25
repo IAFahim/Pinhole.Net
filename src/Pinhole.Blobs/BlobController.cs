@@ -1,63 +1,34 @@
 namespace Pinhole.Blobs;
 
-/// <summary>Per-download transfer accounting, filled in live by the downloader when
-/// supplied via <see cref="BlobDownloadOptions.Stats"/>. These are the numbers the
-/// congestion controller is judged by: wire load is measured as bytes that actually
-/// arrived (verified plus duplicate), never as request credits issued.</summary>
 public sealed class BlobTransferStats
 {
-    /// <summary>Chunk bytes verified and applied (fresh arrivals only).</summary>
     public long VerifiedBytes { get; internal set; }
 
-    /// <summary>Chunk bytes that arrived for an index already held — retransmission
-    /// waste on the wire, counted even though it verified nothing.</summary>
     public long DuplicateBytes { get; internal set; }
 
-    /// <summary>Total chunk bytes received (verified + duplicate): the real
-    /// provider-response load this download put on the path.</summary>
     public long ReceivedBytes => VerifiedBytes + DuplicateBytes;
 
-    /// <summary>Req frames sent (new runs and re-requests alike).</summary>
     public long RequestsSent { get; internal set; }
 
-    /// <summary>Individual re-request frames sent for chunks that passed their
-    /// retransmission timer without arriving.</summary>
     public long Retransmits { get; internal set; }
 
-    /// <summary>Distinct loss windows in which the congestion window was reduced.</summary>
     public long LossEvents { get; internal set; }
 
-    /// <summary>Conservative resume events: path migrations and recoveries from
-    /// sustained pathlessness, each of which resets the window to its floor.</summary>
     public long ConservativeResumes { get; internal set; }
 
-    /// <summary>Smoothed round-trip time at the latest sample; null before the first
-    /// clean sample.</summary>
     public TimeSpan? SmoothedRtt { get; internal set; }
 
-    /// <summary>The window (bytes) at the latest adjustment.</summary>
     public long WindowBytes { get; internal set; }
 }
 
-/// <summary>Process-wide cap on total in-flight blob bytes shared by every download in
-/// this process. Per-download windows bound each flow; this budget bounds the aggregate,
-/// so opening more simultaneous downloads divides a fixed pie instead of multiplying one.
-/// Downloads join <see cref="Shared"/> unless given their own.</summary>
 public sealed class BlobFlowBudget
 {
-    /// <summary>The default budget every download joins: 8 MiB of outstanding chunk
-    /// bytes process-wide (eight saturated fat-path downloads' worth, and a modest
-    /// footprint next to the engine's per-node receive buffering).</summary>
     public static BlobFlowBudget Shared { get; } = new(8 * 1024 * 1024);
 
     private long _used;
 
-    /// <summary>Total outstanding bytes this budget admits across all joining downloads.</summary>
     public long CapacityBytes { get; }
 
-    /// <param name="capacityBytes">Total bytes that may be outstanding across all joining
-    /// downloads. At least 64 KiB — a budget smaller than one minimum window cannot admit
-    /// a single run and only deadlocks.</param>
     public BlobFlowBudget(long capacityBytes)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacityBytes, 64 * 1024);
@@ -82,15 +53,6 @@ public sealed class BlobFlowBudget
     internal long UsedBytes => Interlocked.Read(ref _used);
 }
 
-/// <summary>The receiver-side congestion controller for one blob stream: a byte-based
-/// window under slow-start/AIMD, a retransmission timer derived from measured RTT
-/// (SRTT/RTTVAR, RFC 6298/9002-shaped; Karn's rule keeps retransmitted chunks from
-/// polluting the estimate), a leaky-bucket pacer so runs leave at window rate rather
-/// than back-to-back, duplicate-response accounting as a too-early-timer signal, and a
-/// conservative reset on path migration or sustained pathlessness. Receiver-driven by
-/// construction: the requests this paces are the only thing that pulls data onto the
-/// wire. The wire itself is unchanged — no new frames, no version bump; a
-/// controller-mode downloader talks to any v3 provider, and vice versa.</summary>
 internal sealed class BlobController
 {
     private const int ChunkBytes = BlobWire.MaxChunkData;
@@ -144,19 +106,10 @@ internal sealed class BlobController
         if (_stats is not null) _stats.RequestsSent++;
     }
 
-    /// <summary>How many chunks a single Req run may carry: grows with the window so a
-    /// fat path batches and a thin one stays deferential — every run is a back-to-back
-    /// provider burst, so its size is a burst bound. The granularity stays at most a
-    /// sixteenth of the window, so admission never strands a large fraction of a small
-    /// window waiting for a whole oversized run.</summary>
     public int MaxRunChunks => _fixedWindow
         ? BlobWire.MaxRequestCount
         : (int)Math.Clamp(_window / (8 * ChunkBytes), 2, BlobWire.MaxRequestCount);
 
-    /// <summary>How many chunks the pacer's current credit can pay for right now, capped
-    /// at <paramref name="desired"/>: the caller sizes each run to the credit actually
-    /// available instead of blocking until a full run's worth accumulates, so issuance
-    /// tracks the pacing rate smoothly rather than in whole-run jumps.</summary>
     public int AffordableChunks(int desired)
     {
         if (_fixedWindow)
@@ -168,12 +121,6 @@ internal sealed class BlobController
         return (int)Math.Min(desired, _pacerCreditBytes / ChunkBytes);
     }
 
-    /// <summary>Admission for one request run of exactly <paramref name="bytes"/> of
-    /// chunk data: needs window room, pacer credit, then aggregate-budget room. On
-    /// success the bytes are reserved per-stream and process-wide. The pacer is a
-    /// token bucket filled at window rate (window bytes per RTT, so the whole window
-    /// could leave once per RTT) with burst credit capped at one run — requests may
-    /// leave back-to-back while credit lasts, then wait.</summary>
     public bool TryStartRun(long bytes, long nowMs)
     {
         if (_inFlight + bytes > _window)
@@ -188,13 +135,16 @@ internal sealed class BlobController
             {
                 return false;
             }
-
-            _pacerCreditBytes -= bytes;
         }
 
         if (!_budget.TryReserve(bytes))
         {
             return false;
+        }
+
+        if (!_fixedWindow)
+        {
+            _pacerCreditBytes -= bytes;
         }
 
         _inFlight += bytes;
@@ -225,10 +175,6 @@ internal sealed class BlobController
         ? InitialPtoMs
         : Math.Clamp(_srttMs + Math.Max(4 * _rttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
 
-    /// <summary>The retransmission timer for a chunk already re-sent
-    /// <paramref name="retransmits"/> times without arriving: base PTO with doubling
-    /// backoff and the duplicate-pressure inflation, so one stuck chunk cannot spin at
-    /// the floor rate forever.</summary>
     public TimeSpan PtoFor(int retransmits)
     {
         if (_fixedWindow)
@@ -240,10 +186,6 @@ internal sealed class BlobController
         return TimeSpan.FromMilliseconds(Math.Min(pto, PtoCeilingMs * 8));
     }
 
-    /// <summary>A chunk arrived. <paramref name="hadReservation"/>: this arrival matched
-    /// an outstanding request, so its bytes come back (per-stream window and process
-    /// budget). <paramref name="fresh"/>: the sink did not already hold it; when false
-    /// the bytes are duplicates on the wire and feed the too-early-timer signal.</summary>
     public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, long nowMs)
     {
         if (hadReservation)
@@ -301,8 +243,6 @@ internal sealed class BlobController
         }
     }
 
-    /// <summary>RTT observation from the downloader (request send time to arrival, clean
-    /// samples only, enforced by the caller per Karn's rule).</summary>
     public void ObserveRtt(TimeSpan rtt)
     {
         if (_fixedWindow)
@@ -353,13 +293,6 @@ internal sealed class BlobController
         }
     }
 
-    /// <summary>A re-request is going out for a chunk whose timer expired. A single
-    /// expiry is evidence of scattered random loss, not congestion — re-request and move
-    /// on. The window halves (at most once per loss window, RFC 6675-style) only when the
-    /// expiries show congestion's signature: several inside one window (a burst died
-    /// together — queue overflow) or standing delay well above the path's base RTT (a
-    /// queue has been building). Without this gate, steady 5% random loss would ratchet
-    /// the window to its floor and never climb back.</summary>
     public void OnRetransmit(long nowMs)
     {
         if (_stats is not null)
@@ -409,11 +342,6 @@ internal sealed class BlobController
         }
     }
 
-    /// <summary>The path changed under the transfer (migration, or return from
-    /// sustained pathlessness): the old path's RTT samples and confirmed window
-    /// described a world that no longer exists. Resume conservatively — initial window,
-    /// clean timers — and re-earn the rate; a stale estimate flooding a fresh path is
-    /// exactly what RFC 9002's migration rules exist to prevent.</summary>
     public void OnPathChanged()
     {
         if (_fixedWindow)
@@ -445,9 +373,6 @@ internal sealed class BlobController
         }
     }
 
-    /// <summary>Gives back one reservation without an arrival — the stream is ending
-    /// (done, stalled, or cancelled) and must release its share of the window and of the
-    /// process-wide budget.</summary>
     public void ReleaseReservation(long chunkBytes)
     {
         _inFlight -= chunkBytes;
@@ -455,10 +380,6 @@ internal sealed class BlobController
     }
 }
 
-/// <summary>Test/diagnostic seam: forces the recorded #27 fixed-window behavior (a
-/// constant 4×64-chunk window, the flat 900 ms re-request timer, no pacing, no backoff)
-/// so same-machine A/B comparisons against the baseline can be re-run. Set the
-/// PINHOLE_BLOB_FIXED_WINDOW=1 environment variable before the process starts.</summary>
 internal static class BlobTestHooks
 {
     private static readonly bool DefaultFixedWindow =

@@ -5,11 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>iroh-relay's proptest discipline, applied to every binary decoder we ship:
-/// encode→decode roundtrips, declared-length honesty, and — the property that matters
-/// for anything fed by strangers — perturbed input (bit flips, truncations, random
-/// bytes) must be rejected or accepted-but-bounded, never throw an unexpected exception,
-/// allocate unbounded memory, or hang.</summary>
 public sealed class DecoderHardeningTests
 {
     private static BlobTicket RealTicket()

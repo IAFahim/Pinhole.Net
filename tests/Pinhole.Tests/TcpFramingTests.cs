@@ -4,8 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Independent TCP-envelope fixtures over fragmented/blocked streams. These
-/// exercise the production codec without an OS socket or the production encoder.</summary>
 public sealed class TcpFramingTests
 {
     private sealed class Duplex : Stream

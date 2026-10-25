@@ -5,14 +5,6 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>The built-in lookup provider: speaks the <c>Pinhole.Rendezvous</c> UDP
-/// introducer wire (REG/WANT/INTRO), extended so a REGistered node may attach its signed
-/// address record and an INTRO carries that record back verbatim. The introducer is a
-/// store-and-forward directory that never validates records — every adopted endpoint is
-/// verified against the dialer's pinned key before use, so a malicious introducer can
-/// only deny availability. One short-lived socket per operation: publishes are one
-/// datagram per configured server, resolves wait a bounded few seconds for the first
-/// record-bearing INTRO, and nothing listens between operations.</summary>
 internal sealed class RendezvousLookup : IPinholeLookupProvider
 {
     private static readonly TimeSpan PublishConfirmWait = TimeSpan.FromSeconds(1);

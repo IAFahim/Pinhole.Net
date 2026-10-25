@@ -6,10 +6,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Issue #43 socket-level negative cases: oversized frames on a real stream,
-/// a substituted ticket key over the TCP sidecar, and close/rebind of the listening
-/// port. These need real loopback sockets, so they run with the main suite wherever
-/// the runner allows binding.</summary>
 public sealed class TcpSocketHardeningTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(12);
@@ -21,11 +17,6 @@ public sealed class TcpSocketHardeningTests
         ConnectTimeout = TimeSpan.FromSeconds(8), // TCP rounds start after the 1.2 s UDP-first window
     };
 
-    /// <summary>The sidecar reuses the UDP socket's numeric port; on Windows that TCP
-    /// port can sit in an excluded range (Hyper-V reserves blocks), which legitimately
-    /// leaves TcpListeningPort null. These cases need the sidecar, so probe for a port
-    /// both stacks accept before binding rather than treating the miss as a transport
-    /// defect.</summary>
     private static Task<PinholeNode> BindWithSidecarAsync(IPAddress address, IPEndPoint? bind = null)
         => SidecarSockets.BindWithSidecarAsync(address, endpoint => Options(address) with { Bind = endpoint }, bind);
 

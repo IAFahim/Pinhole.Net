@@ -10,4 +10,8 @@
     <IsPackable>false</IsPackable>
     <Description>Experimental managed MoQ Draft16 stream publisher/subscriber for Cloudflare.</Description>
   </PropertyGroup>
+	<ItemGroup>
+		<InternalsVisibleTo Include="Pinhole.Moq.Tests" />
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
 </Project>

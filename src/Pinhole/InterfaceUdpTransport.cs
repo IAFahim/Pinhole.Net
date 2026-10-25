@@ -4,21 +4,14 @@ using System.Net.Sockets;
 
 namespace Pinhole;
 
-/// <summary>Observed candidates for one source-bound UDP socket. Different local
-/// sockets can have different NAT mappings; these observations are kept separate.</summary>
 public sealed record PinholeInterfaceCandidates(IPEndPoint LocalEndpoint, IReadOnlyList<IPEndPoint> ReflexiveEndpoints)
 {
-    /// <summary>The local OS interface index. It is routing state, not part of a ticket.</summary>
     public int InterfaceIndex { get; init; }
-    /// <summary>The mapping hint from servers probing this same source socket.
-    /// Unknown means insufficient comparable observations.</summary>
     public NatHint MappingHint { get; init; }
 }
 
 internal readonly record struct UdpInterfaceSource(IPAddress Address, int Index, int Rank = 0);
 
-/// <summary>A bounded source-bound UDP pool. Its sockets remain listening after
-/// gathering, and receive callbacks carry the actual local socket into path selection.</summary>
 internal sealed class InterfaceUdpTransport : IDisposable
 {
     internal const int MaxSources = 4;

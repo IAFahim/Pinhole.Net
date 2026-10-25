@@ -9,11 +9,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#29 — persistent full-key identity and authenticated peer-address rediscovery.
-/// The trust model under test: lookup providers (rendezvous introducers, app callbacks) are
-/// untrusted stores; only records that verify against the endpoint key pinned in a v3
-/// connection string are adopted, and a malicious or stale record can deny availability
-/// but never impersonate the peer.</summary>
 public sealed class RediscoveryTests
 {
     private readonly ITestOutputHelper _output;
@@ -29,8 +24,6 @@ public sealed class RediscoveryTests
 
     private static byte[] NewSeed() => RandomNumberGenerator.GetBytes(32);
 
-    /// <summary>Offline options: no STUN, no relays, no LAN, no OS watch — a pure loopback
-    /// node whose only infrastructure is the rendezvous/provider list the test arranges.</summary>
     private static PinholeOptions Options(
         byte[]? seed = null,
         IReadOnlyList<IPEndPoint>? rendezvous = null,
@@ -49,8 +42,6 @@ public sealed class RediscoveryTests
         ConnectTimeout = connectTimeout ?? DialTimeout,
     };
 
-    /// <summary>Binds until the node's port differs from a previous one, so a test can prove
-    /// a reconnect came from rediscovery rather than OS port reuse.</summary>
     private static async Task<PinholeNode> BindOnFreshPortAsync(PinholeOptions options, int oldPort, ITestOutputHelper output)
     {
         for (int attempt = 0; attempt < 5; attempt++)
@@ -359,9 +350,6 @@ public sealed class RediscoveryTests
         }
     }
 
-    /// <summary>The exact acceptance criterion of #29: when a ticket's candidates are all
-    /// dead, the dial heals through the lookup route. Here the revived peer moved ports and
-    /// we assert the fresh record's endpoint was actually adopted by the dial.</summary>
     [Fact]
     public async Task AllCachedAddressesDead_RediscoveredRecordCarriesTheDial()
     {
@@ -395,8 +383,6 @@ public sealed class RediscoveryTests
 
     // ------------------------------------------------------------------ adversarial providers
 
-    /// <summary>A lookup provider the test fully controls: serves whatever bytes it is told
-    /// to, exactly like a hostile or compromised directory would.</summary>
     private sealed class PoisonProvider : IPinholeLookupProvider
     {
         public byte[]? Served { get; set; }
@@ -556,8 +542,6 @@ public sealed class RediscoveryTests
         return stranger.ConnectionString;
     }
 
-    /// <summary>Polls the introducer until a raw WANT for the peer yields a record-bearing
-    /// INTRO — the observable proof the peer's publish landed.</summary>
     private static async Task UntilRecordServedAsync(RendezvousServer server, ulong peerId)
     {
         using Socket probe = TalkSocket();
@@ -578,9 +562,6 @@ public sealed class RediscoveryTests
         throw new TimeoutException($"no record published for peer {peerId:x16}");
     }
 
-    /// <summary>Waits until the record the server currently serves is the fresh one — the
-    /// decoded, verified record carries the expected port. Any earlier record under the
-    /// same peer id (a disposed predecessor's) must not satisfy this wait.</summary>
     private static async Task UntilRecordServesPortAsync(
         RendezvousServer server, ulong peerId, byte[] endpointKey, int port)
     {

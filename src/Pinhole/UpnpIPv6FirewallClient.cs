@@ -7,14 +7,8 @@ using System.Xml.Linq;
 
 namespace Pinhole;
 
-/// <summary>A concrete LAN source for router control. The index is local routing
-/// state and never becomes part of an advertised global IPv6 address.</summary>
 internal readonly record struct IPv6LanSource(IPAddress Address, long InterfaceIndex);
 
-/// <summary>WANIPv6FirewallControl:1 creates filter leases, not translated addresses.
-/// Control HTTP is bound to the exact IPv6 InternalClient so ordinary IGD access
-/// control can verify that the request concerns this host. Only locally discovered,
-/// pinned link-local/ULA router addresses are contacted.</summary>
 internal static class UpnpIPv6FirewallClient
 {
     internal const string ServiceType = "urn:schemas-upnp-org:service:WANIPv6FirewallControl:1";

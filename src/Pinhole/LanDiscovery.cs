@@ -6,11 +6,8 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>One peer found on the local link, already assembled into a dialable form.</summary>
 public sealed record LanPeer(ulong PeerId, IReadOnlyList<IPEndPoint> Endpoints, NatHint NatHint, byte[]? StaticKey)
 {
-    /// <summary>The discovered peer as a dialable connection string — v2 (with the static
-    /// key) when the announcer runs encryption, v1 otherwise.</summary>
     public ConnectionString ToConnectionString() => new(
         PeerId,
         Endpoints.Select(e => new PinholeCandidate(CandidateKind.Direct, e)).ToList(),
@@ -18,13 +15,6 @@ public sealed record LanPeer(ulong PeerId, IReadOnlyList<IPEndPoint> Endpoints, 
         StaticKey);
 }
 
-/// <summary>Announces this node as <c>&lt;peer-id-hex&gt;._pinhole._udp.local</c> on the
-/// link (RFC 6762/6763 subset) and browses for peers doing the same — how two machines on
-/// one LAN find each other with no server at all. The announcement carries the peer ID,
-/// the static public key, the NAT hint, and the local addresses: everything a dialer needs
-/// to build a v2 connection string. The handshake proves possession of the advertised
-/// key; the announcement itself is untrusted discovery, not a verified device identity.
-/// Production traffic rides the mDNS multicast group; tests inject a direct channel.</summary>
 internal sealed class LanDiscovery : IDisposable
 {
     public const string Service = "_pinhole._udp.local";
@@ -105,8 +95,6 @@ internal sealed class LanDiscovery : IDisposable
         }
     }
 
-    /// <summary>The full record set — PTR, SRV, TXT, and one address record per local
-    /// address — as one mDNS response. TTL 0 makes the same packet the goodbye.</summary>
     private void SendAnnouncement(uint ttl, IPEndPoint? unicastTo = null)
     {
         IReadOnlyList<IPAddress> addresses = AnnouncementAddresses(_addresses());
@@ -156,8 +144,6 @@ internal sealed class LanDiscovery : IDisposable
 
     private string AddressSet() => string.Join(",", _addresses().Select(a => a.ToString()).Order(StringComparer.Ordinal));
 
-    /// <summary>Reserve room for both families and link-local fallback before filling
-    /// the remaining slots. A machine with many IPv4/VPN addresses must not lose IPv6.</summary>
     internal static IReadOnlyList<IPAddress> AnnouncementAddresses(IReadOnlyList<IPAddress> addresses)
     {
         var all = addresses.Distinct().ToArray();
@@ -178,9 +164,6 @@ internal sealed class LanDiscovery : IDisposable
 
     // ------------------------------------------------------------------ browsing
 
-    /// <summary>Asks the link who else is a pinhole node and collects answers for one
-    /// window — both responses to the query and unsolicited announcements count. Two
-    /// queries a second apart cover ordinary loss.</summary>
     public static async Task<IReadOnlyList<LanPeer>> BrowseAsync(ILanChannel channel, TimeSpan window, CancellationToken ct)
     {
         byte[] query = BuildQuery();
@@ -257,29 +240,18 @@ internal sealed class LanDiscovery : IDisposable
     internal static string IdText(ulong peerId) => peerId.ToString("x16");
     internal static string HostOf(ulong peerId) => IdText(peerId) + HostSuffix;
 
-    /// <summary>Exactly 16 hex digits — strictly digits (TryParse with HexNumber would
-    /// accept signs and whitespace, which hex decoding later rejects).</summary>
     internal static bool IsHex16(string text) => text.Length == 16 && text.All(Uri.IsHexDigit);
 }
 
-/// <summary>Where announcements and queries travel. Production rides the mDNS multicast
-/// group; tests inject a direct channel so no OS multicast runs in CI.</summary>
 internal interface ILanChannel : IDisposable
 {
-    /// <summary>Sends one packet — to the group, or to one querier answering a legacy
-    /// unicast query. Null means "the group".</summary>
     void Send(ReadOnlySpan<byte> packet, IPEndPoint? unicastTo);
 
-    /// <summary>Receives one datagram if any arrives within the timeout.</summary>
     bool TryReceive(byte[] buffer, out int length, out IPEndPoint from, int timeoutMs);
 
-    /// <summary>The local IPv6 interface index for the last received packet, including
-    /// IPv4 packets carrying AAAA records. Zero when the channel cannot determine it.</summary>
     long LastReceiveIpv6Scope => 0;
 }
 
-/// <summary>Shared-port IPv4 and IPv6 mDNS sockets, joined on each active multicast
-/// interface. An unavailable family or membership does not disable the others.</summary>
 internal sealed class MulticastLanChannel : ILanChannel
 {
     public static readonly IPEndPoint GroupV4 = new(IPAddress.Parse("224.0.0.251"), 5353);
@@ -474,9 +446,6 @@ internal sealed class MulticastLanChannel : ILanChannel
     }
 }
 
-/// <summary>Strict, minimal DNS wire codec: one PTR question out, the pinhole record set
-/// in. Anything hostile — pointer loops, oversized labels, truncated sections, absurd
-/// counts — costs the packet, never the process.</summary>
 internal static class DnsCodec
 {
     private const ushort TypeA = 1, TypePtr = 12, TypeTxt = 16, TypeAaaa = 28, TypeSrv = 33;
@@ -485,8 +454,6 @@ internal static class DnsCodec
     private const int MaxNameJumps = 128;
     private const int MaxRecords = 256;
 
-    /// <summary>A record worth keeping, flattened: what it was and where its rdata lives
-    /// in the packet (names stay packet-relative — compression survives that way).</summary>
     private readonly record struct WireRecord(ushort Type, int RdataStart, int RdataLength);
 
     public sealed class Writer
@@ -602,8 +569,6 @@ internal static class DnsCodec
         private void AppendU32(uint v) { _buf.Add((byte)(v >> 24)); _buf.Add((byte)(v >> 16)); _buf.Add((byte)(v >> 8)); _buf.Add((byte)v); }
     }
 
-    /// <summary>True when the packet carries a PTR question for the pinhole service — the
-    /// trigger to answer. Questions from any source port count (legacy queries).</summary>
     public static bool AsksForOurService(ReadOnlySpan<byte> packet)
     {
         var reader = new Reader(packet);
@@ -629,9 +594,6 @@ internal static class DnsCodec
         return false;
     }
 
-    /// <summary>Parses one mDNS response into peers. A peer counts only with SRV, TXT, and
-    /// at least one address record under the same instance name — the dialable minimum;
-    /// a v2 announcer additionally yields the static key for key-pinned dialing.</summary>
     public static bool TryParsePeers(ReadOnlySpan<byte> packet, out IReadOnlyList<LanPeer> peers)
     {
         peers = Array.Empty<LanPeer>();
@@ -699,8 +661,6 @@ internal static class DnsCodec
         return found.Count > 0;
     }
 
-    /// <summary>Collects the SRV/TXT/address records under one instance and assembles the
-    /// peer — null when the dialable minimum is missing.</summary>
     private static LanPeer? BuildPeer(ReadOnlySpan<byte> packet, List<WireRecord> records, List<string> owners, string instance)
     {
         if (!LanDiscovery.IsHex16(instance))
@@ -879,9 +839,6 @@ internal static class DnsCodec
             return true;
         }
 
-        /// <summary>Reads one domain name, chasing compression pointers. A pointer must
-        /// point strictly backwards — forward pointers are how loops hide — and every hop
-        /// lands on a smaller offset, so the jump cap is belt-and-braces.</summary>
         public bool TryName(out string name)
         {
             name = "";

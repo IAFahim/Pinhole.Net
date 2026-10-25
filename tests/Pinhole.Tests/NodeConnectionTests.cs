@@ -150,7 +150,6 @@ public sealed class NodeConnectionTests
         await ExchangeAsync(n1, c01, n0); // unaffected by the join
     }
 
-    /// <summary>Sends a marker on the dialer-side connection and expects it on the peer node.</summary>
     private static async Task ExchangeAsync(PinholeNode from, PinholeConnection conn, PinholeNode peer)
     {
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);

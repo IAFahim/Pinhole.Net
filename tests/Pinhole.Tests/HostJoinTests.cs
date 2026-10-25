@@ -7,9 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>#45 M2: the minimal host/join-by-code API over the real in-process rendezvous
-/// code directory and the real engine. All cases run on loopback with offline node options;
-/// the transport beneath is the unchanged UDP/TCP/relay engine.</summary>
 public sealed class HostJoinTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
@@ -95,8 +92,39 @@ public sealed class HostJoinTests
         Assert.Equal(new byte[] { 7, 7, 7 }, received.Value.ToArray());
 
         // The joiner can verify out of band what the host displays.
-        string joinerView = PinholeHost.Fingerprint(Encoding.UTF8.GetBytes(host.FullInvitation));
-        Assert.Equal(host.ConfirmationCode.Replace("-", ""), joinerView);
+        Assert.Equal(host.ConfirmationCode, joined.RemoteConfirmationCode);
+    }
+
+    [Fact]
+    public async Task ConfirmationCode_IsIdentityOnly_AndSurvivesCandidateChurn()
+    {
+        await using var server = RendezvousServer.Start();
+        await using var host = await PinholeSession.HostAsync(HostSettings(server)).WaitAsync(Timeout);
+        Task<PinholeConnection> accepted = host.AcceptAsync();
+        await using var joined = await PinholeSession.JoinAsync(host.Code, JoinSettings(server)).WaitAsync(Timeout);
+        await using var hosting = await accepted.WaitAsync(Timeout);
+
+        // Both sides can compare: the joiner sees the host's code, the host sees the
+        // joiner's handshake-delivered key fingerprinted the same way.
+        Assert.Equal(host.ConfirmationCode, joined.RemoteConfirmationCode);
+        Assert.NotNull(hosting.RemoteConfirmationCode);
+        Assert.NotEqual(host.ConfirmationCode, hosting.RemoteConfirmationCode);
+
+        // C-09: the code fingerprints identity, not candidates. A roam or STUN refresh
+        // rewrites the invitation's candidate list; host and joiner codes must not move.
+        ConnectionString before = ConnectionString.Parse(host.FullInvitation);
+        var roamed = new ConnectionString(
+            before.PeerId,
+            [.. before.Candidates, new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, 65001))],
+            before.NatHint, before.StaticKey, before.EndpointKey);
+        Assert.Equal(
+            host.ConfirmationCode,
+            PinholeHost.FormatConfirmation(PinholeHost.ConfirmationFingerprint(roamed.PeerId, roamed.StaticKey, roamed.EndpointKey)));
+
+        // It is still a fingerprint: different identity material changes the code.
+        Assert.NotEqual(
+            host.ConfirmationCode,
+            PinholeHost.FormatConfirmation(PinholeHost.ConfirmationFingerprint(before.PeerId + 1, before.StaticKey, before.EndpointKey)));
     }
 
     [Fact]
@@ -231,7 +259,11 @@ public sealed class HostJoinTests
         Assert.Equal(string.Empty, await Roundtrip($"PUTC ABCDEFG {huge}")); // ignored, no reply
         Assert.Equal(string.Empty, await Roundtrip("PUTC has space and invalid {A}"));
         Assert.StartsWith("OKCG ", await Roundtrip("PUTC ABCDEFG AAAAAAAA"));
-        Assert.StartsWith("OKCC ", await Roundtrip("GETC ABCDEFG"));
+        // A bare GETC proves nothing about the source: the record only leaves after the
+        // endpoint-bound cookie comes back (A-07).
+        string challenge = await Roundtrip("GETC ABCDEFG");
+        Assert.StartsWith("CHAL ABCDEFG ", challenge);
+        Assert.StartsWith("OKCC ", await Roundtrip($"GETC ABCDEFG {challenge.Split(' ')[^1]}"));
         Assert.Equal("WAITC", await Roundtrip("GETC NOSUCHCODE"));
         Assert.Equal("TokB", await Roundtrip("DELC ABCDEFG wrong-token"));
     }

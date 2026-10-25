@@ -239,7 +239,6 @@ public sealed class PathStatsTests
 
 internal static class TestWait
 {
-    /// <summary>Waits until the read produces a non-null value (e.g. LastRtt before the first pong).</summary>
     public static async Task<TimeSpan> UntilRttAsync(TimeSpan budget, Func<TimeSpan?> read)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();

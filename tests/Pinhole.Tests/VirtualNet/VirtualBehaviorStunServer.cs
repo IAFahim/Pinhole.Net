@@ -5,8 +5,6 @@ using System.Net.Sockets;
 
 namespace Pinhole.Tests;
 
-/// <summary>Independent four-address RFC 5780 responder. It actually sends changed
-/// responses from another virtual socket, so NAT inbound filters decide delivery.</summary>
 internal sealed class VirtualBehaviorStunServer : IDisposable
 {
     private readonly VirtualUdpSocket[] _sockets;

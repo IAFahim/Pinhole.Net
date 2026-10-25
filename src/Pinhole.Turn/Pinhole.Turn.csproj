@@ -20,6 +20,10 @@
 </PropertyGroup>
 
 	<ItemGroup>
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
 	  <PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers" Version="5.6.0">
 	    <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 	    <PrivateAssets>all</PrivateAssets>

@@ -9,9 +9,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Adversarial suite: malformed wire input, spoofed frames, stranger floods,
-/// parser fuzzing, disposal races. Every test here documents something that used to be
-/// breakable — the assertions are the fix's contract.</summary>
 public sealed class AttackTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -37,11 +34,6 @@ public sealed class AttackTests
         return (dialerSide, listenerSide);
     }
 
-    /// <summary>A connection string carrying only the listener's loopback candidate: on a
-    /// multi-homed machine (CI runners have several interfaces), the legitimate peer's
-    /// source address stays 127.0.0.1 for the whole test instead of following whichever
-    /// interface the OS picked last. The spoofing assertions below compare against exactly
-    /// that stable remote endpoint.</summary>
     private static string LoopbackString(PinholeNode listener) => new ConnectionString(
         listener.PeerId,
         [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, listener.LocalPort))],
@@ -195,10 +187,6 @@ public sealed class AttackTests
         Assert.Equal("through the flood"u8.ToArray(), await got.Task.WaitAsync(TimeSpan.FromSeconds(1)));
     }
 
-    /// <summary>A-01: stranger husks that never complete a handshake must be reaped after
-    /// the connect timeout, or a junk-peer flood permanently fills the table and every
-    /// later legitimate inbound stranger is dropped until restart — the cap protects
-    /// memory and then denies service.</summary>
     [Fact]
     public async Task StrangerHusks_AreReapedAfterConnectTimeout_AllowingRealPeersIn()
     {
@@ -233,11 +221,6 @@ public sealed class AttackTests
         Assert.True(conn.IsEncrypted);
     }
 
-    /// <summary>The 1024 cap proven with REAL handshakes instead of raw datagrams (#34
-    /// seam): a listener whose MaxConnectionsOverride is 4 admits exactly four strangers,
-    /// refuses the rest (their PUNCs stop materializing state, so their dials only ever
-    /// see silence), and hands the freed slot to the next stranger the moment one
-    /// admitted connection closes.</summary>
     [Fact]
     public async Task MaxConnectionsFlood_RealHandshakes_RefusesOverflowAndRecovers()
     {
@@ -591,8 +574,6 @@ public sealed class AttackTests
         new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
 
 
-    /// <summary>Answers one STUN request with a transaction-matching response whose one
-    /// attribute claims 64 KB and ships 4 bytes — the malformed-length attack.</summary>
     private static Task RespondEvilStunAsync(Socket evil, byte[] request, ushort attributeType) =>
         Task.Run(() =>
         {
@@ -615,8 +596,6 @@ public sealed class AttackTests
         return (evil, (IPEndPoint)evil.LocalEndPoint!, new byte[64]);
     }
 
-    /// <summary>Answers the allocation handshake twice — an error-ish reply, then a success
-    /// Allocate that grants no relayed address at all: a server that lies about success.</summary>
     private static Task RespondEmptyTurnAsync(Socket liar) =>
         Task.Run(async () =>
         {

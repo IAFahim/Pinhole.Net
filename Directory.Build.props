@@ -2,6 +2,8 @@
 
 	<PropertyGroup>
 		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<!-- No /// XML doc comments in this repo (see AGENTS.md); missing-doc warnings stay off. -->
+		<NoWarn>$(NoWarn);CS1570;CS1571;CS1572;CS1573;CS1587;CS1591</NoWarn>
 		<Authors>IAFahim</Authors>
 		<Version>1.9.0</Version>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>

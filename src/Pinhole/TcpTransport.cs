@@ -4,8 +4,6 @@ using System.Threading.Channels;
 
 namespace Pinhole;
 
-/// <summary>Bounded managed TCP sidecar. Framing negotiates the transport only: the
-/// session dispatcher must independently authenticate the peer before selecting it.</summary>
 internal sealed class TcpTransport : IDisposable
 {
     internal static ReadOnlySpan<byte> Preface => "PHNTCP1\n"u8;
@@ -186,8 +184,6 @@ internal sealed class TcpTransport : IDisposable
     }
 }
 
-/// <summary>One framed stream, with a short unauthenticated lifetime, a bounded
-/// writer queue and one receiving loop. All frame buffers belong to this link.</summary>
 internal sealed class TcpLink : IDisposable
 {
     private readonly Stream _stream;
@@ -244,8 +240,6 @@ internal sealed class TcpLink : IDisposable
         return (new NetworkStream(socket, ownsSocket: true), remote);
     }
 
-    /// <summary>Even before authentication, one stream may name only one peer. A
-    /// stranger cannot populate the session table with many IDs on a single stream.</summary>
     internal bool BindPeer(ulong peerId)
     {
         return Volatile.Read(ref _disposed) == 0 && _proof.Bind(peerId);
@@ -332,7 +326,6 @@ internal sealed class TcpLink : IDisposable
 
     internal void CloseGracefully() => _outgoing.Writer.TryComplete();
 
-    /// <summary>Single-shot teardown; true when THIS call performed it.</summary>
     private bool TryDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;

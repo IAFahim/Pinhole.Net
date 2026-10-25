@@ -5,8 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>An in-process STUN responder that builds RFC 5389 wire bytes by hand, so the
-/// client's XOR decoding (v4 and v6) is exercised against exact recorded-style vectors.</summary>
 public sealed class FakeStunServer : IDisposable
 {
     private const uint Cookie = 0x2112A442;
@@ -26,13 +24,8 @@ public sealed class FakeStunServer : IDisposable
 
     public IPEndPoint LocalEndPoint { get; }
 
-    /// <summary>When set, a response with a random (never-matching) transaction id is sent
-    /// before the real reply, exercising the client's txid mismatch rejection.</summary>
     public bool SendDecoyFirst { get; set; }
 
-    /// <summary>When set, the server claims THIS endpoint is the client's mapped address
-    /// instead of the observed one — simulating a NAT that assigns a mapping per
-    /// destination (what NatDetector must call Symmetric).</summary>
     public IPEndPoint? ReportMappedOverride { get; set; }
 
     private async Task RunAsync()

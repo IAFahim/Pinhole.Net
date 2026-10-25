@@ -2,8 +2,6 @@ using System.Net;
 
 namespace Pinhole;
 
-/// <summary>Keep introductions, router grants and source diversity when a bounded
-/// interface pool would otherwise fill the ticket with STUN mappings.</summary>
 internal static class CandidateSelection
 {
     internal static PinholeCandidate[] Published(IReadOnlyList<PinholeCandidate> candidates,

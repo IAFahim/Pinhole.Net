@@ -226,6 +226,7 @@ Pinhole.PinholeConnection.Ping() -> void
 Pinhole.PinholeConnection.ReadAllAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Collections.Generic.IAsyncEnumerable<System.ReadOnlyMemory<byte>>!
 Pinhole.PinholeConnection.ReceiveAsync(System.Threading.CancellationToken ct = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.ReadOnlyMemory<byte>?>
 Pinhole.PinholeConnection.Received -> Pinhole.PinholeDatagramHandler?
+Pinhole.PinholeConnection.RemoteConfirmationCode.get -> string?
 Pinhole.PinholeConnection.RemoteStaticKey.get -> byte[]?
 Pinhole.PinholeConnection.Send(System.ReadOnlySpan<byte> payload) -> void
 Pinhole.PinholeConnection.State.get -> Pinhole.PinholeConnectionState

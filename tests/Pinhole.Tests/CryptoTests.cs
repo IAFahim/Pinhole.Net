@@ -649,9 +649,6 @@ public class CryptoTests
 
     // ---------------------------------------------------------------- wire-level oracle peer
 
-    /// <summary>Speaks the real wire protocol with a real handshake: proves the node's frames
-    /// are sealed on the wire, byte for byte, and that forged/replayed frames die at the
-    /// receiver.</summary>
     private sealed class OraclePeer : IDisposable
     {
         public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -706,8 +703,6 @@ public class CryptoTests
             return punc;
         }
 
-        /// <summary>Waits for the node's crypto PUNC, derives the same keys, answers PACK.
-        /// The node must already be dialing this peer.</summary>
         public async Task ShakeHandsAsync(PinholeNode node, CancellationToken ct = default, uint? advertisedToken = null)
         {
             var nodeEp = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
@@ -747,7 +742,6 @@ public class CryptoTests
             await Sock.SendToAsync(SealFrame(0x53, new byte[8]), nodeEp, ct);
         }
 
-        /// <summary>Builds one sealed frame exactly the way the engine does.</summary>
         public byte[] SealFrame(byte type, ReadOnlySpan<byte> body)
         {
             var f = new byte[9 + 4 + CryptoWire.SealedOverhead + body.Length];
@@ -758,7 +752,6 @@ public class CryptoTests
             return f;
         }
 
-        /// <summary>Receives until a sealed frame from the node opens under the session keys.</summary>
         public async Task<(byte Type, byte[] Body)?> ReceiveSealedAsync(TimeSpan timeout, byte? wantType = null)
         {
             using var cts = new CancellationTokenSource(timeout);

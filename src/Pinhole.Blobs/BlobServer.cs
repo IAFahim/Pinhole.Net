@@ -4,25 +4,13 @@ using System.Security.Cryptography;
 
 namespace Pinhole.Blobs;
 
-/// <summary>Options for serving content. <see cref="NodeOptions"/> overrides the serving
-/// node's configuration entirely (offline test setups pass infrastructure-empty options);
-/// listen and receive buffering are forced on regardless, because a serving node that
-/// cannot accept or that drops the handshake race is not a serving node.</summary>
 public sealed record BlobServeOptions
 {
-    /// <summary>Wrap every blob frame in ChaCha20-Poly1305 with a ticket-borne key
-    /// (default true). Public relays forward ciphertext only; integrity is double-covered
-    /// by BLAKE3. Disable for trusted high-speed LANs.</summary>
     public bool Encrypt { get; init; } = true;
 
-    /// <summary>Full <see cref="Pinhole.PinholeOptions"/> override for the dedicated
-    /// serving node. Defaults (null) resolve the free STUN catalog and public relays.</summary>
     public PinholeOptions? NodeOptions { get; init; }
 }
 
-/// <summary>The sendme model, Pinhole edition: a temporary dedicated node that serves one
-/// file or one directory tree to whoever presents the ticket, verified chunk by chunk,
-/// until disposed. Dispose stops serving and releases the node; the ticket dies with it.</summary>
 public sealed class BlobServer : IAsyncDisposable
 {
     private readonly PinholeNode _node;
@@ -53,8 +41,6 @@ public sealed class BlobServer : IAsyncDisposable
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_stop.Token));
     }
 
-    /// <summary>Mints a fresh ticket each call — the embedded connection string reflects
-    /// the node's current candidates, so a ticket grabbed after a roam is the one to share.</summary>
     public BlobTicket Ticket => new()
     {
         Kind = _kind,
@@ -71,10 +57,8 @@ public sealed class BlobServer : IAsyncDisposable
 
     private long _chunksServed;
 
-    /// <summary>Total verified chunks sent across all connections — a live activity counter.</summary>
     public long ChunksServed => Interlocked.Read(ref _chunksServed);
 
-    /// <summary>The serving node, exposed so lab tests can roam it mid-transfer.</summary>
     internal PinholeNode Node => _node;
 
     internal int ActiveServingTasks
@@ -84,28 +68,14 @@ public sealed class BlobServer : IAsyncDisposable
 
     private long _connectionsAccepted;
 
-    /// <summary>Total downloader connections accepted so far.</summary>
     public long ConnectionsAccepted => Interlocked.Read(ref _connectionsAccepted);
 
-    /// <summary>Deterministic loss seam for tests: called with each chunk index about to
-    /// be sent; returning true silently drops that chunk (the client's re-request machinery
-    /// must heal it).</summary>
     internal Func<long, bool>? DropChunk { get; set; }
 
-    /// <summary>Deterministic corruption seam for tests: receives (index, bytes) right
-    /// before send; mutating the bytes simulates a lying provider whose chunk no longer
-    /// hashes to the CV it was advertised with.</summary>
     internal Action<long, byte[]>? CorruptChunk { get; set; }
 
-    /// <summary>Deterministic duplication seam for tests: when it returns true for an
-    /// index, the chunk frame is sent twice — a confused provider or a duplicating
-    /// network path, exercising the downloader's duplicate accounting.</summary>
     internal Func<long, bool>? DuplicateChunk { get; set; }
 
-    /// <summary>Hashes the file or directory tree at <paramref name="path"/> once, binds a
-    /// dedicated serving node, and starts serving whoever presents the ticket — until this
-    /// server is disposed. Throws <see cref="FileNotFoundException"/> when the path is
-    /// neither a file nor a directory.</summary>
     public static async Task<BlobServer> ServeAsync(string path, BlobServeOptions? options = null, CancellationToken ct = default)
     {
         options ??= new BlobServeOptions();
@@ -308,9 +278,10 @@ public sealed class BlobServer : IAsyncDisposable
                 }
             }
         }
-        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException)
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException or IOException)
         {
-            // The downloader vanished mid-transfer; the next ticket holder starts clean.
+            // The downloader vanished mid-transfer, or the served source failed its
+            // snapshot check (A-12): the next ticket holder starts clean either way.
         }
         finally
         {
@@ -327,9 +298,6 @@ public sealed class BlobServer : IAsyncDisposable
         return SendFrameAsync(conn, wire);
     }
 
-    /// <summary>Every provider→downloader frame — Welcome and Head included — rides out the
-    /// connection's transient states: a directory download sends a fresh Hello per stream,
-    /// and a server-side roam during stream N+1's handshake must not kill the pump.</summary>
     private ValueTask SendFrameAsync(PinholeConnection conn, byte[] wire) =>
         BlobWire.SendRidingOutPathlessnessAsync(conn, wire, _stop.Token);
 
@@ -356,9 +324,6 @@ public sealed class BlobServer : IAsyncDisposable
         }
     }
 
-    /// <summary>Stops serving and releases the node; in-flight downloaders see their
-    /// streams end. Waits for their workers to release all open files before returning.
-    /// The ticket dies with the server.</summary>
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
@@ -380,7 +345,6 @@ public sealed class BlobServer : IAsyncDisposable
         await Task.WhenAll(serving).ConfigureAwait(false);
     }
 
-    /// <summary>Mutable frame counter shared by a connection's send path.</summary>
     private sealed class Counter
     {
         private ulong _value;
@@ -401,12 +365,39 @@ public sealed class BlobServer : IAsyncDisposable
         public bool IsManifest => InMemory is not null;
         public List<Served> Entries { get; } = new();
 
+        // A-12 snapshot: the exact on-disk state the tree was computed over. A file
+        // that does not match it at serve time can never verify against the ticket's
+        // root, so serving it would only produce receiver-side failures.
+        public long SourceLength { get; init; } = -1;
+        public DateTime SourceModifiedUtc { get; init; }
+
         public async Task<byte[]> ReadChunkAsync(long idx, Dictionary<ulong, FileStream> files, CancellationToken ct)
         {
             int len = (int)Math.Min(Blake3.ChunkSize, TotalBytes - idx * Blake3.ChunkSize);
             if (InMemory is { } mem)
             {
                 return mem.AsSpan((int)(idx * Blake3.ChunkSize), len).ToArray();
+            }
+
+            long currentLength;
+            DateTime currentModified;
+            try
+            {
+                var info = new FileInfo(FilePath!);
+                currentLength = info.Length; // a vanished file throws: that fails fast too
+                currentModified = info.LastWriteTimeUtc;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                Telemetry.FrameRejected("blob", "source-changed");
+                throw new IOException($"{DisplayName} disappeared after it was hashed; the ticket's tree can no longer be served", ex);
+            }
+
+            if (currentLength != SourceLength || currentModified != SourceModifiedUtc)
+            {
+                Telemetry.FrameRejected("blob", "source-changed");
+                throw new IOException(
+                    $"{DisplayName} changed after it was hashed ({SourceLength} B -> {currentLength} B); refusing to serve chunks that cannot verify against the ticket's root");
             }
 
             ulong stream = BlobWire.StreamId(Root);
@@ -468,16 +459,27 @@ public sealed class BlobServer : IAsyncDisposable
                 tree.Update(buffer.AsSpan(0, read));
             }
 
+            // Fail fast when the file moved under the hash itself (POSIX does not
+            // enforce FileShare.Read): the tree the ticket would advertise never existed.
+            long length = fs.Length;
+            if (tree.TotalBytes != length)
+            {
+                throw new IOException($"{display} changed while it was being hashed ({tree.TotalBytes} bytes hashed, {length} bytes on disk)");
+            }
+
+            DateTime modifiedUtc = File.GetLastWriteTimeUtc(path);
             byte[] rootHash = tree.RootHash();
             IReadOnlyList<byte[]> cvs = tree.ChunkCvs;
             return new Served
             {
                 Root = rootHash,
                 Cvs = cvs.ToArray(),
-                TotalBytes = fs.Length,
-                TotalChunks = (fs.Length + Blake3.ChunkSize - 1) / Blake3.ChunkSize, // 0 for the empty file
+                TotalBytes = length,
+                TotalChunks = (length + Blake3.ChunkSize - 1) / Blake3.ChunkSize, // 0 for the empty file
                 DisplayName = display,
                 FilePath = path,
+                SourceLength = length,
+                SourceModifiedUtc = modifiedUtc,
             };
         }
 

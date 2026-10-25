@@ -11,10 +11,6 @@ namespace Pinhole.Tests;
 [CollectionDefinition(nameof(LossLadderTimingCollection), DisableParallelization = true)]
 public sealed class LossLadderTimingCollection { }
 
-/// <summary>The loss ladder (#20): verified downloads under independent and
-/// Gilbert-Elliott loss, with per-rung goodput for the current congestion controller.
-/// Each rung owns its lab and directory. Completion/integrity checks stay in the
-/// functional suite; the fixed-seed curve comparison uses a fresh performance process.</summary>
 [Collection(nameof(LossLadderTimingCollection))]
 public sealed class LossLadderTests(ITestOutputHelper output)
 {
@@ -79,9 +75,6 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Fixed-seed baseline: compare 2%, 10% and bursty loss in the
-    /// dedicated performance process. Collection isolation alone cannot remove
-    /// runtime caches or residual background work from earlier functional tests.</summary>
     [Fact, Trait("Category", "Performance")]
     public async Task LadderCurve_GoodputFallsAsLossRises()
     {
@@ -98,9 +91,6 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         Assert.True(burst > at10 * 0.98, $"bursty-loss goodput ({burst:F0} B/s) must beat scattered 10% ({at10:F0} B/s)");
     }
 
-    /// <summary>#14's pause/resume-under-loss box: bursty loss, then the path vanishes for
-    /// three seconds mid-transfer, then returns. The ARQ's re-requests must ride through
-    /// the gap and the transfer must still verify.</summary>
     [Fact]
     public async Task PauseUnderLoss_BlackholeMidTransfer_ThenResumeAndVerify()
     {
@@ -141,13 +131,6 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>#36 regression: a file larger than the sink's reorder horizon (512
-    /// chunks) under loss. Before the horizon cap, requests raced up to a whole 1 MiB
-    /// window ahead of the applied prefix; arrivals past the 512-chunk reorder buffer
-    /// were dropped on the floor WITH their reservation consumed — counted as
-    /// duplicates on the wire and never re-requested (a guaranteed stall once a
-    /// leading chunk died first). Now requests stay inside the sliding horizon, so
-    /// duplicate bytes must stay a small fraction of the payload.</summary>
     [Fact]
     public async Task BeyondReorderHorizon_NoDuplicateFlood()
     {

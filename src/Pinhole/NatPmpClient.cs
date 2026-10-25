@@ -5,17 +5,10 @@ using System.Net.Sockets;
 
 namespace Pinhole;
 
-/// <summary>NAT-PMP client (RFC 6886): two datagram exchanges with the default gateway —
-/// its public address, then a UDP or TCP port mapping. Cheap, stateless, and present on most
-/// Apple routers and a long tail of others; silent failure is the normal outcome on
-/// networks without it.</summary>
 internal static class NatPmpClient
 {
     private static readonly int[] RetryDelaysMs = [0, 250, 500];
 
-    /// <summary>Requests a mapping for <paramref name="internalPort"/> from the first
-    /// gateway that answers. <paramref name="gatewayOverride"/> replaces OS gateway
-    /// discovery (test seam).</summary>
     public static async Task<PmpMapping?> TryMapAsync(IReadOnlyList<IPEndPoint>? gatewayOverride,
         int internalPort, TimeSpan lease, CancellationToken ct, ProtocolType protocol = ProtocolType.Udp)
     {
@@ -90,9 +83,6 @@ internal static class NatPmpClient
         return true;
     }
 
-    /// <summary>Send/retry/receive one PMP datagram exchange. Exactly one receive stays
-    /// pending across retries — a second concurrent receive on the same socket is an error,
-    /// and abandoning a timed-out one would trigger it.</summary>
     internal static async Task<byte[]?> RoundTripAsync(UdpClient udp, IPEndPoint gateway, byte[] request,
         int minLength, CancellationToken ct)
     {
@@ -134,7 +124,6 @@ internal static class NatPmpClient
         return null;
     }
 
-    /// <summary>A live NAT-PMP mapping plus the datagram handles to renew or release it.</summary>
     internal sealed class PmpMapping(IPEndPoint gateway, int internalPort, int externalPort,
         TimeSpan lifetime, IPEndPoint external, ProtocolType protocol = ProtocolType.Udp) : IPortMapLease
     {
@@ -164,8 +153,6 @@ internal static class NatPmpClient
     }
 }
 
-/// <summary>OS-level default-gateway discovery in pure BCL: the routing table's gateway
-/// list per interface. NAT-PMP requests IPv4 only; PCP can also use IPv6 gateways.</summary>
 internal static class GatewayDiscovery
 {
     public static IReadOnlyList<IPEndPoint> DefaultGateways(bool includeIpv6 = false)

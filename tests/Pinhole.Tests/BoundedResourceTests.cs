@@ -15,13 +15,6 @@ namespace Pinhole.Tests;
 [CollectionDefinition(nameof(ProcessResourceCollection), DisableParallelization = true)]
 public sealed class ProcessResourceCollection { }
 
-/// <summary>#34 — bounded resources: cancelled, recovered, and restarted transfers must
-/// hand back every reservation, socket, connection-table slot, and byte of heap they
-/// borrowed. Each test asserts the specific counter that would grow if the layer leaked —
-/// the budget's used-bytes, the lab's live-socket ledger, the node's connection table —
-/// and treats process heap only as a coarse slope check. Other test collections stay
-/// idle during the process-wide measurements. The env-gated soak
-/// (PINHOLE_SOAK_MINUTES) runs the same measurements over arbitrary durations.</summary>
 [Collection(nameof(ProcessResourceCollection))]
 public sealed class BoundedResourceTests(ITestOutputHelper output)
 {
@@ -394,11 +387,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The starvation regression at sustained size: 4 MiB through the
-    /// standard shaped link used to ride stall-timeout/re-dial cycles forever —
-    /// recovery re-reservations filled the budget and the pacer's window÷SRTT rate
-    /// collapsed quadratically. Now asserted to complete well inside the budget.
-    /// Env-gated: ~2.5 min on the shaped link is soak-scale, not unit-scale.</summary>
     [SoakFact]
     public async Task SustainedSize_ThroughTailDrop_DoesNotStarve()
     {
@@ -431,9 +419,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Opt-in two-client shaped-link soak. Records its seed, binaries,
-    /// post-warmup budgets and resource observations before accepting results.
-    /// Long outages, relays and roaming require additional workload coverage.</summary>
     [SoakFact]
     public async Task MixedWorkloadSoak()
     {
@@ -681,8 +666,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         return numerator / denominator;
     }
 
-    /// <summary>Skips unless PINHOLE_SOAK_MINUTES names a duration — the same mechanism as
-    /// RealNetFactAttribute: xunit v2 decides Skip at discovery, honest in every runner.</summary>
     private sealed class SoakFactAttribute : FactAttribute
     {
         public SoakFactAttribute()
@@ -696,9 +679,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
 
     // ------------------------------------------------------------------ plumbing
 
-    /// <summary>IProgress that reports synchronously on the caller's thread —
-    /// Progress&lt;T&gt; would marshal to the threadpool and reintroduce the
-    /// cancel-races-completion gap this suite exists to eliminate.</summary>
     private sealed class SyncProgress(Action<BlobProgress> on) : IProgress<BlobProgress>
     {
         public void Report(BlobProgress p) => on(p);

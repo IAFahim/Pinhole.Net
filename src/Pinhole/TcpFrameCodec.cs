@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 
 namespace Pinhole;
 
-/// <summary>The versioned TCP envelope around unchanged encrypted Pinhole frames.</summary>
 internal static class TcpFrameCodec
 {
     internal static byte[] Encode(ReadOnlySpan<byte> frame)

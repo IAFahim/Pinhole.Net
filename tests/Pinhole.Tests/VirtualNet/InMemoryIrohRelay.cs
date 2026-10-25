@@ -9,9 +9,6 @@ using Org.BouncyCastle.Crypto.Signers;
 
 namespace Pinhole.Tests;
 
-/// <summary>A bounded modeled relay speaking the independent server-side iroh
-/// challenge/auth/datagram layout. Production IrohRelay and session crypto still
-/// run unchanged. This fixture does not model real TLS, sockets or NAT traversal.</summary>
 internal sealed class InMemoryIrohRelay : IDisposable
 {
     internal sealed record Datagram(byte[] Source, byte[] Destination, byte[] Payload);

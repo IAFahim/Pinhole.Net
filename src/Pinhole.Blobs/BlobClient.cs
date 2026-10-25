@@ -5,71 +5,27 @@ using System.Threading.Channels;
 
 namespace Pinhole.Blobs;
 
-/// <summary>Live transfer progress: bytes whose chunks verified, the total pinned by the
-/// ticket, and file counts for directory tickets. <see cref="FilesDone"/> counts files
-/// whose roots verified completely — the file currently in flight is NOT included (its
-/// ordinal is <c>min(FilesDone + 1, FilesTotal)</c> for progress displays).</summary>
 public readonly record struct BlobProgress(long VerifiedBytes, long TotalBytes, int FilesDone, int FilesTotal);
 
-/// <summary>Outcome of a finished download: where the verified content landed, how many
-/// bytes verified, and whether an interrupted earlier attempt's checkpoint was reused.</summary>
 public sealed record BlobDownloadResult(string Path, long Bytes, bool Resumed);
 
-/// <summary>Options for a download. <see cref="NodeOptions"/> overrides the downloading
-/// node's configuration entirely; listen is forced off — a downloader dials, it does not
-/// accept.</summary>
 public sealed record BlobDownloadOptions
 {
-    /// <summary>Full <see cref="Pinhole.PinholeOptions"/> override for the dedicated
-    /// downloading node (offline tests pass infrastructure-empty options).</summary>
     public PinholeOptions? NodeOptions { get; init; }
 
-    /// <summary>Ceiling for this download's congestion window (default 1 MiB). The window
-    /// is a bound on outstanding requested-but-unverified chunk bytes — it starts small
-    /// and grows only as chunks verify. Must be at least 8 KiB.</summary>
     public long MaxWindowBytes { get; init; } = 1024 * 1024;
 
-    /// <summary>The aggregate in-flight budget this download joins. Null (the default)
-    /// joins <see cref="BlobFlowBudget.Shared"/>, the process-wide 8 MiB pie; pass a
-    /// private budget to isolate a download's wire footprint from everything else.</summary>
     public BlobFlowBudget? FlowBudget { get; init; }
 
-    /// <summary>Optional accumulator filled live during the transfer: verified vs
-    /// duplicate bytes, retransmits, loss events, RTT. Diagnostics and tests; null for
-    /// everyday downloads.</summary>
     public BlobTransferStats? Stats { get; init; }
 
-    /// <summary>How long the whole download may spend recovering: riding out pathlessness,
-    /// stalling past the 30 s per-attempt clock, and re-dialing the pinned provider all
-    /// draw down this one budget (default 10 minutes — a five-minute outage must be
-    /// survivable, per the recovery contract). Permanent rejection (a Bye) and tampered
-    /// frames never ride; they surface immediately. Zero disables recovery: the first
-    /// transport failure surfaces as a <see cref="TimeoutException"/> whose inner
-    /// exception names the attempt that died.</summary>
     public TimeSpan RecoveryTimeout { get; init; } = TimeSpan.FromMinutes(10);
 }
 
-/// <summary>The transport under a transfer went away — the connection closed, went quiet,
-/// or the per-attempt stall clock ran out. Recoverable by re-dialing the pinned provider
-/// and resuming from verified checkpoints, unlike a peer's refusal or a tampered frame,
-/// which are terminal facts about the content or the provider's intent.</summary>
 internal sealed class BlobTransportLostException(string message) : Exception(message);
 
-/// <summary>The receiving half of the ticket: dial the provider from the embedded
-/// connection string, drive range requests, verify every chunk as it lands (a corrupt
-/// chunk aborts immediately; a forged-but-consistent one cannot survive the final root
-/// check), and resume from on-disk part state when present. No unverified byte is ever
-/// written past the temporary part file. One node per download, disposed with it.</summary>
 public static class BlobClient
 {
-    /// <exception cref="TimeoutException">the transfer could not be re-established within
-    /// <see cref="BlobDownloadOptions.RecoveryTimeout"/>, or first contact timed out with
-    /// recovery disabled.</exception>
-    /// <exception cref="InvalidDataException">a chunk failed verification, the completed
-    /// root does not match the ticket, or the provider cancelled the stream — terminal
-    /// facts that no amount of re-dialing changes.</exception>
-    /// <exception cref="OperationCanceledException">the caller's token was honored
-    /// promptly, mid-transfer or mid-recovery.</exception>
     public static async Task<BlobDownloadResult> DownloadAsync(
         BlobTicket ticket,
         string destinationDirectory,
@@ -257,27 +213,16 @@ public static class BlobClient
         }
     }
 
-    /// <summary>Disruptions worth riding out: the connection closed or went quiet, an
-    /// attempt stalled (missing chunks with a live route is re-dialable), a send outlived
-    /// its ride-out budget on a dead connection, or a dial could not complete — all facts
-    /// about the ROUTE. A Bye, a tampered frame, a root mismatch, or a refused handshake —
-    /// the InvalidOperationException the dial faults with on a pinning or encryption
-    /// refusal — is a fact about the provider or the content, and stays terminal.</summary>
     private static bool IsTransportLoss(Exception ex, bool dialing) =>
         ex is BlobTransportLostException or TimeoutException or ObjectDisposedException
         || (ex is InvalidOperationException && !dialing);
 
-    /// <summary>One monotonic frame counter for the whole connection: every stream shares
-    /// it so the provider's per-connection replay check never sees a regression when a
-    /// directory download moves to its next file.</summary>
     private sealed class SendCounter
     {
         private ulong _value;
         public ulong Next() => ++_value;
     }
 
-    /// <summary>One monotonic allowance shared by every dial, stream, and outage in
-    /// this download. Healthy transfers do not spend it; recovery never resets it.</summary>
     internal sealed class RecoveryBudget(TimeSpan timeout, Func<long>? clock = null)
     {
         private readonly long _limitMs = (long)Math.Ceiling(timeout.TotalMilliseconds);
@@ -315,11 +260,6 @@ public static class BlobClient
 
     // ---------------------------------------------------------------- stream downloader
 
-    /// <summary>Receiver-driven ARQ over one blob stream, paced by the congestion
-    /// controller: requests anchored at the lowest unapplied chunk (a hostile sender
-    /// cannot make us buffer the far end of the file), per-chunk CV verification on
-    /// arrival, RTT-derived re-requests, and a stall clock that only verified progress
-    /// resets.</summary>
     private sealed class StreamDownloader
     {
         private readonly record struct ReceivedFrame(BlobWire.Frame Frame, long ArrivedAtMs);
@@ -516,10 +456,10 @@ public static class BlobClient
                             TopUpRequests(now);
                         }
 
-                        // The checkpoint is idempotent and tiny; a 50 ms gate keeps the
-                        // syscall rate sane, and the exit path below writes one final
-                        // checkpoint so a cancelled attempt always leaves its prefix —
-                        // resuming never depends on timer luck.
+                        // The checkpoint is dirty-checked (no write while Applied has
+                        // not moved) and the exit path below writes one final checkpoint
+                        // so a cancelled attempt always leaves its prefix — resuming
+                        // never depends on timer luck.
                         if (now - _lastCheckpointTicks >= (long)CheckpointPace.TotalMilliseconds)
                         {
                             _lastCheckpointTicks = now;
@@ -612,11 +552,6 @@ public static class BlobClient
             }
         }
 
-        /// <summary>Path watching: returns whether a usable path exists right now. A path
-        /// change (endpoint moved — roam, relay failover) or a return from sustained
-        /// pathlessness resets the controller conservatively and refreshes every
-        /// outstanding request's timer, so the resume probes instead of flooding a fresh
-        /// path with a stale window's worth of re-requests.</summary>
         private bool WatchPath(long now)
         {
             bool present = _conn.State is PinholeConnectionState.Open or PinholeConnectionState.Degraded;
@@ -791,13 +726,10 @@ public static class BlobClient
 
     // ---------------------------------------------------------------- sinks
 
-    private abstract class Sink
+    internal abstract class Sink
     {
         public long Applied { get; protected set; }
 
-        /// <summary>How many chunk positions past <see cref="Applied"/> an arrival may be
-        /// and still be kept. Requests beyond Applied + ReorderSpan would be dropped on
-        /// the floor on arrival — the downloader stays inside this horizon.</summary>
         public virtual long ReorderSpan => long.MaxValue;
 
         public abstract void Init(long totalBytes, long totalChunks);
@@ -809,12 +741,7 @@ public static class BlobClient
         public virtual void Abandon() { }
     }
 
-    /// <summary>Writes chunks to `<c>target.pinhole-part/data</c> in any arrival order,
-    /// feeds the hashing tree strictly in order from a bounded reorder buffer, and
-    /// checkpoints the applied-prefix length — an interrupted download resumes exactly at
-    /// that prefix. Completion: truncate to the exact size, final root, promote to the
-    /// real path, remove every trace of the part directory.</summary>
-    private sealed class FileSink(string target, byte[] root) : Sink
+    internal sealed class FileSink(string target, byte[] root) : Sink
     {
         private const string Magic = "PBPART01";
         private static readonly byte[] MagicBytes = System.Text.Encoding.ASCII.GetBytes(Magic);
@@ -830,6 +757,10 @@ public static class BlobClient
         private long _totalChunks;
 
         public bool Resumed { get; private set; }
+
+        internal long CheckpointWrites { get; private set; }
+
+        private long _checkpointedApplied = -1;
 
         public override void Init(long totalBytes, long totalChunks)
         {
@@ -851,6 +782,9 @@ public static class BlobClient
             }
 
             Applied = prefix;
+            // The on-disk state (or its absence at prefix 0) already claims exactly this
+            // prefix; the dirty check in Checkpoint relies on that bookkeeping.
+            _checkpointedApplied = prefix;
         }
 
         public override bool Apply(long index, byte[] data)
@@ -911,7 +845,10 @@ public static class BlobClient
 
         public override void Checkpoint()
         {
-            if (Applied == 0 || Applied >= _totalChunks)
+            // Dirty check (A-10): the control loop ticks this every 50 ms even while
+            // stalled, and each write is two fsyncs and a rename. The state is a pure
+            // function of Applied, so an unmoved cursor means the file is already right.
+            if (Applied == 0 || Applied >= _totalChunks || Applied == _checkpointedApplied)
             {
                 return;
             }
@@ -932,11 +869,10 @@ public static class BlobClient
                 snapshot.Flush(flushToDisk: true);
             }
             File.Move(temporary, Path.Combine(_partDir, "state"), overwrite: true);
+            _checkpointedApplied = Applied;
+            CheckpointWrites++;
         }
 
-        /// <summary>The resumable prefix: only the contiguous run of applied chunks from
-        /// zero — the hashing tree cannot skip, so anything past the first gap restarts
-        /// there. A foreign or corrupt state file restarts the whole download.</summary>
         private long TryLoadPrefix()
         {
             string statePath = Path.Combine(_partDir, "state");
@@ -973,9 +909,6 @@ public static class BlobClient
         }
     }
 
-    /// <summary>Small in-memory sink for the directory manifest. The applied cursor only
-    /// advances contiguously — same rule as the file sink, so "all chunks applied" means
-    /// every index is present, with no holes a hostile sender could skip past.</summary>
     private sealed class MemorySink : Sink
     {
         private readonly Dictionary<long, byte[]> _received = new();

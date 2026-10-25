@@ -8,9 +8,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>An in-process RFC 5766 TURN server that actually enforces the protocol: 401
-/// challenge, long-term-credential MESSAGE-INTEGRITY on every authenticated request,
-/// nonce rotation with 438, allocation expiry, and permission-gated relayed data.</summary>
 public sealed class FakeTurnServer : IDisposable
 {
     private const uint Cookie = 0x2112A442;
@@ -70,6 +67,7 @@ public sealed class FakeTurnServer : IDisposable
 
     public int StaleNonceReplies { get; private set; }
     public int RefreshSuccesses { get; private set; }
+    public int RefreshFailuresInjected { get; private set; }
     public int BadIntegrityRejections { get; private set; }
     public int ExpiredRejections { get; private set; }
     public int PermissionsGranted { get; private set; }
@@ -81,26 +79,15 @@ public sealed class FakeTurnServer : IDisposable
 
     public void RotateNonce() => Interlocked.Increment(ref _nonceVersion);
 
-    /// <summary>Test seam: the next N permission requests are silently dropped — a lost UDP
-    /// request that proves nothing about the allocation's health.</summary>
     public int DropNextPermissions;
 
-    /// <summary>Test seam: when non-zero, every authenticated ALLOCATE is refused with this
-    /// error code (e.g. 429 quota, 401 revoked credentials) and no allocation is made.
-    /// Counts in <see cref="AllocateRejections"/> so a test can bound retry storms.</summary>
+    public int FailNextRefreshesWithMismatch;
+
     public int RejectAllocationsWithCode;
-    /// <summary>Test seam: send one altered control response before the genuine response.
-    /// Data indications and unsigned authentication challenges are excluded.</summary>
     public Func<byte[], byte[]?>? InvalidResponseBeforeReply;
 
-    /// <summary>When true (the default), a data indication is only delivered to an
-    /// allocation that holds a permission for the SENDER's relayed address — the RFC 5766
-    /// receive-side gate real TURN servers enforce and the sender-side check above does
-    /// not. Turning it off reproduces the lab's historical permissive behavior.</summary>
     public bool StrictInbound = true;
 
-    /// <summary>Total successful allocations over this server's lifetime — a realloc flap
-    /// detector for the relay-recovery tests.</summary>
     public int Allocations { get; private set; }
 
     private string CurrentNonce => $"n{Volatile.Read(ref _nonceVersion) + 1}";
@@ -220,6 +207,14 @@ public sealed class FakeTurnServer : IDisposable
 
     private void HandleRefresh(EndPoint remote, byte[] msg, byte[] txid, List<(ushort Type, byte[] Value)> attrs)
     {
+        if (FailNextRefreshesWithMismatch > 0)
+        {
+            FailNextRefreshesWithMismatch--;
+            RefreshFailuresInjected++;
+            ReplyError(remote, TypeRefresh | ClassError, txid, 437, "Allocation Mismatch");
+            return;
+        }
+
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
         {
             BadIntegrityRejections++;
@@ -699,5 +694,27 @@ public sealed class TurnClientTests
         ValueTask dispose = a.DisposeAsync();
         await dispose.AsTask().WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(a.IsAlive);
+    }
+
+    [Fact]
+    public async Task ThreeFailedRefreshes_CloseTheSocketAndStopTheRefreshLoop()
+    {
+        // A-06: the three-failure close disposed the socket but never cancelled the
+        // refresh loop, which kept waking on a dead socket forever — one leaked task,
+        // timer, and Received subscription per lost allocation.
+        using FakeTurnServer server = new(lifetimeSeconds: 9);
+        TurnClient a = await TurnClient.AllocateAsync(server.Control, "user", "pass");
+        server.FailNextRefreshesWithMismatch = 100; // every refresh is a signed 437
+
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var poll = new System.Threading.Timer(
+            _ => { if (!a.IsAlive) closed.TrySetResult(); }, null, 0, 200);
+        await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.False(a.IsAlive);
+        Assert.Equal(3, server.RefreshFailuresInjected); // closed at exactly three
+
+        // The loop must observe the shutdown, not keep ticking on the disposed socket.
+        await a.RefreshLoopCompletion.WaitAsync(TimeSpan.FromSeconds(10));
+        await a.DisposeAsync();
     }
 }

@@ -5,11 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Golden bytes for the cross-machine wire and hashed formats (roadmap C-05):
-/// every multi-byte integer on the wire is little-endian by construction. These fixtures
-/// freeze today's exact bytes so a big-endian host, a culture change, or a future refactor
-/// that drifts the encoding fails loudly here instead of producing a different content
-/// root or an unparseable ticket on the wire.</summary>
 public sealed class WireGoldenTests
 {
     private static byte[] Root(int start) => Enumerable.Range(start, 32).Select(i => (byte)i).ToArray();

@@ -7,8 +7,6 @@ namespace Pinhole;
 
 internal sealed record StunBindingReply(IPEndPoint Mapped, IPEndPoint? Origin, IPEndPoint? Other);
 
-/// <summary>RFC 8489 binding messages and RFC 5780 behavior attributes. Source,
-/// local socket and all transaction bytes are checked by the receiving engine.</summary>
 internal static class StunBindingMessage
 {
     internal const uint Cookie = 0x2112A442;

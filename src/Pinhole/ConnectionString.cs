@@ -5,29 +5,19 @@ using System.Text;
 
 namespace Pinhole;
 
-/// <summary>Kind of candidate address a connection string can carry.</summary>
 public enum CandidateKind : byte
 {
-    /// <summary>A host address of the peer's own socket (LAN/local machine).</summary>
     Direct = 1,
 
-    /// <summary>The peer's server-reflexive address as observed by a STUN server (its NAT mapping).</summary>
     Reflexive = 2,
 
-    /// <summary>A TURN relayed address of the peer. Carries the TURN server and credentials
-    /// needed to reach the peer through that relay when the punch fails.</summary>
     Relay = 3,
 
-    /// <summary>Datagrams tunneled through an iroh HTTPS WebSocket relay.</summary>
     IrohRelay = 4,
 
-    /// <summary>Datagrams tunneled through a Tailcat-compatible DERP HTTPS relay.</summary>
     DerpRelay = 5,
 }
 
-/// <summary>One address a peer can be reached at. TURN candidates carry credentials; iroh and DERP
-/// candidates carry a relay URL (at most 64 ASCII characters) and the public relay identity key
-/// (Ed25519 for iroh, X25519 for DERP). Address is unused for these HTTPS candidates.</summary>
 public sealed record PinholeCandidate(
     CandidateKind Kind,
     IPEndPoint Address,
@@ -37,62 +27,33 @@ public sealed record PinholeCandidate(
     Uri? RelayUrl = null,
     byte[]? RelayKey = null);
 
-/// <summary>A NAT classification hint a publisher can embed in its connection string so
-/// dialers can pace direct probes while racing relay fallback.</summary>
 public enum NatHint : byte
 {
-    /// <summary>The publisher has not classified its NAT; dialers should attempt the punch.</summary>
     Unknown = 0,
 
-    /// <summary>Endpoint-independent mapping: the reflexive candidate is reusable, so a direct punch can land.</summary>
     Cone = 1,
 
-    /// <summary>Per-destination mapping: public direct paths depend on the other peer's
-    /// filtering behavior; LAN and explicit router mappings may still be reachable.</summary>
     Symmetric = 2,
 }
 
-/// <summary>The single discovery artifact: a stable peer ID plus every candidate address the
-/// peer is reachable on. Encoded as "pinhole1:&lt;base64url&gt;". How the string travels
-/// between peers — clipboard, lobby, your server — is the application's concern.</summary>
 public sealed class ConnectionString
 {
-    /// <summary>The scheme prefix ("pinhole1") every encoded string starts with; the digit is the format version.</summary>
     public const string Scheme = "pinhole1";
 
-    /// <summary>The most candidates one string may carry; the constructor throws above this.</summary>
     public const int MaxCandidates = 32;
 
-    /// <summary>The hard cap on encoded length accepted by <see cref="Parse"/> — longer strings are rejected as malformed, not parsed.
-    /// Sized so the worst legal string (32 fat relay candidates) fits: encoding one may reach ~7.4k characters.</summary>
     public const int MaxEncodedLength = 8192;
 
-    /// <summary>The peer's stable ID — the only part that survives roaming while every candidate address churns.</summary>
     public ulong PeerId { get; }
 
-    /// <summary>The NAT classification the publisher embedded, to steer dialers away from a hopeless punch.</summary>
     public NatHint NatHint { get; }
 
-    /// <summary>The peer's long-term X25519 public key (32 bytes) when the string was
-    /// published by an encryption-capable node (v2). Dialers pin the answering handshake to
-    /// this key, so no man in the middle can substitute itself. Null on v1 strings, whose
-    /// dialers fall back to plaintext when the local policy allows it.</summary>
     public byte[]? StaticKey { get; }
 
-    /// <summary>The peer's Ed25519 endpoint public key (32 bytes, v3): the key its signed
-    /// address records are verified against, letting a dialer adopt rediscovered endpoints
-    /// from a lookup provider without ever trusting the provider. Requires
-    /// <see cref="StaticKey"/>; null on v1/v2 strings, whose dialers never adopt
-    /// provider-supplied addresses.</summary>
     public byte[]? EndpointKey { get; }
 
-    /// <summary>Every address the peer is reachable on — direct, reflexive, and relay entries as published.</summary>
     public IReadOnlyList<PinholeCandidate> Candidates { get; }
 
-    /// <summary>Assembles a string from a peer ID, its candidates, a NAT hint, and optionally
-    /// the peer's 32-byte static public key (making a v2 string) plus its 32-byte endpoint
-    /// public key (making a v3 string). Throws <see cref="ArgumentOutOfRangeException"/>
-    /// above <see cref="MaxCandidates"/> candidates or for malformed keys.</summary>
     public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown,
         byte[]? staticKey = null, byte[]? endpointKey = null)
     {
@@ -123,9 +84,6 @@ public sealed class ConnectionString
         Candidates = candidates;
     }
 
-    /// <summary>Encodes as "pinhole1:..." (base64url, no padding). Payloads carrying both a
-    /// static and an endpoint key are version 3; static only, version 2; neither, version 1 —
-    /// the same envelope either way.</summary>
     public override string ToString()
     {
         bool keyed = StaticKey is not null;
@@ -155,8 +113,6 @@ public sealed class ConnectionString
         return Scheme + ":" + Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
     }
 
-    /// <summary>Attempts a <see cref="Parse"/> without throwing: returns false on any malformed
-    /// input (wrong scheme, bad base64url, wrong version, truncated or trailing payload).</summary>
     public static bool TryParse(string text, [NotNullWhen(true)] out ConnectionString? cs)
     {
         try
@@ -171,9 +127,6 @@ public sealed class ConnectionString
         }
     }
 
-    /// <summary>Strict parse: throws <see cref="FormatException"/> on anything but a well-formed
-    /// current-version string, and <see cref="ArgumentNullException"/> on null. Accepts at most
-    /// <see cref="MaxEncodedLength"/> characters and <see cref="MaxCandidates"/> candidates.</summary>
     public static ConnectionString Parse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -265,7 +218,6 @@ public sealed class ConnectionString
     }
 }
 
-/// <summary>Candidate TLV codec shared by connection strings and announce frames.</summary>
 internal static class CandidateCodec
 {
     private const int MaxText = 64;

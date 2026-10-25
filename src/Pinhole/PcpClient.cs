@@ -5,16 +5,10 @@ using System.Security.Cryptography;
 
 namespace Pinhole;
 
-/// <summary>Port Control Protocol client (RFC 6887): the successor to NAT-PMP, same UDP
-/// port, version 2 framing, nonce-guarded MAP requests. The nonce makes renewals
-/// idempotent — re-sending the same nonce updates the existing mapping in place.</summary>
 internal static class PcpClient
 {
     private static readonly int[] RetryDelaysMs = [0, 250, 500];
 
-    /// <summary>Requests a MAP for <paramref name="internalPort"/> from the first
-    /// PCP-capable gateway. <paramref name="gatewayOverride"/> replaces OS gateway
-    /// discovery (test seam).</summary>
     public static async Task<PcpMapping?> TryMapAsync(IReadOnlyList<IPEndPoint>? gatewayOverride,
         int internalPort, TimeSpan lease, CancellationToken ct, ProtocolType protocol = ProtocolType.Udp)
     {
@@ -140,8 +134,6 @@ internal static class PcpClient
         return null;
     }
 
-    /// <summary>A live PCP mapping; renewals reuse the nonce so the gateway updates this
-    /// mapping instead of allocating a second one.</summary>
     internal sealed class PcpMapping(IPEndPoint gateway, byte[] nonce, int internalPort,
         IPEndPoint external, TimeSpan lifetime, ProtocolType protocol = ProtocolType.Udp) : IPortMapLease
     {

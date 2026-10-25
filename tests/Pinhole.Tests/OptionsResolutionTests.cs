@@ -3,10 +3,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Issue #11: customizing one PinholeOptions setting must not silently drop the
-/// free STUN/relay defaults. Precedence per infrastructure setting: null = defaults,
-/// empty list = disabled, explicit entries = replace. All resolution goes through
-/// injected catalogs — no public-service dependency anywhere in this suite.</summary>
 public sealed class OptionsResolutionTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -192,6 +188,48 @@ public sealed class OptionsResolutionTests
             EnableNetworkWatch = false, EnablePortMapping = false,
             StunCatalog = Hanging,
         }, stopped.Token));
+    }
+
+    [Fact]
+    public async Task BlackHoledStunCatalog_CannotStallTheBind_BeyondItsBudget()
+    {
+        // A-08: catalog resolution ran before the bind's own probe budget even started,
+        // so a resolver that never answer stalled BindAsync indefinitely.
+        var never = new TaskCompletionSource<IPEndPoint[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var options = new PinholeOptions
+        {
+            Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
+            PublishIrohAddress = false, EnableLanDiscovery = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
+            BindProbeBudget = TimeSpan.FromSeconds(1),
+            StunCatalog = _ => never.Task,
+        };
+
+        using var backstop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using PinholeNode node = await PinholeNode.BindAsync(options, backstop.Token)
+            .WaitAsync(TimeSpan.FromSeconds(10)); // budget + slack + engine bind, never forever
+        Assert.Empty(node.PublicEndpoints); // the stall cost the STUN candidates, nothing else
+    }
+
+    [Fact]
+    public async Task CancelledWhileResolutionHangs_HaltsTheBindPromptly()
+    {
+        // A-08: a hanging catalog must not outwait the caller's token — cancellation
+        // halts the bind during resolution, it is not tolerated into an empty catalog.
+        var never = new TaskCompletionSource<IPEndPoint[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var options = new PinholeOptions
+        {
+            Relays = [], IrohRelayUrls = [], DerpRelayUrls = [],
+            PublishIrohAddress = false, EnableLanDiscovery = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
+            StunCatalog = _ => never.Task,
+        };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => PinholeNode.BindAsync(options, cts.Token).WaitAsync(TimeSpan.FromSeconds(8)));
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(4), $"cancellation took {sw.Elapsed.TotalSeconds:F1}s to halt the bind");
     }
 
     [Fact]

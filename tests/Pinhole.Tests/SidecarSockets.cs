@@ -3,12 +3,6 @@ using System.Net.Sockets;
 
 namespace Pinhole.Tests;
 
-/// <summary>Windows reserves excluded TCP port ranges (Hyper-V/WSL blocks), so a
-/// UDP-chosen ephemeral number is frequently unbindable for the TCP sidecar; the
-/// engine legitimately leaves TcpListeningPort null and socket-level tests cannot
-/// run. Blind ephemeral retries keep landing in the same excluded blocks — probe
-/// for a number both stacks accept BEFORE binding the node, then still assert the
-/// sidecar so a genuine transport failure cannot hide.</summary>
 internal static class SidecarSockets
 {
     public static IPEndPoint ProbeDualStackEndpoint(IPAddress address)
@@ -38,9 +32,6 @@ internal static class SidecarSockets
             $"Could not find a port accepting both UDP and TCP after {maximumAttempts} attempts.", lastFailure);
     }
 
-    /// <summary>Binds a node whose TCP sidecar must be listening. A rare
-    /// probe-to-bind port collision retries on a fresh port; the caller still
-    /// asserts TcpListeningPort.</summary>
     public static async Task<PinholeNode> BindWithSidecarAsync(
         IPAddress address, Func<IPEndPoint, PinholeOptions> options, IPEndPoint? bind = null)
     {

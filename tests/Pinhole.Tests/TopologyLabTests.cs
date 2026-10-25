@@ -7,13 +7,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>The topology lab (#20's first deliverable): every scenario the connection
-/// audit (#15) claimed, replayed against an in-process internet whose NATs translate and
-/// filter for real. The expected direct-vs-relay outcomes below are not aspirations — they
-/// are the classical hole-punching physics table (RFC 5128): cone×cone punches through
-/// mutual mappings, symmetric pairs reach each other only when the far side's filter admits
-/// a fresh per-destination port, and symmetric×(port-restricted|symmetric) cannot punch at
-/// all and must ride the relay.</summary>
 public sealed class TopologyLabTests(ITestOutputHelper output)
 {
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(15); // relay-introduce → direct-upgrade budget
@@ -24,9 +17,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         from dialer in new[] { VirtualNatKind.FullCone, VirtualNatKind.RestrictedCone, VirtualNatKind.PortRestricted, VirtualNatKind.Symmetric }
         select new object[] { listener, dialer };
 
-    /// <summary>The classical reachability table, in terms of what the engine's machinery
-    /// (simultaneous punches, observed-source adoption, relay introduction, upgrade
-    /// probing) can extract from each NAT pairing.</summary>
     private static PathKind ExpectedPath(VirtualNatKind listener, VirtualNatKind dialer) => (listener, dialer) switch
     {
         (VirtualNatKind.Symmetric, VirtualNatKind.Symmetric) => PathKind.Relay,
@@ -53,8 +43,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         Assert.Equal(marker, Encoding.UTF8.GetString(answer));
     }
 
-    /// <summary>Exchange that retries until the path heals — for use right after a network
-    /// event (mapping expiry, roam) where in-flight frames die and recovery is asynchronous.</summary>
     private static async Task ExchangeEventuallyAsync(PinholeConnection from, PinholeConnection to, string marker, TimeSpan budget)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();

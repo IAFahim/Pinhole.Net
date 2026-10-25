@@ -3,52 +3,31 @@ using System.Text;
 
 namespace Pinhole.Blobs;
 
-/// <summary>Kind of content a ticket grants: a single file, or a directory manifest.</summary>
 public enum BlobKind : byte
 {
-    /// <summary>The ticket pins one file's root; downloading writes that one file.</summary>
     File = 1,
 
-    /// <summary>The ticket root is a manifest's root; downloading writes the whole tree.</summary>
     Directory = 2,
 }
 
-/// <summary>The single artifact a receiver needs — the sendme ticket, Pinhole-style:
-/// "pinholeblob1:&lt;base64url&gt;". Carries the sender's live connection string (peer ID +
-/// direct/reflexive/relay candidates — full roaming power), the BLAKE3 root that pins the
-/// content, the content kind, a display-name hint, and — by default — a 32-byte pre-shared
-/// key so every blob frame is AEAD-encrypted end to end (public relays read nothing but
-/// ciphertext). The string is a capability: anyone holding it can download, exactly like
-/// holding the underlying connection string lets them dial.</summary>
 public sealed class BlobTicket
 {
-    /// <summary>The scheme prefix every encoded ticket starts with; the digit is the format version.</summary>
     public const string Scheme = "pinholeblob1";
 
-    /// <summary>The hard cap on encoded length accepted by <see cref="Parse"/> — longer
-    /// strings are rejected as malformed, not parsed.</summary>
     public const int MaxEncodedLength = 16 * 1024;
 
-    /// <summary>Whether the root pins a single file or a directory manifest.</summary>
     public required BlobKind Kind { get; init; }
 
-    /// <summary>The 32-byte BLAKE3 root pinning the exact content — the download only
-    /// succeeds if every byte verifies against it.</summary>
     public required byte[] Root { get; init; }
 
-    /// <summary>The provider's live connection string, with full candidate and roaming power.</summary>
     public required string ConnectionString { get; init; }
 
-    /// <summary>Display-name hint: the suggested filename (files) or directory name.</summary>
     public string Name { get; init; } = "";
 
-    /// <summary>The 32-byte ticket pre-shared key; null when the provider serves plaintext.</summary>
     public byte[]? PreSharedKey { get; init; }
 
-    /// <summary>True when frames are AEAD-wrapped under this ticket's key.</summary>
     public bool Encrypted => PreSharedKey is not null;
 
-    /// <summary>Encodes as "pinholeblob1:…" (base64url); see docs/BLOBS.md for the layout.</summary>
     public override string ToString()
     {
         byte[] cs = Encoding.ASCII.GetBytes(ConnectionString);
@@ -82,9 +61,6 @@ public sealed class BlobTicket
         }
     }
 
-    /// <summary>Attempts a <see cref="Parse"/> without throwing: false on any malformed
-    /// input — null included — (wrong scheme, bad base64url, wrong version, truncated or
-    /// trailing payload).</summary>
     public static bool TryParse(string? text, out BlobTicket? ticket)
     {
         if (text is null)
@@ -105,9 +81,6 @@ public sealed class BlobTicket
         }
     }
 
-    /// <summary>Strict parse: throws <see cref="FormatException"/> on anything but a
-    /// well-formed current-version ticket, and <see cref="ArgumentNullException"/> on null.
-    /// Surrounding whitespace after the colon is tolerated (terminal paste artifacts).</summary>
     public static BlobTicket Parse(string? text)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -173,9 +146,6 @@ public sealed class BlobTicket
     }
 }
 
-/// <summary>Binary manifest for directory tickets (deliberately not JSON: reflection-free,
-/// AOT-trivial, compact). The manifest itself is a BLAKE3-verified blob, so every entry's
-/// hash and path is pinned by the ticket root.</summary>
 internal static class Manifest
 {
     public sealed record Entry(string Path, long Size, byte[] Root);

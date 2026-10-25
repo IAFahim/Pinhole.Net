@@ -2,11 +2,6 @@ using System.Net;
 
 namespace Pinhole.Tests;
 
-/// <summary>The four classic NAT behaviors, with the RFC 4787 semantics that decide whether
-/// a hole punch can succeed: mapping allocation (endpoint-independent for cones, per
-/// destination for symmetric) and the inbound filter (any remote / same address /
-/// same address+port / exactly the mapping's one remote). Public for the matrix theory's
-/// parameter lists.</summary>
 public enum VirtualNatKind
 {
     FullCone,
@@ -15,11 +10,6 @@ public enum VirtualNatKind
     Symmetric,
 }
 
-/// <summary>A NAT box in the <see cref="VirtualNetwork"/>. Sockets attach on the private
-/// side (<see cref="Attach"/>); their outbound datagrams are translated to public mappings,
-/// their inbound datagrams must pass the behavior's filter. Hairpinning works: two sockets
-/// behind the same box can dial each other's public endpoints. Mapping state is exactly the
-/// minimum a real NAT keeps — nothing is keyed on engine identity.</summary>
 internal sealed class VirtualNat : IDisposable
 {
     private readonly VirtualNetwork _net;
@@ -55,9 +45,6 @@ internal sealed class VirtualNat : IDisposable
 
     public VirtualNatKind Kind { get; }
 
-    /// <summary>The UDP-blocked hotel: set true and not one direct datagram leaves the
-    /// private side (STUN, punches, everything) — only the separately configured relay
-    /// path can carry the session.</summary>
     public bool BlockAllOutboundDirect { get; set; }
 
     // Independent allocation policy for tests of predictable versus randomized
@@ -158,9 +145,6 @@ internal sealed class VirtualNat : IDisposable
         }
     }
 
-    /// <summary>Silent mapping expiry (the DHCP-renew/router-reboot case): every mapping
-    /// dies. Subsequent outbound traffic allocates fresh public ports, exactly like the
-    /// real thing, so recovery must come from the engine's re-punch machinery.</summary>
     public void ExpireMappings()
     {
         lock (_gate)

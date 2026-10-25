@@ -6,14 +6,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>#31 — logical connections preserved through outages, suspend-like pauses,
-/// missing network notifications, and MTU changes. The semantics under test are the
-/// documented ones: <see cref="PinholeConnectionState.Dead"/> is an honest "no usable
-/// path" the same object can return from; <see cref="PinholeConnectionState.Closed"/> is
-/// terminal and only reached by closing; a dial that FAULTED is never revived. Long-outage
-/// cells compress the engine's configurable timers below the outage so one real wait
-/// exercises the "longer than every retry budget" regime, and PMTU re-verification uses
-/// the configurable re-probe interval rather than its five-minute default.</summary>
 public sealed class ResilienceTests
 {
     private readonly ITestOutputHelper _output;
@@ -67,8 +59,6 @@ public sealed class ResilienceTests
         return false;
     }
 
-    /// <summary>Host node with every engine timer small enough that a ~12 s outage exceeds
-    /// them all — the compressed stand-in for the issue's long-outage regime.</summary>
     private static Task<PinholeNode> HostAsync(VirtualLab lab, string address) =>
         lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse(address), 0),
             tweak: o => o with

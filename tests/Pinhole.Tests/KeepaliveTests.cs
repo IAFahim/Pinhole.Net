@@ -4,8 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>The optional heartbeat: pings at a fixed cadence on every live connection,
-/// counted in caller stats because the app asked for them — and silence by default.</summary>
 public sealed class KeepaliveTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);

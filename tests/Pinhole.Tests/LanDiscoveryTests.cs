@@ -6,14 +6,10 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>mDNS LAN discovery: announcements, queries, browsing, and a parser that
-/// survives hostile bytes. All traffic rides an in-process channel — no OS multicast in CI.</summary>
 public sealed class LanDiscoveryTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>The test channel: a loopback UDP socket whose "group" is the other side's
-    /// endpoint, recording everything sent so goodbye/query behavior is observable.</summary>
     private sealed class DirectChannel : ILanChannel
     {
         public readonly Socket Sock;

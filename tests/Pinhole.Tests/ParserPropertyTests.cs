@@ -7,17 +7,10 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Byte-level property fuzzing for the untrusted-byte parsers (#34): arbitrary
-/// inputs must never throw outside the documented exception contract, valid encodings
-/// must round-trip, and decoded values must satisfy domain invariants. FsCheck shrinks
-/// counterexamples automatically — a failure prints the minimal input to preserve as a
-/// regression seed.</summary>
 public sealed class ParserPropertyTests
 {
     // ---------- BlobWire.Frame: provider-sent bytes, all hostile ----------
 
-    /// <summary>The span parser must return false, never throw — every rejection path is
-    /// a length check, so a crash here means a bounds bug a peer could weaponize.</summary>
     [Property(MaxTest = 500)]
     public void FrameTryParse_OnArbitraryBytes_NeverThrows(byte[]? data)
     {
@@ -83,8 +76,6 @@ public sealed class ParserPropertyTests
 
     // ---------- Manifest: the directory manifest is provider-sent bytes ----------
 
-    /// <summary>The decode contract is FormatException-or-success — nothing else may
-    /// escape, including on truncated mid-entry input.</summary>
     [Property(MaxTest = 500)]
     public void ManifestDecode_OnArbitraryBytes_OnlyFormatException(byte[]? data)
     {
@@ -97,8 +88,6 @@ public sealed class ParserPropertyTests
         }
     }
 
-    /// <summary>Mutate a VALID manifest's size field to a negative value: the decoder
-    /// must refuse it, not hand the client a negative total to sum.</summary>
     [Fact]
     public void ManifestDecode_NegativeSize_IsRejected()
     {
@@ -110,7 +99,6 @@ public sealed class ParserPropertyTests
         Assert.Throws<FormatException>(() => Manifest.Decode(good));
     }
 
-    /// <summary>Valid manifests always come back identical — entries, sizes, roots.</summary>
     [Property(MaxTest = 100)]
     public void ManifestEncode_ThenDecode_RoundTrips(int seed, int entryCount)
     {
@@ -138,8 +126,6 @@ public sealed class ParserPropertyTests
 
     // ---------- Tickets and connection strings: user-supplied text ----------
 
-    /// <summary>TryParse is the no-throw contract — any exception here is a bug by
-    /// definition (the strict Parse may only throw FormatException).</summary>
     [Property(MaxTest = 500)]
     public void BlobTicketTryParse_OnArbitraryStrings_NeverThrows(string? text)
     {
@@ -152,7 +138,6 @@ public sealed class ParserPropertyTests
         Pinhole.ConnectionString.TryParse(text ?? "", out _);
     }
 
-    /// <summary>A valid ticket round-trips through text: parse(encode(t)) = t.</summary>
     [Property(MaxTest = 100)]
     public void BlobTicketRoundTrip_TextForm(int seed)
     {

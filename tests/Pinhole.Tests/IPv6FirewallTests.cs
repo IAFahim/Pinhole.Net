@@ -7,8 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Independent SOAP fixtures for the standard firewall-control service,
-/// combined with the real serialized lease worker. No OS socket success is assumed.</summary>
 public sealed class IPv6FirewallTests
 {
     private const string Service = "urn:schemas-upnp-org:service:WANIPv6FirewallControl:1";

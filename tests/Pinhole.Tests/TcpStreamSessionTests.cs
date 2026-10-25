@@ -5,9 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Production TCP framing, crypto dispatcher and datagram API over bounded,
-/// fragmented memory streams. This verifies session behavior; OS sockets and Internet
-/// reachability are separately covered by TcpSessionTests, not by this fixture.</summary>
 public sealed class TcpStreamSessionTests
 {
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);

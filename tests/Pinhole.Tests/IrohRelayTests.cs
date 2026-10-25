@@ -282,13 +282,8 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     public int Pongs => Volatile.Read(ref _pongs);
     public Uri Url { get; }
 
-    /// <summary>Payload bytes of every datagram this relay forwarded (addressing stripped),
-    /// in order — lets tests prove a relayed transfer is opaque end to end.</summary>
     public IReadOnlyList<byte[]> Forwarded => _forwarded.ToArray();
 
-    /// <summary>While paused, new relay connections are refused at the websocket level —
-    /// reconnecting clients keep failing until Resume, so tests can observe the
-    /// disconnected state without racing the retry loop.</summary>
     public void PauseNewAuthentications() => Volatile.Write(ref _authGate, 1);
 
     public void ResumeNewAuthentications() => Volatile.Write(ref _authGate, 0);

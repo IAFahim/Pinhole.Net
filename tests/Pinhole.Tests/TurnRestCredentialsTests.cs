@@ -5,10 +5,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>#45 M2: REST-style ephemeral TURN credentials (coturn use-auth-secret).
-/// The username is "{unix-expiry}:{nonce}" and the
-/// credential is base64(HMAC-SHA1(sharedSecret, username)). These checks pin the exact
-/// bytes an operator's server must reproduce.</summary>
 public sealed class TurnRestCredentialsTests
 {
     [Fact]

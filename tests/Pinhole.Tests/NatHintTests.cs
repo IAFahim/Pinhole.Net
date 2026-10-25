@@ -3,10 +3,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Automatic NAT classification — the netcheck iroh also performs: probe several
-/// STUN servers, and either they all observe the same mapping (cone NAT, the reflexive
-/// candidate is punchable) or they observe different ones (symmetric NAT, dialers should
-/// skip the punch and go straight to relay).</summary>
 public sealed class NatHintTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);

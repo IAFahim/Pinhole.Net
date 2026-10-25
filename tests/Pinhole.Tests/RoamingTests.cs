@@ -143,7 +143,6 @@ public sealed class RoamingTests
     }
 }
 
-/// <summary>Tiny poll helper so tests can await engine-internal transitions without busy loops.</summary>
 internal static class TestPoll
 {
     public static async Task UntilAsync(TimeSpan budget, Func<bool> condition)

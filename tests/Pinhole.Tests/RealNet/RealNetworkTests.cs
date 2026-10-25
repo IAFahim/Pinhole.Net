@@ -7,18 +7,6 @@ using static Pinhole.Tests.ExternalTools;
 
 namespace Pinhole.Tests;
 
-/// <summary>#26: REAL network infrastructure, REAL OS sockets. These tests launch a real
-/// iroh-relay server (the reference implementation of the relay protocol Pinhole speaks)
-/// and run the production <see cref="SystemUdpSocket"/> path against it — no virtual
-/// network, no fake relay. A real TURN server (coturn) serves the TURN scenario when
-/// provided. Tools are located via env vars (IROH_RELAY_BIN, COTURN_BIN) or PATH; each run
-/// leaves report.json + captured server logs in <c>$TMPDIR/pinhole-realnet/&lt;scenario&gt;-*</c>
-/// as evidence (kept on both pass and fail).
-///
-/// Pinned infrastructure (issue #26: test-only, never a production dependency):
-///   IROH_RELAY_BIN: cargo install iroh-relay --features server --version 1.3.0 --locked
-///   COTURN_BIN:     any coturn `turnserver` build (e.g. distro package)
-/// Public relay operators are never contacted.</summary>
 public sealed class RealNetworkTests
 {
     private const string RelayEnv = "IROH_RELAY_BIN";
@@ -38,8 +26,6 @@ public sealed class RealNetworkTests
         ReceiveBufferCapacity = 4096,
     };
 
-    /// <summary>A loopback port currently free (bind-then-release; the window is a
-    /// millisecond-scale race against nothing in an isolated test run).</summary>
     private static int FreePort()
     {
         using var probe = new TcpListener(IPAddress.Loopback, 0);
@@ -49,9 +35,6 @@ public sealed class RealNetworkTests
         return port;
     }
 
-    /// <summary>Starts a real iroh-relay server on a fresh loopback port. Dev mode serves
-    /// plain HTTP + the real relay WebSocket protocol; TLS is irrelevant on loopback, and
-    /// the engine accepts http:// relay URLs only for loopback — exactly this setup.</summary>
     private static async Task<(ExternalProcess Relay, Uri Url, string Version, string LogDir)> StartRelayAsync()
     {
         string bin = FindTool(RelayEnv, "iroh-relay")!;
@@ -64,9 +47,6 @@ public sealed class RealNetworkTests
         return (relay, new Uri($"http://127.0.0.1:{port}/"), Version(bin), logDir);
     }
 
-    /// <summary>The answerer's string with every non-relay candidate removed: on loopback
-    /// the direct path would always win, so relay-only is how the scenario proves the
-    /// relay leg carried the session (no hidden UDP bypass, the #26 requirement).</summary>
     private static ConnectionString RelayOnly(PinholeNode answerer)
     {
         ConnectionString full = Pinhole.ConnectionString.Parse(answerer.ConnectionString);

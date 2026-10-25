@@ -10,12 +10,6 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace Pinhole.Blobs;
 
-/// <summary>The blob-layer wire protocol: small frames tunneled inside Pinhole Data
-/// datagrams, optionally wrapped in ChaCha20-Poly1305 so the public relays forward nothing
-/// but ciphertext. One blob stream per BLAKE3 root (its first 8 bytes, big endian, are the
-/// stream id); the downloader drives with range requests, the provider answers with
-/// self-describing verified chunks. Frame sizes are tuned so the largest (a 1 KiB chunk)
-/// stays under the connection's 1200-byte datagram budget, encrypted included.</summary>
 internal static class BlobWire
 {
     internal const byte TypeHello = 1;
@@ -29,8 +23,6 @@ internal static class BlobWire
     public const int MaxChunkData = Blake3.ChunkSize; // 1024
     public const int MaxRequestCount = 64;
 
-    /// <summary>The length of each endpoint's random per-connection nonce. The downloader
-    /// sends its nonce in Hello; the provider contributes an independent nonce in Welcome.</summary>
     public const int SessionIdLength = 32;
     private const int SealedHeadLength = 8 + 25 + 16;
 
@@ -111,8 +103,6 @@ internal static class BlobWire
         return frame;
     }
 
-    /// <summary>Parsed view over one plaintext blob frame. Copies the chunk payload (and
-    /// only it): frames are short-lived, chunks live until applied to the sink.</summary>
     public readonly record struct Frame
     {
         public byte Type { get; init; }
@@ -125,7 +115,6 @@ internal static class BlobWire
         public byte[]? ChunkCv { get; init; }
         public byte[]? ChunkData { get; init; }
 
-        /// <summary>The downloader's 32-byte nonce, or null for a v1 Hello.</summary>
         public byte[]? SessionId { get; init; }
         public byte Version { get; init; }
         public byte[]? ProviderNonce { get; init; }
@@ -236,9 +225,6 @@ internal static class BlobWire
         }
     }
 
-    /// <summary>Ticket-authenticated download state shared by all streams on a connection.
-    /// A Welcome's provider nonce is adopted only after its sealed Head authenticates.
-    /// The receive watermark is shared across directory streams, just like the send counter.</summary>
     internal sealed class DownloadSession
     {
         private readonly byte[]? _psk;
@@ -307,16 +293,8 @@ internal static class BlobWire
         }
     }
 
-    /// <summary>Test/diagnostic seam: invoked with (downloader session id, provider nonce)
-    /// for every Welcome a session adopts — including repeats, since the provider re-offers
-    /// the same nonce to each retried Hello on one connection. Recovery tests assert the
-    /// nonce is stable within a session and distinct across sessions — a fresh two-sided
-    /// key every re-dial, never a continued counter.</summary>
     internal static Action<byte[], byte[]>? WelcomeNonceSeen;
 
-    /// <summary>ChaCha20-Poly1305 frames with a key derived from the ticket PSK, content
-    /// root, and independent 256-bit nonces from the downloader and provider. Routing
-    /// tokens do not participate in key derivation. Direction and counter form the nonce.</summary>
     internal sealed class Cipher
     {
         private const byte DownloaderRole = 0;
@@ -325,8 +303,6 @@ internal static class BlobWire
 
         private Cipher(KeyParameter key) => _key = key;
 
-        /// <summary>The connection cipher, derived from both endpoints' nonces. Null for
-        /// a plaintext ticket. The provider generates its nonce once per connection.</summary>
         public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce)
         {
             if (psk is null)
@@ -347,15 +323,8 @@ internal static class BlobWire
             return Derive(psk, salt, "pinhole-blobs-v3");
         }
 
-        /// <summary>The pre-v2 fixed per-ticket key, wrapped so it can only ever OPEN
-        /// frames: it exists to recognize a pre-2.0 downloader and refuse it. Sealing
-        /// under it is unrepresentable on purpose — that key re-used (key, nonce) pairs
-        /// across connections, and the refusal path must not repeat the sin.</summary>
         public static LegacyDetector ForLegacy(byte[] psk, byte[] root) => new(psk, root);
 
-        /// <summary>Emulation seam for tests that need to <em>be</em> a pre-2.0 downloader
-        /// (which seals under the old key). Production code gets only
-        /// <see cref="ForLegacy"/>, which cannot seal.</summary>
         internal static Cipher ForLegacyEmulation(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1");
 
         private static Cipher Derive(byte[] psk, byte[] salt, string info)
@@ -369,7 +338,6 @@ internal static class BlobWire
 
         public static byte[] FreshKey() => RandomNumberGenerator.GetBytes(32);
 
-        /// <summary>A fresh connection session id for the downloader's first Hello.</summary>
         public static byte[] FreshSessionId() => RandomNumberGenerator.GetBytes(SessionIdLength);
 
         public byte[] Seal(bool asProvider, ulong counter, ReadOnlySpan<byte> plaintext)
@@ -386,13 +354,6 @@ internal static class BlobWire
             return output;
         }
 
-        /// <summary>Tries to open one wire frame. <paramref name="watermark"/> is the
-        /// highest counter this direction has authenticated, and it moves ONLY when a
-        /// frame authenticates: a forged counter — however far into the future — and a
-        /// replayed or regressed old counter both leave it exactly where it was. A
-        /// rejected frame can neither starve the frames behind it (the pre-2.1 bug, the
-        /// same unauthenticated-watermark class as the session layer's replay window)
-        /// nor re-admit the frames before it.</summary>
         public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ref ulong watermark, out byte[] plaintext)
         {
             plaintext = Array.Empty<byte>();
@@ -434,8 +395,6 @@ internal static class BlobWire
             nonce[9..].Clear();
         }
 
-        /// <summary>Open-only view over the pre-v2 per-ticket key. See
-        /// <see cref="ForLegacy"/>.</summary>
         internal sealed class LegacyDetector
         {
             private readonly Cipher _inner;
@@ -449,20 +408,10 @@ internal static class BlobWire
 
     // ------------------------------------------------------------------ send-path transition tolerance
 
-    /// <summary>How long a blob pump waits out a pathless connection before giving up:
-    /// longer than the engine's worst relay-reconnect backoff, shorter than the
-    /// downloader's 30 s stall clock, so an unhealable path surfaces as an honest stall
-    /// instead of a zombie pump.</summary>
     internal static readonly TimeSpan RideOutBudget = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan RideOutPace = TimeSpan.FromMilliseconds(50);
 
-    /// <summary>Sends one wire frame, riding out the connection's transient states: a
-    /// mid-transfer roam flips Open→Punching and back on the roaming side, and a relay
-    /// outage parks a relay-only session until the reconnect lands. Reliability is the
-    /// blob layer's job, so bounded pathlessness is a wait, not a death — the frame goes
-    /// out the moment a path exists again. Only a Closed connection (the peer is gone) or
-    /// an expired <see cref="RideOutBudget"/> rethrows.</summary>
     internal static async ValueTask SendRidingOutPathlessnessAsync(Pinhole.PinholeConnection conn, byte[] wire, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();

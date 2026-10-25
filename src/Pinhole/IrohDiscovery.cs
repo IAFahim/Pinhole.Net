@@ -220,9 +220,6 @@ internal sealed class IrohDiscovery
         return new IrohAddress(Convert.ToHexString(key), direct, relays) { UserData = userData, DerpRelayUrls = derpRelays.Distinct().ToArray() };
     }
 
-    /// <summary>Strict UTF-8 decode that surfaces malformed bytes as the parser's own
-    /// failure type — a hostile TXT/name must die as InvalidDataException, not as a raw
-    /// DecoderFallbackException from the encoder.</summary>
     private static string DecodeStrict(ReadOnlySpan<byte> dns, byte[] bytes)
     {
         try

@@ -9,24 +9,8 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-/// <summary>Issue #35: automated current-vs-previous-version wire interop. The last
-/// release commit is checked out into a git worktree, the checked-in InteropHost
-/// (tests/Pinhole.Tests/Interop/) is compiled against that tree, and the two trees
-/// then meet over real loopback UDP — no test doubles, the actual old build.
-///
-/// What the wire claims today (docs/RELIABILITY.md):
-///   - A v3 (endpoint-keyed) connection string is produced by ≥1.10 and refused by
-///     anything older — old parsers reject the unknown flag explicitly.
-///   - A v2 connection string (1.9.0's format) is still dialed by current nodes.
-///   - Blob wire is v3 on both sides of this pair, so a current downloader against a
-///     1.9.0 provider is expected to complete a verified transfer.
-///
-/// Auto-skips when the release commit is not reachable (shallow clones; CI should
-/// fetch-depth:0 to run these) or git/dotnet is unavailable.</summary>
 public sealed class InteropTests
 {
-    /// <summary>The previous release under test: "Release 1.9.0" (blob wire v3,
-    /// connection strings v2). Bump to each release tag/commit as they land.</summary>
     private const string ReleaseRef = "3ef16ea";
     private const string ReleaseName = "1.9.0";
 
@@ -156,12 +140,6 @@ public sealed class InteropTests
 
     // ------------------------------------------------------------------ datagram interop
 
-    /// <summary>#43: the current tree (TCP sidecar on by default) still speaks plain
-    /// direct UDP datagrams with a 1.9.0 peer in both dial directions — the new
-    /// transport changed nothing on the old wire, and old peers never see a TCP
-    /// frame they cannot parse. Payloads stay within 1.9.0's 1176-byte send ceiling:
-    /// the current tree's 1200-byte guarantee is a same-version property, and the
-    /// old peer's Send API refuses anything larger even though its wire carries it.</summary>
     [InteropFact]
     public async Task CurrentDialer_OldEchoServer_ExchangesUdpDatagrams()
     {
@@ -262,9 +240,6 @@ public sealed class InteropTests
         return stdout.GetAwaiter().GetResult();
     }
 
-    /// <summary>Builds the release worktree + host once per machine; subsequent runs
-    /// reuse <c>$TMPDIR/pinhole-interop/&lt;sha&gt;</c> via a marker file. Returns the
-    /// host dll path.</summary>
     private static string EnsureReleaseHost()
     {
         string root = RepoRoot();
@@ -320,16 +295,6 @@ public sealed class InteropTests
         return dll;
     }
 
-    /// <summary>The release host predates two .NET 10 macOS behaviors on dual-mode
-    /// sockets. First: the runtime may hand back a native IPv4 sockaddr and shrink the
-    /// reusable SocketAddress's Size, after which every later receive throws
-    /// ArgumentOutOfRangeException. Second: because that sockaddr carries the IPv4
-    /// family, every inline reply SendTo from the dual-mode IPv6 socket fails, so the
-    /// host hears its peer but can never answer — Linux reports v4 senders already
-    /// mapped, which is why only macOS interop dies. The shipped engine grew
-    /// NormalizeReceivedAddress for exactly this. These patches restore capacity and the
-    /// mapped form into the worktree copy — runtime-compatibility shims only: no wire
-    /// byte, timing, or behavior of the release under test changes.</summary>
     private static void PatchReleaseHostRecvLoop(string worktree)
     {
         string path = Path.Combine(worktree, "src", "Pinhole", "NodeEngine.cs");
@@ -353,9 +318,6 @@ public sealed class InteropTests
             });
     }
 
-    /// <summary>Ships the mapped-sockaddr normalization (see above) into the worktree's
-    /// socket wrapper, which is where every receive funnels. Idempotent and silently
-    /// absent from trees whose anchor text moved.</summary>
     private static void PatchReleaseHostSocket(string worktree)
     {
         string path = Path.Combine(worktree, "src", "Pinhole", "UdpSocket.cs");
@@ -393,9 +355,6 @@ public sealed class InteropTests
             });
     }
 
-    /// <summary>The release's receive loop swallows every dispatch exception silently — a
-    /// macOS-only reply failure would leave no trace at all. The shim prints the swallowed
-    /// exception to stderr and still swallows it: identical behavior, one observable.</summary>
     private static void PatchReleaseHostDispatchDiagnostics(string worktree)
     {
         string path = Path.Combine(worktree, "src", "Pinhole", "NodeEngine.cs");
@@ -435,10 +394,6 @@ public sealed class InteropTests
 
     // ------------------------------------------------------------------ process plumbing
 
-    /// <summary>The interop step runs these tests in a process of their own, so setting the
-    /// engine's trace file here scopes tracing to exactly the connection under test and
-    /// lands before the engine's static trace switch is first read. Without it a
-    /// macOS-only silent stall has no observable side at all.</summary>
     private static string? _tracePath;
 
     private static void EnableEngineTrace(string dir)
@@ -561,8 +516,6 @@ public sealed class InteropTests
         try { p?.Kill(entireProcessTree: true); } catch { }
     }
 
-    /// <summary>Skips unless the release commit is reachable and git/dotnet exist —
-    /// decided at discovery like SoakFact, so runners show a real Skip reason.</summary>
     private sealed class InteropFactAttribute : FactAttribute
     {
         public InteropFactAttribute()

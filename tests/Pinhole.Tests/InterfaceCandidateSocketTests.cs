@@ -4,8 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Actual source binding and reply sockets; separate from the virtual
-/// interface fixtures and pending in a socket-denying execution profile.</summary>
 public sealed class InterfaceCandidateSocketTests
 {
     [Theory]

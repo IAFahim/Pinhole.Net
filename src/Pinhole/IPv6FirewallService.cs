@@ -4,9 +4,6 @@ using System.Net.Sockets;
 
 namespace Pinhole;
 
-/// <summary>At most two LAN source addresses and four protocol-specific leases.
-/// Each lease uses the existing serialized cancellation/renewal/expiry worker.
-/// Retired workers are bounded too, even during rapid interface churn.</summary>
 internal sealed class IPv6FirewallService : IDisposable
 {
     internal const int MaxSources = 2;

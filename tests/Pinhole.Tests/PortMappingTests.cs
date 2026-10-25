@@ -8,9 +8,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-/// <summary>Router port mappings — the UPnP / NAT-PMP / PCP strategy iroh's portmapper
-/// also uses. All fakes are in-process and loopback-only: the client library carries test
-/// seams (gateway override, SSDP unicast override) so CI never touches a real router.</summary>
 public sealed class PortMappingTests
 {
     // The fallback ladder this suite exercises (PCP → PMP → SSDP → SOAP) runs several
@@ -187,8 +184,6 @@ public sealed class PortMappingTests
     }
 }
 
-/// <summary>An in-process UDP gateway speaking both NAT-PMP (version 0) and PCP (version 2)
-/// on one loopback port, mirroring a home router's control plane.</summary>
 public sealed class FakeGateway : IDisposable
 {
     private readonly UdpClient _udp;
@@ -204,10 +199,8 @@ public sealed class FakeGateway : IDisposable
 
     public IPEndPoint Endpoint { get; }
 
-    /// <summary>Answer PCP MAP requests with UNSUPPORTED_OPCODE, forcing the PMP leg.</summary>
     public bool RefusePcp { get; set; }
 
-    /// <summary>Answer PMP requests with a failure, forcing the UPnP leg.</summary>
     public bool RefusePmp { get; set; }
 
     public ushort ExternalPort { get; set; } = 44444;
@@ -340,8 +333,6 @@ public sealed class FakeGateway : IDisposable
     public void Dispose() => _udp.Dispose();
 }
 
-/// <summary>An in-process IGD: an SSDP responder pointing at an HTTP device description,
-/// plus the SOAP control endpoint a real router exposes.</summary>
 public sealed class FakeUpnpIgd : IAsyncDisposable
 {
     private readonly HttpListener _http = new();
@@ -386,7 +377,6 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
     public int ExternalPort { get; } = 55555;
     public int ExternalTcpPort { get; } = 55556;
 
-    /// <summary>Reject AddAnyPortMapping like an IGDv1 device, forcing the fallback.</summary>
     public bool RejectAddAnyPort { get; set; }
 
     public ConcurrentQueue<string> Actions { get; } = new();
