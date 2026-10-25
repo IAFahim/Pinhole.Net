@@ -1,12 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
-using System.Text;
-using Org.BouncyCastle.Crypto;
-using Org.BouncyCastle.Crypto.Digests;
-using Org.BouncyCastle.Crypto.Engines;
-using Org.BouncyCastle.Crypto.Generators;
-using ChaChaPoly = Org.BouncyCastle.Crypto.Modes.ChaCha20Poly1305;
-using Org.BouncyCastle.Crypto.Parameters;
+using Pinhole.Crypto;
 
 namespace Pinhole.Blobs;
 
@@ -355,9 +349,13 @@ internal static class BlobWire
     {
         private const byte DownloaderRole = 0;
         private const byte ProviderRole = 1;
-        private readonly KeyParameter _key;
+        private readonly Aead _aead;
 
-        private Cipher(KeyParameter key) => _key = key;
+        // Callers seal on one task and open on another (client pump vs run loop), and a
+        // BCL AEAD instance is not thread-safe — the per-call BouncyCastle engines were.
+        private readonly object _gate = new();
+
+        private Cipher(ReadOnlySpan<byte> key) => _aead = Aead.CreateChaCha20Poly1305(key);
 
         public static Cipher? For(byte[]? psk, byte[] root, ReadOnlySpan<byte> sessionId, ReadOnlySpan<byte> providerNonce,
             byte version = ProtocolVersion)
@@ -373,32 +371,32 @@ internal static class BlobWire
                 throw new ArgumentException("PSK, root, and each session nonce must be 32 bytes");
             }
 
-            var salt = new byte[root.Length + 2 * SessionIdLength];
-            root.CopyTo(salt, 0);
-            sessionId.CopyTo(salt.AsSpan(root.Length));
-            providerNonce.CopyTo(salt.AsSpan(root.Length + SessionIdLength));
-            return Derive(psk, salt, InfoString(version));
+            Span<byte> salt = stackalloc byte[root.Length + 2 * SessionIdLength];
+            root.AsSpan().CopyTo(salt);
+            sessionId.CopyTo(salt[root.Length..]);
+            providerNonce.CopyTo(salt[(root.Length + SessionIdLength)..]);
+            return Derive(psk, salt, Info(version));
         }
 
         // The HKDF info string is the only v3/v4 difference; role byte and counters are shared.
-        private static string InfoString(byte version) => version switch
+        private static ReadOnlySpan<byte> Info(byte version) => version switch
         {
-            ProtocolVersion => "pinhole-blobs-v3",
-            CurrentVersion => "pinhole-blobs-v4",
+            ProtocolVersion => "pinhole-blobs-v3"u8,
+            CurrentVersion => "pinhole-blobs-v4"u8,
             _ => throw new ArgumentOutOfRangeException(nameof(version), "blob protocol version must be 3 or 4"),
         };
 
         public static LegacyDetector ForLegacy(byte[] psk, byte[] root) => new(psk, root);
 
-        internal static Cipher ForLegacyEmulation(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1");
+        internal static Cipher ForLegacyEmulation(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1"u8);
 
-        private static Cipher Derive(byte[] psk, byte[] salt, string info)
+        // The salt/info inputs are a wire-format promise: they must stay byte-identical
+        // to what the BouncyCastle implementation fed HKDF (RFC 5869 is deterministic).
+        private static Cipher Derive(ReadOnlySpan<byte> psk, ReadOnlySpan<byte> salt, ReadOnlySpan<byte> info)
         {
-            var hkdf = new HkdfBytesGenerator(new Sha256Digest());
-            hkdf.Init(new HkdfParameters(psk, salt, Encoding.UTF8.GetBytes(info)));
-            var key = new byte[32];
-            hkdf.GenerateBytes(key, 0, 32);
-            return new Cipher(new KeyParameter(key));
+            Span<byte> key = stackalloc byte[Aead.KeySize];
+            HKDF.DeriveKey(HashAlgorithmName.SHA256, psk, key, salt, info);
+            return new Cipher(key);
         }
 
         public static byte[] FreshKey() => RandomNumberGenerator.GetBytes(32);
@@ -407,22 +405,22 @@ internal static class BlobWire
 
         public byte[] Seal(bool asProvider, ulong counter, ReadOnlySpan<byte> plaintext)
         {
-            var aead = new ChaChaPoly();
-            Span<byte> nonce = stackalloc byte[12];
+            Span<byte> nonce = stackalloc byte[Aead.NonceSize];
             BuildNonce(nonce, asProvider, counter);
-            aead.Init(true, new AeadParameters(_key, 128, nonce.ToArray()));
-            byte[] input = plaintext.ToArray();
-            byte[] output = new byte[8 + input.Length + 16];
+            byte[] output = new byte[8 + plaintext.Length + Aead.TagSize];
             BinaryPrimitives.WriteUInt64LittleEndian(output, counter);
-            int n = aead.ProcessBytes(input, 0, input.Length, output, 8);
-            aead.DoFinal(output, 8 + n);
+            lock (_gate)
+            {
+                _aead.Seal(nonce, [], plaintext, output.AsSpan(8));
+            }
+
             return output;
         }
 
         public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ref ulong watermark, out byte[] plaintext)
         {
             plaintext = Array.Empty<byte>();
-            if (wire.Length < 8 + 16)
+            if (wire.Length < 8 + Aead.TagSize)
             {
                 return false;
             }
@@ -433,24 +431,20 @@ internal static class BlobWire
                 return false; // replay or regression; the ARQ layer tolerates loss, not lies
             }
 
-            var aead = new ChaChaPoly();
-            Span<byte> nonce = stackalloc byte[12];
+            Span<byte> nonce = stackalloc byte[Aead.NonceSize];
             BuildNonce(nonce, fromProvider, candidate);
-            aead.Init(false, new AeadParameters(_key, 128, nonce.ToArray()));
-            byte[] input = wire.ToArray();
-            byte[] buf = new byte[input.Length];
-            try
+            byte[] plain = new byte[wire.Length - 8 - Aead.TagSize];
+            lock (_gate)
             {
-                int n = aead.ProcessBytes(input, 8, input.Length - 8, buf, 0);
-                n += aead.DoFinal(buf, n);
-                plaintext = buf[..n];
-                watermark = candidate; // committed only after the tag verifies
-                return true;
+                if (!_aead.TryOpen(nonce, [], wire[8..], plain))
+                {
+                    return false; // forged or corrupted in flight: the watermark does not move
+                }
             }
-            catch (InvalidCipherTextException)
-            {
-                return false; // forged or corrupted in flight: the watermark does not move
-            }
+
+            plaintext = plain;
+            watermark = candidate; // committed only after the tag verifies
+            return true;
         }
 
         private static void BuildNonce(Span<byte> nonce, bool provider, ulong counter)
@@ -464,7 +458,7 @@ internal static class BlobWire
         {
             private readonly Cipher _inner;
 
-            internal LegacyDetector(byte[] psk, byte[] root) => _inner = Derive(psk, root, "pinhole-blobs-v1");
+            internal LegacyDetector(byte[] psk, byte[] root) => _inner = Derive(psk, root, "pinhole-blobs-v1"u8);
 
             public bool TryOpen(bool fromProvider, ReadOnlySpan<byte> wire, ref ulong watermark, out byte[] plaintext) =>
                 _inner.TryOpen(fromProvider, wire, ref watermark, out plaintext);
