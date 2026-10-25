@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>Zero-allocation cryptographic and bookkeeping primitives for Pinhole.Net — BLAKE3 (scalar and vectorized), AEAD span wrappers, replay window, ledger, tick</Description>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- Blobs keeps its shipped Blake3 surface as a facade over this core. -->
+		<InternalsVisibleTo Include="Pinhole.Blobs" />
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
+
+</Project>

@@ -21,6 +21,9 @@
 		     entry point and generated sources; it is built through InteropHost.csproj. -->
 		<Compile Remove="Interop/**/*.cs" />
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Crypto/Pinhole.Crypto.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Wire/Pinhole.Wire.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Moq/Pinhole.Moq.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Blobs/Pinhole.Blobs.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Turn/Pinhole.Turn.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" Condition="'$(TargetFramework)' != 'net8.0'" />

@@ -1,5 +1,7 @@
 <Solution>
   <Project Path="src/Pinhole/Pinhole.csproj" />
+  <Project Path="src/Pinhole.Crypto/Pinhole.Crypto.csproj" />
+  <Project Path="src/Pinhole.Wire/Pinhole.Wire.csproj" />
   <Project Path="src/Pinhole.Blobs/Pinhole.Blobs.csproj" />
   <Project Path="src/Pinhole.Rendezvous/Pinhole.Rendezvous.csproj" />
   <Project Path="src/Pinhole.Turn/Pinhole.Turn.csproj" />
