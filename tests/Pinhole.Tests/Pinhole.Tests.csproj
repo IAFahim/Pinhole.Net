@@ -23,6 +23,7 @@
 		<ProjectReference Include="../../src/Pinhole/Pinhole.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Core/Pinhole.Core.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Crypto/Pinhole.Crypto.csproj" />
+		<ProjectReference Include="../../src/Pinhole.Sim/Pinhole.Sim.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Wire/Pinhole.Wire.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Moq/Pinhole.Moq.csproj" />
 		<ProjectReference Include="../../src/Pinhole.Blobs/Pinhole.Blobs.csproj" />

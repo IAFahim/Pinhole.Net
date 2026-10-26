@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>Deterministic simulation for Pinhole.Net — logical clock, seeded RNG, link primitives, effect-log hashing</Description>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Pinhole.Core\Pinhole.Core.csproj" />
+		<ProjectReference Include="..\Pinhole.Crypto\Pinhole.Crypto.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Same IVT mechanism as Core: machines' internals reach the test project. -->
+		<InternalsVisibleTo Include="Pinhole.Tests" />
+	</ItemGroup>
+
+</Project>
