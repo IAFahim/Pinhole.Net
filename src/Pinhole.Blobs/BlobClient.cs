@@ -322,6 +322,31 @@ public static class BlobClient
             $"the transfer could not be re-established within {timeout.TotalSeconds:0.###}s of disruptions", inner);
     }
 
+    // How long an answer to a sweep re-request is assumed to need when no RTT
+    // sample exists yet, and the shortest patience a dying transfer re-arms its
+    // sweeps at — fast enough to matter before the death clock, slow enough
+    // that a hopeless tail cannot spin the loop.
+    internal const long SweepAnswerFloorMs = 250;
+    internal const long SweepFloorMs = 250;
+
+    // A queued link pegs srtt at the PTO ceiling, so one loss event in the
+    // request-horizon tail leaves the next natural re-request several backoff
+    // periods out — 12s at rtx=2 — while the stall clock kills the attempt at
+    // min(30s, the remaining recovery allowance), a fraction of that. Nothing
+    // related the two clocks, so the transfer died in total wire silence on a
+    // path that never went down: TopUp was horizon-blocked, the sweep was
+    // patiently waiting, and the stall clock ran out first. Whatever the PTO
+    // says, a re-request must still be able to fire, be answered, and verify
+    // before the death clock does; inside that shrinking window the sweep
+    // accelerates instead of idling. Healthy transfers never notice: a fresh
+    // 30s limit against a young sentAt never bites, so the arm stays exactly
+    // the PTO's.
+    internal static long SweepArmMs(long ptoMs, long sentAtMs, long lastVerifiedMs, long limitMs, long answerMs)
+    {
+        long armMs = Math.Min(ptoMs, lastVerifiedMs + limitMs - answerMs - sentAtMs);
+        return Math.Max(armMs, Math.Min(SweepFloorMs, ptoMs));
+    }
+
     // ---------------------------------------------------------------- stream downloader
 
     private sealed class StreamDownloader
@@ -1065,11 +1090,19 @@ public static class BlobClient
             }
         }
 
+        // The sweep's patience is bounded by the stall clock, not the PTO
+        // alone — BlobClient.SweepArmMs above documents the failure this
+        // prevents.
+        private long SweepArmMs(long ptoMs, long sentAtMs) =>
+            BlobClient.SweepArmMs(ptoMs, sentAtMs, _lastVerifiedTicks,
+                _recovery.StallLimit((long)StallTimeout.TotalMilliseconds),
+                (long)(_controller.SmoothedRtt ?? TimeSpan.FromMilliseconds(SweepAnswerFloorMs)).TotalMilliseconds);
+
         private void SweepStale(long now)
         {
             foreach ((long idx, (long sentAt, int retransmits, _, bool holdReleased)) in _outstanding)
             {
-                if (now - sentAt < (long)_controller.PtoFor(retransmits).TotalMilliseconds)
+                if (now - sentAt < SweepArmMs((long)_controller.PtoFor(retransmits).TotalMilliseconds, sentAt))
                 {
                     continue;
                 }
@@ -1127,7 +1160,7 @@ public static class BlobClient
                     continue;
                 }
 
-                if (now - since < (long)_controller.PtoFor(stage.ProofRetransmits).TotalMilliseconds)
+                if (now - since < SweepArmMs((long)_controller.PtoFor(stage.ProofRetransmits).TotalMilliseconds, since))
                 {
                     continue;
                 }
@@ -1143,10 +1176,12 @@ public static class BlobClient
 
         private void CheckStall(long now)
         {
-            if (_pathlessSinceMs < 0 && now - _lastVerifiedTicks > _recovery.StallLimit((long)StallTimeout.TotalMilliseconds))
+            long limitMs = _recovery.StallLimit((long)StallTimeout.TotalMilliseconds);
+            if (_pathlessSinceMs < 0 && now - _lastVerifiedTicks > limitMs)
             {
                 _recovery.Begin(_lastVerifiedTicks);
-                throw new TimeoutException($"the download stalled: no chunk verified for {StallTimeout.TotalSeconds:0}s");
+                throw new TimeoutException(
+                    $"the download stalled: no chunk verified for {TimeSpan.FromMilliseconds(limitMs).TotalSeconds:0.##}s");
             }
         }
 

@@ -156,6 +156,30 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void SweepArm_YieldsToTheStallClockButNeverSpins()
+    {
+        // Healthy tail: a fresh 30s limit against a young flight never bites,
+        // so the arm is exactly the PTO's, backoff and all.
+        Assert.Equal(12_000, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 10_000,
+            lastVerifiedMs: 9_900, limitMs: 30_000, answerMs: 3_000));
+
+        // The CI-stress shape: srtt pegged at the PTO ceiling puts the next
+        // natural re-request 12s out while the spent allowance bounds the death
+        // clock at lastVerified + 5.5s. The arm collapses to whatever still
+        // lets a re-request fire and be answered in time — 2.5s here.
+        Assert.Equal(2_500, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 5_000,
+            lastVerifiedMs: 5_000, limitMs: 5_500, answerMs: 3_000));
+
+        // Inside the answer window the arm floors at 250ms — a dying tail
+        // re-requests instead of idling, but never spins the loop — and the
+        // floor never stretches the arm past the PTO itself.
+        Assert.Equal(BlobClient.SweepFloorMs, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 9_000,
+            lastVerifiedMs: 5_000, limitMs: 5_500, answerMs: 3_000));
+        Assert.Equal(150, BlobClient.SweepArmMs(ptoMs: 150, sentAtMs: 9_000,
+            lastVerifiedMs: 5_000, limitMs: 5_500, answerMs: 3_000));
+    }
+
+    [Fact]
     public async Task HealthyTimeBeforeProviderRestart_DoesNotSpendRecoveryAllowance()
     {
         string dir = TempDir();
@@ -240,6 +264,107 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             Assert.True(successor.ConnectionsAccepted >= 1);
             Assert.Equal(expected, await File.ReadAllBytesAsync(result.Path));
             output.WriteLine($"resumed from checkpoint and finished at {watch.Elapsed.TotalSeconds:F1}s total");
+        }
+        finally
+        {
+            stop.Cancel();
+            if (download is not null)
+            {
+                try { await download.WaitAsync(TestBudget.Teardown); }
+                catch (Exception ex) when (ex is OperationCanceledException or TimeoutException) { }
+            }
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DirectionalTailBlackoutWithSpentAllowance_StillFinishes()
+    {
+        string dir = TempDir();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        Task<BlobDownloadResult>? download = null;
+        try
+        {
+            using var lab = new VirtualLab();
+            byte[] seed = RandomNumberGenerator.GetBytes(32);
+            byte[] expected = TestDispose.Pattern(2 * 1024 * 1024, 0xA3);
+            string source = Path.Combine(dir, "asset.bin");
+            await File.WriteAllBytesAsync(source, expected);
+            // The shaper rule carries both directions' loss as runtime toggles:
+            // the virtual network consults only the first matching rule, so a
+            // blackout rule added at run time would sit forever behind the
+            // bottleneck and drop nothing. Address order picks sides — the
+            // loss model applied is the one whose source compares smaller, and
+            // the provider's .10 sorts before the client's .20, so
+            // ForwardLoss carries provider→client data.
+            ToggleLoss providerToClient = new();
+            ToggleLoss clientToProvider = new();
+            Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
+            lab.Net.AddRule(LinkRule.Bottleneck(region, region, 1_000_000, 128,
+                delay: TimeSpan.FromMilliseconds(20),
+                forwardLoss: providerToClient, reverseLoss: clientToProvider));
+            await using BlobServer server = await BlobServer.ServeAsync(source, new BlobServeOptions
+            {
+                Encrypt = false,
+                NodeOptions = ServerOptions(lab) with { IdentityKeySeed = seed },
+            });
+
+            // Phase one spends most of the allowance through a real path loss.
+            // Phase two recreates the loss shape of the CI-stress failures:
+            // the provider→client direction goes dark mid-tail while the path
+            // itself stays valid — client requests keep reaching the provider,
+            // whose answers die in the dark — so nothing trips path validation
+            // and the stall clock runs the whole cut. The clamp that keeps the
+            // sweep inside the death clock is unit-tested above; this scenario
+            // proves the whole path end to end: ride out the cut, sweep, heal,
+            // finish against what remains of the allowance.
+            long total = expected.Length;
+            var fullCut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tailCut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int stage = 0;
+            var progress = new InlineProgress(p =>
+            {
+                if (p.VerifiedBytes >= total / 4 && Interlocked.CompareExchange(ref stage, 1, 0) == 0)
+                {
+                    providerToClient.Enable();
+                    clientToProvider.Enable();
+                    fullCut.TrySetResult();
+                }
+                else if (p.VerifiedBytes >= total * 3 / 4 && Interlocked.CompareExchange(ref stage, 2, 1) == 1)
+                {
+                    providerToClient.Enable();
+                    tailCut.TrySetResult();
+                }
+            });
+            var watch = Stopwatch.StartNew();
+            download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
+                Options(lab) with
+                {
+                    RecoveryTimeout = TimeSpan.FromSeconds(13),
+                    NodeOptions = ClientOptions(lab) with
+                    {
+                        PathValidationIdle = TimeSpan.FromSeconds(2),
+                        PathValidationProbeInterval = TimeSpan.FromSeconds(1),
+                        PathValidationMaxUnansweredProbes = 3,
+                        ConnectTimeout = TimeSpan.FromSeconds(8),
+                    },
+                }, stop.Token);
+
+            // The full cut must outlast the ~5s these validation knobs need to
+            // declare the silent path dead; the tail cut must outlast the first
+            // natural PTO expiry (~3s at the ceiling) so the re-request flight
+            // is genuinely lost, not merely late.
+            await fullCut.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            await Task.Delay(TimeSpan.FromSeconds(7), stop.Token);
+            providerToClient.Disable();
+            clientToProvider.Disable();
+            await tailCut.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            await Task.Delay(TimeSpan.FromSeconds(3.5), stop.Token);
+            providerToClient.Disable();
+
+            BlobDownloadResult result = await download.WaitAsync(TimeSpan.FromSeconds(40));
+            Assert.Equal(expected, await File.ReadAllBytesAsync(result.Path));
+            output.WriteLine($"survived both blackouts and finished at {watch.Elapsed.TotalSeconds:F1}s");
         }
         finally
         {

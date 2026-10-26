@@ -40,6 +40,20 @@ internal sealed class GilbertElliottLoss(double meanLossRate, double meanBurstPa
     }
 }
 
+// A loss model the fixture flips at run time. Blackouts built this way live
+// inside an existing rule — the network consults only the first MATCHING
+// rule, so a dedicated blackout rule added after a shaper would never fire.
+internal sealed class ToggleLoss : LossModel
+{
+    private volatile bool _dropping;
+
+    public void Enable() => _dropping = true;
+
+    public void Disable() => _dropping = false;
+
+    protected override bool LoseNextCore() => _dropping;
+}
+
 internal readonly record struct Subnet(IPAddress Base, int PrefixLength)
 {
     public static Subnet Parse(string cidr)

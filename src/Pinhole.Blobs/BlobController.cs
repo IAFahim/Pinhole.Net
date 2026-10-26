@@ -193,6 +193,10 @@ internal sealed class BlobController
         return TimeSpan.FromMilliseconds(Math.Min(pto, PtoCeilingMs * 8));
     }
 
+    // The stats copy of this exists only when the app attached a sink; the
+    // downloader's stall math must not depend on that option.
+    public TimeSpan? SmoothedRtt => !_haveRtt ? null : TimeSpan.FromMilliseconds(_srttMs);
+
     public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, bool retransmitted, long nowMs)
     {
         if (hadReservation)
