@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using Org.BouncyCastle.Crypto.Agreement;
 using Org.BouncyCastle.Crypto.Parameters;
+using Pinhole.Crypto;
 
 namespace Pinhole;
 
@@ -173,7 +174,6 @@ internal static class KeySchedule
 internal sealed class FrameSealer : IDisposable
 {
     private const int DefaultEpochFrames = 1 << 28;
-    private const int Window = 64;
 
     private readonly byte[] _transcriptHash;
     private readonly byte[] _nonceSalt;
@@ -186,11 +186,10 @@ internal sealed class FrameSealer : IDisposable
     private uint _epoch;
     private bool _disposed;
 
-    // Send side: the next counter to seal with. Receive side: the highest accepted and its
-    // 64-frame window bitmap. A sealer is one direction only, so the halves never mix.
+    // Send side: the next counter to seal with. Receive side: the accepted-counter
+    // replay window. A sealer is one direction only, so the halves never mix.
     private ulong _nextCounter = 1;
-    private ulong _highest;
-    private ulong _bitmap;
+    private ReplayWindow _recvWindow;
 
     public FrameSealer(SessionKeys keys, bool iAmLo, bool sending, int epochFrames = DefaultEpochFrames)
     {
@@ -267,7 +266,7 @@ internal sealed class FrameSealer : IDisposable
                 return false;
             }
 
-            if (!ReplayEligible(counter))
+            if (!_recvWindow.Admits(counter))
             {
                 return false; // stale replay or duplicate: no authentication needed to see that
             }
@@ -336,7 +335,7 @@ internal sealed class FrameSealer : IDisposable
             }
 
             // Authenticated: now, and only now, the frame's state may commit.
-            CommitReplay(counter);
+            _recvWindow = _recvWindow.Mark(counter);
             if (candidateKey is not null)
             {
                 _prevAes?.Dispose();
@@ -363,31 +362,6 @@ internal sealed class FrameSealer : IDisposable
             _disposed = true;
             _aes?.Dispose();
             _prevAes?.Dispose();
-        }
-    }
-
-    private bool ReplayEligible(ulong counter)
-    {
-        if (counter > _highest)
-        {
-            return true;
-        }
-
-        ulong delta = _highest - counter;
-        return delta < Window && (_bitmap >> (int)delta & 1) == 0;
-    }
-
-    private void CommitReplay(ulong counter)
-    {
-        if (counter > _highest)
-        {
-            ulong shift = counter - _highest;
-            _bitmap = shift >= Window ? 1 : (_bitmap << (int)shift) | 1;
-            _highest = counter;
-        }
-        else
-        {
-            _bitmap |= 1UL << (int)(_highest - counter);
         }
     }
 }
