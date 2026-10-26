@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
+using System.Text;
 using System.Threading.Channels;
 
 namespace Pinhole.Blobs;
@@ -361,6 +362,8 @@ public static class BlobClient
         private long _totalChunks = -1;
         private long _verified;
         private long _lastVerifiedTicks;
+        private long _traceStartTicks;
+        private long _lastTraceTicks;
 
         private bool _v4; // verified-run path, active once a version-4 Welcome delivered the Head
         private long _runCount;
@@ -484,6 +487,7 @@ public static class BlobClient
         private async Task<long> RunLoopAsync(ChannelReader<ReceivedFrame> frames, CancellationToken ct)
         {
             _lastVerifiedTicks = Environment.TickCount64;
+            _traceStartTicks = _lastVerifiedTicks;
             try
             {
                 while (true)
@@ -508,6 +512,7 @@ public static class BlobClient
 
                     long now = Environment.TickCount64;
                     bool pathPresent = WatchPath(now);
+                    TraceState(now, pathPresent);
                     _recovery.Check();
                     if (!pathPresent)
                     {
@@ -1119,6 +1124,37 @@ public static class BlobClient
                 _recovery.Begin(_lastVerifiedTicks);
                 throw new TimeoutException($"the download stalled: no chunk verified for {StallTimeout.TotalSeconds:0}s");
             }
+        }
+
+        // One compact state line per ~250 ms, only when a test asked for it via
+        // BlobTestHooks.Trace: enough timeline to see which clock froze on a CI
+        // runner without flooding the log. Null in production, and AsyncLocal so
+        // parallel transfers never interleave into one timeline.
+        private void TraceState(long now, bool pathPresent)
+        {
+            Action<string>? trace = BlobTestHooks.Trace;
+            if (trace is null || now - _lastTraceTicks < 250)
+            {
+                return;
+            }
+
+            _lastTraceTicks = now;
+            int maxRtx = 0;
+            foreach ((_, (long _, int retransmits, _)) in _outstanding)
+            {
+                maxRtx = Math.Max(maxRtx, retransmits);
+            }
+
+            var staging = new StringBuilder();
+            foreach ((long run, RunStage stage) in _staging)
+            {
+                staging.Append(run).Append(':').Append(stage.Staged).Append('/').Append(stage.Chunks.Length)
+                    .Append(stage.Proof is null ? " " : "+p ");
+            }
+
+            trace($"t={((now - _traceStartTicks) / 1000.0):0.0}s state={_conn.State} path={pathPresent} v4={_v4} " +
+                  $"ver={_verified}/{_totalBytes} app={_sink.Applied}/{_totalChunks} lowInc={_lowestIncomplete}/{_runCount} " +
+                  $"maxReq={_maxRequested} out={_outstanding.Count} rtxMax={maxRtx} staging=[{staging}]");
         }
 
         private bool Send(byte[] plain)

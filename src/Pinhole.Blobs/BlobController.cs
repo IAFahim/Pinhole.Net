@@ -392,4 +392,16 @@ internal static class BlobTestHooks
         get => Override.Value ?? DefaultFixedWindow;
         set => Override.Value = value;
     }
+
+    // CI forensics for hangs local runs cannot reproduce: when set, the downloader's
+    // control loop drops a one-line state snapshot here a few times per second.
+    // AsyncLocal for the same reason as ForceFixedWindow — parallel blob tests must
+    // never cross-write each other's timeline.
+    private static readonly AsyncLocal<Action<string>?> TraceSink = new();
+
+    public static Action<string>? Trace
+    {
+        get => TraceSink.Value;
+        set => TraceSink.Value = value;
+    }
 }

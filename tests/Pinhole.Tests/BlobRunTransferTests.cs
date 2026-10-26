@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using Pinhole.Blobs;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
@@ -13,6 +14,10 @@ namespace Pinhole.Tests;
 // v4/v3 fallback, v3/v4, plaintext) still completes byte-exact.
 public sealed class BlobRunTransferTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public BlobRunTransferTests(ITestOutputHelper output) => _output = output;
+
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
 
     private static PinholeOptions Offline() => new()
@@ -652,26 +657,72 @@ public sealed class BlobRunTransferTests
             // every non-Linux CI runner, while the served-chunk counter flips at the
             // same point on any OS. Budget 90s: the heal is 64 single-chunk PTO
             // re-requests, which loaded runners stretch without anything being wrong.
+            long started = Environment.TickCount64;
+            long run1ServeAttempts = 0; // provider dropped a run-1 chunk (a request DID reach it)
             int othersServed = 0;
+            long releasedAtMs = -1;
             int released = 0;
             server.DropChunk = idx =>
             {
                 if (idx is >= 64 and < 128)
                 {
+                    Interlocked.Increment(ref run1ServeAttempts);
                     return Volatile.Read(ref released) == 0;
                 }
 
-                if (Interlocked.Increment(ref othersServed) >= 200)
+                if (Interlocked.Increment(ref othersServed) >= 200
+                    && Interlocked.Exchange(ref released, 1) == 0)
                 {
-                    Volatile.Write(ref released, 1);
+                    releasedAtMs = Environment.TickCount64 - started;
                 }
 
                 return false;
             };
 
+            // The failure mode is CI-only (loaded macOS/Windows runners): a silent
+            // hang to the budget with no internal stall error. On any failure the
+            // client-side state timeline and the provider counters land in the test
+            // output so the failed job's log IS the diagnosis.
             string outDir = Path.Combine(dir, "out");
-            BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir,
-                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(TimeSpan.FromSeconds(90));
+            var timeline = new List<string>(512);
+            BlobTestHooks.Trace = line => { lock (timeline) timeline.Add(line); };
+            BlobDownloadResult result;
+            try
+            {
+                result = await BlobClient.DownloadAsync(server.Ticket, outDir,
+                    options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(TimeSpan.FromSeconds(90));
+            }
+            catch (Exception ex)
+            {
+                _output.WriteLine($"FAILED after {(Environment.TickCount64 - started) / 1000.0:0.0}s: {ex.GetType().Name}: {ex.Message}");
+                lock (timeline)
+                {
+                    _output.WriteLine($"provider: chunksServed={server.ChunksServed} connectionsAccepted={server.ConnectionsAccepted} " +
+                        $"run1ServeAttempts={Interlocked.Read(ref run1ServeAttempts)} othersServed={Volatile.Read(ref othersServed)} " +
+                        $"released={(Volatile.Read(ref released) == 1 ? $"at {releasedAtMs / 1000.0:0.0}s" : "never")}");
+                    _output.WriteLine($"client timeline ({timeline.Count} snapshots):");
+                    foreach (string line in timeline.Take(20))
+                    {
+                        _output.WriteLine("  " + line);
+                    }
+
+                    if (timeline.Count > 20)
+                    {
+                        _output.WriteLine("  ... tail:");
+                        foreach (string line in timeline.Skip(Math.Max(20, timeline.Count - 80)))
+                        {
+                            _output.WriteLine("  " + line);
+                        }
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                BlobTestHooks.Trace = null;
+            }
+
             Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "ooo.bin")));
             _ = result;
         }
