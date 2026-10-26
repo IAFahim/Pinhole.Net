@@ -167,8 +167,15 @@ public sealed class PathValidationTests
         a.Engine.SimulateDirectPathRestore(b.PeerId);
         b.Engine.SimulateDirectPathRestore(a.PeerId);
         a.Engine.RetryPunch(b.PeerId);
-        await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
+        bool healed = await TestPoll.TryUntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
             && atB.State == PinholeConnectionState.Open);
+        if (!healed)
+        {
+            throw new Xunit.Sdk.XunitException(
+                $"resurrection stalled: aState={atA.State} aPath={atA.Path.Kind} bState={atB.State} bPath={atB.Path.Kind}\n" +
+                $"A->B: {a.Engine.HandshakeSummary(b.PeerId)} | {a.Engine.RecvDiagnostics()}\n" +
+                $"B->A: {b.Engine.HandshakeSummary(a.PeerId)} | {b.Engine.RecvDiagnostics()}");
+        }
         await AssertExchangeAsync(atB, atA, "resurrected after honest death");
     }
 

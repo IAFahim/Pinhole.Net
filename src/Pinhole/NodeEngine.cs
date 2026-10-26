@@ -64,18 +64,14 @@ internal sealed class ConnState
     public volatile bool RelayReady;         // permission for RelayRemote exists on our allocation
     public readonly List<PinholeCandidate> PeerCandidates = new(); // guarded by engine gate
     public bool SymmetricHint;               // peer advertised a symmetric NAT: relay-first scheduling
-    public uint RemoteToken;                 // learned from the peer's frames; staleness filter
-    public bool RemoteTokenKnown;
-    public bool RemoteTokenAuthenticated;    // Gate: established by a sealed frame's AAD
+    public HandshakeState Handshake;         // Gate; token latch + reply selection — HandshakeMachine owns the decisions
     public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
     public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
     public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
-    public bool HsckSent;                    // Gate: our confirm went out in an Hsck frame
     public bool Announced;
     public long LastKickTicks = Environment.TickCount64; // monotonic: suspend-proof punch budget
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
     public int PunchGeneration;
-    public long LastLookupTicks;           // Gate; cadence for punch-time record lookups
     public long DeadSinceTicks;            // Gate; when the punch budget condemned the connection
     public int PermitInFlight;               // single-flight guard for TURN permission round trips
     public IKeyedRelay? PacketRelay;
@@ -106,6 +102,7 @@ internal sealed class ConnState
     public long PmtuProbesSent;            // Interlocked
     public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
     public KeepaliveState Keepalive;       // Gate; ping cadence, probe ladder, RTT EWMA — KeepaliveMachine owns the decisions
+    public PunchState Punch;               // Gate; condemn/beacon/trickle scheduling — PunchSchedulerMachine owns the decisions
 
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
@@ -140,13 +137,6 @@ internal sealed partial class NodeEngine : IDisposable
     private const int RecvBufferSize = 8192;
     private const uint StunCookie = 0x2112A442;
 
-    private static readonly TimeSpan PunchPace = TimeSpan.FromMilliseconds(200);
-    private const long LinkLocalFallbackDelayMs = 600;
-    private static readonly TimeSpan UpgradePace = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan SymmetricDirectTrickle = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan DeadBeaconPace = TimeSpan.FromSeconds(1);
-    private const long DeadBeaconBudgetMs = 300_000; // five minutes of post-Dead beacons
-    private const int MaxUpgradeAttempts = 120; // then passive: peer frames can still open direct
     private static readonly TimeSpan RelayRetryBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RelayMaxBackoff = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RecoverDebounce = TimeSpan.FromSeconds(1);
@@ -158,7 +148,6 @@ internal sealed partial class NodeEngine : IDisposable
     // caller pings, whose timestamps are TickCount64 readings.
     internal const int PmtuOverhead = HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead;
     internal const int PmtuBaseWire = MaxPayload + PmtuOverhead;
-    private const long LookupRetryMs = 1000; // lookup retries must subdivide the shortest ConnectTimeout
     private const int PmtuCeilingV4 = 1472; // Ethernet IPv4: 1500 - 20 - 8
     private const int PmtuCeilingV6 = 1452; // Ethernet IPv6: 1500 - 40 - 8
     private const int PmtuStepBytes = 128;
@@ -1494,6 +1483,8 @@ internal sealed partial class NodeEngine : IDisposable
         c.Buffer = CreateBuffer();
         c.Pmtu = NewPmtuState();
         c.Keepalive = NewKeepaliveState();
+        c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
+        c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
         c.PuncFrame = BuildPunc(c);
         c.Public = new PinholeConnection(this, c);
         // Before publication: no other thread can see c through the table, so seeding the
@@ -1521,7 +1512,7 @@ internal sealed partial class NodeEngine : IDisposable
                         {
                             // An unproved stranger cannot reserve the requested peer ID
                             // and prevent the caller from making a pinned dial.
-                            if (existing.IsIncoming && !existing.RemoteTokenAuthenticated && !existing.Connected.Task.IsCompleted)
+                            if (existing.IsIncoming && !existing.Handshake.RemoteTokenAuthenticated && !existing.Connected.Task.IsCompleted)
                             {
                                 if (_conns.TryRemove(new KeyValuePair<ulong, ConnState>(cs.PeerId, existing)))
                                 {
@@ -1637,12 +1628,14 @@ internal sealed partial class NodeEngine : IDisposable
         {
             PeerId = peerId,
             Token = BinaryPrimitives.ReadUInt32LittleEndian(RandomNumberGenerator.GetBytes(4)),
-            RemoteToken = token,
-            RemoteTokenKnown = true,
             IsIncoming = true,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly && arrival.ViaRelay,
             Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
         };
+        c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
+        c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
+        c.Handshake.RemoteToken = token; // born from this PUNC: its token is the known peer token
+        c.Handshake.RemoteTokenKnown = true;
         c.Buffer = CreateBuffer();
         c.Pmtu = NewPmtuState();
         c.Keepalive = NewKeepaliveState();
@@ -1691,7 +1684,7 @@ internal sealed partial class NodeEngine : IDisposable
         // session in the gap between table retirement and writing its tombstone.
         ClosedHandshake closed;
         lock (c.Gate)
-            closed = new(LiveHandshakeSummary(c) + $" final={c.State}", c.RemoteToken,
+            closed = new(LiveHandshakeSummary(c) + $" final={c.State}", c.Handshake.RemoteToken,
                 c.Crypto is { PeerConfirmed: true } crypto ? crypto.PeerEphPublic?.ToArray() : null, Environment.TickCount64);
         lock (_closedHandshakeGate)
         {
@@ -1764,6 +1757,11 @@ internal sealed partial class NodeEngine : IDisposable
         lock (c.Gate)
         {
             c.LastKickTicks = Environment.TickCount64;
+            // A fresh generation is a fresh run: the scheduler's per-run counters
+            // (upgrade budget, trickle clock) restart with it.
+            PunchInput kick = default;
+            kick.Kind = PunchInputKind.Kick;
+            PunchSchedulerMachine.Step(ref c.Punch, in kick, new Tick(c.LastKickTicks), Span<Effect>.Empty);
         }
 
         int gen = Interlocked.Increment(ref c.PunchGeneration);
@@ -1773,94 +1771,101 @@ internal sealed partial class NodeEngine : IDisposable
     private async Task PunchLoop(ConnState c, int gen)
     {
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, c.Dead.Token);
-        int upgradeAttempts = 0;
-        DateTimeOffset lastDirectPunch = DateTimeOffset.MinValue;
+        // One buffer per loop run: the machine's decisions are read out fully before
+        // every await, but a span cannot be declared across one.
+        Effect[] effects = new Effect[8];
         try
         {
             while (!stop.IsCancellationRequested && Volatile.Read(ref c.PunchGeneration) == gen)
             {
-                if (c.State == PinholeConnectionState.Closed
-                    || c.State == PinholeConnectionState.Open && c.DirectTcp is null)
-                {
-                    return;
-                }
+                long now = Environment.TickCount64;
+                MaybeStartPortPrediction(c);
+                PinholeConnectionState state = c.State;
+                PunchInput input = default;
+                input.Kind = PunchInputKind.Tick;
+                input.Phase = (byte)state;
+                input.OpenWithoutDirectTcp = state == PinholeConnectionState.Open && c.DirectTcp is null;
+                input.ConnectedCompleted = c.Connected.Task.IsCompleted;
+                input.PinnedLookupPossible = c.PinnedEndpointKey is not null && _lookup.Count > 0;
+                input.RelaySignalingOnly = _options.RelaySignalingOnly;
+                input.Established = c.Crypto is { Established: true };
+                input.SymmetricHint = c.SymmetricHint;
+                input.PredictionActive = c.Prediction is { Finished: false } || Volatile.Read(ref _predictionMeasuring) != 0;
+                input.AwaitExchange = c.AwaitInitialCandidateExchange;
+                input.PeerCandidatesReceived = Volatile.Read(ref c.PeerCandidatesReceived);
+                input.TcpEligible = _tcp is not null && c.Crypto is not null && c.DirectTcp is null;
+                input.AnnounceRetryDue = now - Volatile.Read(ref c.LastCandidateAnnouncement) >= 1000;
+                input.NowMs = now;
+                input.KickedAtMs = c.LastKickTicks;
+                input.DeadSinceMs = c.DeadSinceTicks;
 
-                if ((c.State == PinholeConnectionState.Degraded || c.State == PinholeConnectionState.Open)
-                    && ++upgradeAttempts > MaxUpgradeAttempts)
+                bool endLoop = false, condemned = false, lookup = false, announce = false, tcpProbe = false;
+                bool punchRelay = false, punchDirect = false, punchLinkLocal = false;
+                long wakeAt = now + PunchSchedulerMachine.PunchPaceMs;
+                int n = PunchSchedulerMachine.Step(ref c.Punch, in input, new Tick(now), effects);
+                for (int i = 0; i < n; i++)
                 {
-                    return; // stop poking; direct can still open passively from the peer's frames
-                }
-
-                if (c.State == PinholeConnectionState.Punching)
-                {
-                    lock (c.Gate)
+                    switch (effects[i].Kind)
                     {
-                        // Monotonic clock on purpose: after a suspend/wake the wall clock jumps
-                        // forward by the sleep, and a UtcNow comparison would condemn the
-                        // punch before a single post-wake probe could answer.
-                        if (Environment.TickCount64 - c.LastKickTicks > (long)_options.ConnectTimeout.TotalMilliseconds)
-                        {
-                            Transition(c, PinholeConnectionState.Dead);
-                            c.DeadSinceTicks = Environment.TickCount64;
-                            // Dead is revivable, and the peer can only revive us if our
-                            // frames keep telling it where we now are — after a rebind the
-                            // old candidates it holds are dead, so an announce has nowhere
-                            // to land. A real session (its dial or handshake completed)
-                            // therefore keeps a slow beacon: one paced round per second for
-                            // five minutes, after which it goes quiet and stays passively
-                            // revivable. Stranger-flood husks never completed a handshake
-                            // and never beacon — no reflection amplification.
-                            if (!c.Connected.Task.IsCompleted || Environment.TickCount64 - c.DeadSinceTicks > DeadBeaconBudgetMs)
+                        case EffectKind.Notify:
+                            switch ((PunchNotify)effects[i].Value)
                             {
-                                return;
+                                case PunchNotify.Stop: endLoop = true; break;
+                                case PunchNotify.CondemnDead: condemned = true; break;
+                                case PunchNotify.Lookup: lookup = true; break;
+                                case PunchNotify.Announce: announce = true; break;
+                                case PunchNotify.TcpProbe: tcpProbe = true; break;
                             }
-                        }
+                            break;
+                        case EffectKind.Transmit:
+                            if (effects[i].Path == EffectPath.Relay) punchRelay = true;
+                            else if (effects[i].Path == EffectPath.DirectLinkLocal) punchLinkLocal = true;
+                            else if (effects[i].Path == EffectPath.Direct) punchDirect = true;
+                            break;
+                        case EffectKind.Arm:
+                            wakeAt = effects[i].Value;
+                            break;
                     }
                 }
 
-                if (c.State == PinholeConnectionState.Dead
-                    && Environment.TickCount64 - c.DeadSinceTicks > DeadBeaconBudgetMs)
+                if (condemned)
                 {
-                    return; // beacon budget spent; passive revival still works
+                    // Monotonic clock on purpose: after a suspend/wake the wall clock jumps
+                    // forward by the sleep, and a UtcNow comparison would condemn the
+                    // punch before a single post-wake probe could answer.
+                    lock (c.Gate)
+                    {
+                        Transition(c, PinholeConnectionState.Dead);
+                        c.DeadSinceTicks = now;
+                    }
+                }
+
+
+                if (endLoop)
+                {
+                    return;
                 }
 
                 PinholeCandidate[] candidates;
                 lock (_gate)
                 {
                     candidates = c.PeerCandidates.ToArray();
-
-                    // A stuck punch whose ticket pins an endpoint key asks the lookup
-                    // providers where the peer is NOW. The cadence must subdivide a
-                    // connection deadline: at one probe per deadline a single lost UDP
-                    // reply (or a slow provider under load) starves the dial — the retry
-                    // would land after ConnectTimeout has already condemned it. This is
-                    // also the only retry that keeps firing once the session has fallen to
-                    // Punching (NotifyPathSuspect no longer runs there).
-                    if (c.PinnedEndpointKey is { } pinned && _lookup.Count > 0
-                        && Environment.TickCount64 - c.LastLookupTicks > LookupRetryMs)
+                    if (lookup && c.PinnedEndpointKey is { } pinned && _lookup.Count > 0)
                     {
-                        c.LastLookupTicks = Environment.TickCount64;
+                        // A stuck punch whose ticket pins an endpoint key asks the lookup
+                        // providers where the peer is NOW. The cadence must subdivide a
+                        // connection deadline: at one probe per deadline a single lost UDP
+                        // reply (or a slow provider under load) starves the dial — the retry
+                        // would land after ConnectTimeout has already condemned it. This is
+                        // also the only retry that keeps firing once the session has fallen to
+                        // Punching (NotifyPathSuspect no longer runs there).
                         _ = ResolveViaLookupAsync(c, pinned, stop.Token);
                     }
                 }
 
-                if (_options.RelaySignalingOnly && c.Crypto is { Established: true }
-                    && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead
-                    && Environment.TickCount64 - Volatile.Read(ref c.LastCandidateAnnouncement) >= 1000)
-                    AnnounceTo(c); // retry control exchange without resetting the initial dial budget
-
-                // A symmetric hint is scheduling advice, not a ban: relay candidates carry
-                // the session — per-destination mappings make public reflexives hopeless —
-                // while direct candidates keep a one-second trickle. LAN peers (no NAT in
-                // the way) and router-mapped endpoints (punch-anywhere by construction)
-                // still connect directly even when the hint says the NAT maps
-                // per-destination; the hopeless cases cost one datagram per second.
-                bool punchDirects = !c.SymmetricHint || DateTimeOffset.UtcNow - lastDirectPunch >= SymmetricDirectTrickle;
-                MaybeStartPortPrediction(c);
-                if (c.Prediction is { Finished: false } || Volatile.Read(ref _predictionMeasuring) != 0) punchDirects = false;
-                if (punchDirects)
+                if (announce)
                 {
-                    lastDirectPunch = DateTimeOffset.UtcNow;
+                    AnnounceTo(c); // retry control exchange without resetting the initial dial budget
                 }
 
                 foreach (PinholeCandidate candidate in candidates)
@@ -1870,20 +1875,27 @@ internal sealed partial class NodeEngine : IDisposable
                         return;
                     }
 
-                    if (!punchDirects && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay))
+                    bool relay = candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay;
+                    if (relay)
                     {
-                        continue;
+                        if (!punchRelay)
+                        {
+                            continue;
+                        }
                     }
-
-                    if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)
-                        && candidate.Kind is not (CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay)) continue;
-
-                    // Give ordinary routes (especially same-machine loopback) time to win
-                    // before probing LAN-only fallbacks. Once Open, this loop stops.
-                    if (candidate.Address.Address.IsIPv6LinkLocal
-                        && Environment.TickCount64 - c.LastKickTicks < LinkLocalFallbackDelayMs)
+                    else
                     {
-                        continue;
+                        if (!punchDirect)
+                        {
+                            continue;
+                        }
+
+                        // Give ordinary routes (especially same-machine loopback) time to win
+                        // before probing LAN-only fallbacks. Once Open, this loop stops.
+                        if (candidate.Address.Address.IsIPv6LinkLocal && !punchLinkLocal)
+                        {
+                            continue;
+                        }
                     }
 
                     try
@@ -1910,19 +1922,15 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                 }
 
-                if (_tcp is not null && c.Crypto is not null && c.DirectTcp is null
-                    && (!c.AwaitInitialCandidateExchange || Volatile.Read(ref c.PeerCandidatesReceived))
-                    && Environment.TickCount64 - c.LastKickTicks >= 1200)
-                    _ = TryTcpPathsAsync(c, candidates, stop.Token);
-
-                TimeSpan pace = c.State switch
+                if (tcpProbe)
                 {
-                    PinholeConnectionState.Dead => DeadBeaconPace,
-                    PinholeConnectionState.Degraded => UpgradePace,
-                    PinholeConnectionState.Open => UpgradePace,
-                    _ => PunchPace,
-                };
-                await Task.Delay(pace, stop.Token).ConfigureAwait(false);
+                    _ = TryTcpPathsAsync(c, candidates, stop.Token);
+                }
+
+                // Pace, not catch-up: the delay is the full interval the machine armed,
+                // measured from this tick's start — an iteration that ran long must not
+                // collapse the next delay toward zero and turn pacing into a flood.
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, wakeAt - now)), stop.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1931,6 +1939,7 @@ internal sealed partial class NodeEngine : IDisposable
         catch (ObjectDisposedException)
         {
         }
+
     }
 
     // ------------------------------------------------------------------ path validation
@@ -2874,7 +2883,7 @@ internal sealed partial class NodeEngine : IDisposable
                 // Open and confirmation share the handshake lock so a stale sealer cannot
                 // authenticate a frame and then confirm newly superseded keys.
                 if (!cryptoState.Established || frame.Length < HeaderSize + CryptoWire.TokenLength
-                    || c.RemoteTokenAuthenticated && !TokenOk(c, frame))
+                    || c.Handshake.RemoteTokenAuthenticated && !TokenOk(c, frame))
                 {
                     cryptoState.CountRejected();
                     return;
@@ -2887,9 +2896,9 @@ internal sealed partial class NodeEngine : IDisposable
                     return;
                 }
 
-                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
-                c.RemoteTokenKnown = true;
-                c.RemoteTokenAuthenticated = true;
+                c.Handshake.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+                c.Handshake.RemoteTokenKnown = true;
+                c.Handshake.RemoteTokenAuthenticated = true;
                 cryptoState.MarkPeerConfirmed();
             }
 
@@ -2940,9 +2949,38 @@ internal sealed partial class NodeEngine : IDisposable
     private static byte[] CryptoScratch() => s_cryptoScratch ??= new byte[RecvBufferSize];
 
     private static bool TokenOk(ConnState c, ReadOnlySpan<byte> frame) =>
-        c.RemoteTokenKnown
+        c.Handshake.RemoteTokenKnown
         && frame.Length >= HeaderSize + 4
-        && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.RemoteToken;
+        && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.Handshake.RemoteToken;
+
+    // One HandshakeMachine step, flattened: kind = the reject/progress Notify (0 when
+    // none), reply = the Transmit selection (-1 when none); returns the Close kind (0
+    // when the handshake did not fail).
+    private static long StepHandshake(ref HandshakeState state, in HandshakeInput input, out long kind, out long reply)
+    {
+        Span<Effect> effects = stackalloc Effect[2];
+        int n = HandshakeMachine.Step(ref state, in input, new Tick(Environment.TickCount64), effects);
+        kind = 0;
+        reply = -1;
+        long fail = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (effects[i].Kind == EffectKind.Notify)
+            {
+                kind = effects[i].Value;
+            }
+            else if (effects[i].Kind == EffectKind.Transmit)
+            {
+                reply = effects[i].Value;
+            }
+            else if (effects[i].Kind == EffectKind.Close)
+            {
+                fail = effects[i].Value;
+            }
+        }
+
+        return fail;
+    }
 
     private void OnPunc(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
@@ -2956,70 +2994,89 @@ internal sealed partial class NodeEngine : IDisposable
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
 
         ConnectionCrypto? crypto;
+        long reply;
         lock (c.Gate)
         {
-            if (cryptoPunc && c.PinnedStaticKey is { } pinned
-                && !frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
+            // The pin verdict is a pure compare; key agreement is the one side effect
+            // the machine sequences around, so it runs between the two input kinds.
+            bool pinMatches = true;
+            if (cryptoPunc && c.PinnedStaticKey is { } pinned)
+            {
+                pinMatches = frame.Slice(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned);
+            }
+
+            HandshakeInput input = default;
+            input.Kind = HandshakeInputKind.PuncBegin;
+            input.CryptoBody = cryptoPunc;
+            input.PinMatches = pinMatches;
+            input.FrameToken = token;
+            StepHandshake(ref c.Handshake, in input, out long kind, out reply);
+            if (kind == HandshakeMachine.RejectPin)
             {
                 Reject(c, 5);
                 c.Crypto?.CountRejected();
                 return; // explicit-dial adoption can install a pin while frames arrive
             }
-            if (c.RemoteTokenKnown && c.RemoteToken != token && (c.Crypto is null || c.RemoteTokenAuthenticated))
+            if (kind == HandshakeMachine.RejectPuncToken)
             {
-                Reject(c, 3, c.RemoteToken, token, arrival);
+                Reject(c, 3, c.Handshake.RemoteToken, token, arrival);
                 return; // stale frames from an older connection to the same peer ID
             }
+            if (kind == HandshakeMachine.RejectMixedMode)
+            {
+                Reject(c, 6);
+                c.Crypto?.CountRejected();
+                return;
+            }
 
-            if (c.Crypto is not null && cryptoPunc)
+            if (kind == HandshakeMachine.NeedKeys)
             {
                 // First-seen keys derive the session; a retried PUNC must repeat them exactly —
                 // different keys for the same token is a stale or substituted handshake.
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
-                if (!c.Crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]))
+                bool accepted = c.Crypto!.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]);
+                HandshakeInput keys = default;
+                keys.Kind = HandshakeInputKind.PuncKeys;
+                keys.Accepted = accepted;
+                keys.FrameToken = token;
+                StepHandshake(ref c.Handshake, in keys, out kind, out reply);
+                if (kind == HandshakeMachine.RejectPuncKeys)
                 {
                     RejectKeys(c, body[..CryptoWire.EphemeralLength]);
                     c.Crypto.CountRejected();
                     return;
                 }
             }
-            else if (c.Crypto is not null || cryptoPunc)
-            {
-                // A plaintext PUNC on a connection that offered crypto, or a crypto PUNC on a
-                // plaintext one: neither is a state any honest peer produces.
-                Reject(c, 6);
-                c.Crypto?.CountRejected();
-                return;
-            }
 
-            // A malformed/low-order PUNC must not install even a provisional token.
-            c.RemoteToken = token;
-            c.RemoteTokenKnown = true;
             crypto = c.Crypto;
         }
 
         // The PACK doubles as the handshake's second flight. Crypto bodies answer crypto
         // PUNCs deterministically — same keys, same confirm MAC, on every retransmission.
-        if (crypto is { Established: true })
+        if (reply == HandshakeMachine.ReplyPackCrypto)
         {
             Span<byte> pack = stackalloc byte[HeaderSize + CryptoWire.PackCryptoBody];
             WriteHeader(pack, FrameType.Pack);
             BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
             BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
-            crypto.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
+            crypto!.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
             crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
             SendOnArrival(arrival, pack);
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
             else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
         }
-        else
+        else if (reply == HandshakeMachine.ReplyPackLegacy)
         {
             Span<byte> pack = stackalloc byte[HeaderSize + CryptoWire.PackLegacyBody];
             WriteHeader(pack, FrameType.Pack);
             BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);
             BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
             SendOnArrival(arrival, pack);
+        }
+        else
+        {
+            return;
         }
         Interlocked.Increment(ref c.PacksSent);
         if (TraceEnabled)
@@ -3051,74 +3108,111 @@ internal sealed partial class NodeEngine : IDisposable
             Reject(c, 2);
             return;
         }
-        if (BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) != c.Token)
-        {
-            Reject(c, 1, c.Token, BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]), arrival);
-            if (TraceEnabled)
-            {
-                TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]):x8})");
-            }
-            return; // not an echo of our handshake token
-        }
 
+        uint echo = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+        uint peerToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
         bool cryptoPack = frame.Length == HeaderSize + CryptoWire.PackCryptoBody;
-        if (!cryptoPack && frame.Length != HeaderSize + CryptoWire.PackLegacyBody)
+        bool lengthOk = cryptoPack || frame.Length == HeaderSize + CryptoWire.PackLegacyBody;
+
+        if (cryptoPack && c.Crypto is null)
         {
-            return; // neither a legacy nor a v2 PACK
+            return; // we never offered crypto; a crypto PACK is bogus
         }
 
-        if (!cryptoPack && c.Crypto is not null)
+        bool sendHsck = false;
+        bool legacyLatched = false;
+        lock (c.Gate)
         {
-            // We dialed with a key the string vouches for; a plaintext PACK means someone
-            // stripped the handshake. Fail the connection — never fall back to plaintext.
-            Reject(c, 6);
-            c.Crypto.CountRejected();
-            HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
-            return;
-        }
-
-        if (cryptoPack)
-        {
-            ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
-            ConnectionCrypto? crypto = c.Crypto;
-            if (crypto is null)
+            bool pinMatches = true;
+            if (cryptoPack && c.PinnedStaticKey is { } pinned)
             {
-                return; // we never offered crypto; a crypto PACK is bogus
+                pinMatches = frame.Slice(HeaderSize + 2 * CryptoWire.TokenLength + CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned);
             }
 
-            Interlocked.Increment(ref c.PacksReceived);
-            if (TraceEnabled)
+            HandshakeInput input = default;
+            input.Kind = HandshakeInputKind.PackBegin;
+            input.CryptoBody = cryptoPack;
+            input.PinMatches = pinMatches;
+            input.BodyPlausible = true; // the length floor check above already returned
+            input.LengthClassOk = lengthOk;
+            input.FrameToken = echo;
+            input.PeerToken = peerToken;
+            StepHandshake(ref c.Handshake, in input, out long kind, out _);
+            if (kind == HandshakeMachine.RejectPackEcho)
             {
-                TraceLine($"crypto pack from {c.PeerId:x16} via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
+                Reject(c, 1, c.Token, echo, arrival);
+                if (TraceEnabled)
+                {
+                    TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {echo:x8})");
+                }
+                return; // not an echo of our handshake token
             }
-            bool sendHsck;
-            lock (c.Gate)
+            if (kind == HandshakeMachine.RejectMixedMode)
             {
-                if (c.PinnedStaticKey is { } pinned && !body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength).SequenceEqual(pinned))
-                {
-                    Reject(c, 5);
-                    crypto.CountRejected();
-                    HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
-                    return;
-                }
-                uint remoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
-                // Confirmation binds the keys, not these token fields. A replayed PACK
-                // with an edited token must not change an authenticated session's token.
-                if (c.RemoteTokenAuthenticated && remoteToken != c.RemoteToken)
-                {
-                    Reject(c, 8, c.RemoteToken, remoteToken, arrival);
-                    crypto.CountRejected();
-                    return;
-                }
+                // We dialed with a key the string vouches for; a plaintext PACK means someone
+                // stripped the handshake. Fail the connection — never fall back to plaintext.
+                Reject(c, 6);
+                c.Crypto!.CountRejected();
+                HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
+                return;
+            }
+            if (kind == HandshakeMachine.RejectPin)
+            {
+                Reject(c, 5);
+                c.Crypto!.CountRejected();
+                HandshakeFailed(c, "peer static key does not match its connection string: possible man in the middle");
+                return;
+            }
+            if (kind == HandshakeMachine.RejectPackPeerToken)
+            {
+                Reject(c, 8, c.Handshake.RemoteToken, peerToken, arrival);
+                c.Crypto!.CountRejected();
+                return;
+            }
 
-                if (!crypto.TryPeerKeys(body[..CryptoWire.EphemeralLength], body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength))
-                    && !crypto.TrySupersedeUnconfirmed(
-                        body[..CryptoWire.EphemeralLength],
+            if (cryptoPack)
+            {
+                // Every verdict past the echo counts as an answered crypto PACK, the
+                // same flights the original counted before its pin/keys/confirm checks.
+                Interlocked.Increment(ref c.PacksReceived);
+                if (TraceEnabled)
+                {
+                    TraceLine($"crypto pack from {c.PeerId:x16} via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
+                }
+            }
+            else if (lengthOk)
+            {
+                legacyLatched = true;
+            }
+            else if (kind == 0)
+            {
+                return; // neither a legacy nor a v2 PACK body
+            }
+
+            if (kind == HandshakeMachine.NeedKeys)
+            {
+                ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
+                ReadOnlySpan<byte> eph = body[..CryptoWire.EphemeralLength];
+                ConnectionCrypto crypto = c.Crypto!;
+                bool accepted = crypto.TryPeerKeys(eph, body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength))
+                    || crypto.TrySupersedeUnconfirmed(
+                        eph,
                         body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength),
                         body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength),
-                        allowUnexposedIncoming: c.DialAdoptedIncoming && !c.RemoteTokenAuthenticated && !c.Connected.Task.IsCompleted))
+                        allowUnexposedIncoming: c.DialAdoptedIncoming && !c.Handshake.RemoteTokenAuthenticated && !c.Connected.Task.IsCompleted);
+                bool confirmOk = accepted
+                    && crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength));
+
+                HandshakeInput keys = default;
+                keys.Kind = HandshakeInputKind.PackKeys;
+                keys.Accepted = accepted;
+                keys.ConfirmOk = confirmOk;
+                keys.FrameToken = echo;
+                keys.PeerToken = peerToken;
+                StepHandshake(ref c.Handshake, in keys, out kind, out long reply);
+                if (kind == HandshakeMachine.RejectPuncKeys)
                 {
-                    RejectKeys(c, body[..CryptoWire.EphemeralLength]);
+                    RejectKeys(c, eph);
                     crypto.CountRejected();
                     if (TraceEnabled)
                     {
@@ -3126,8 +3220,7 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                     return;
                 }
-
-                if (!crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength)))
+                if (kind == HandshakeMachine.RejectPackConfirm)
                 {
                     Reject(c, 7);
                     crypto.CountRejected();
@@ -3135,35 +3228,30 @@ internal sealed partial class NodeEngine : IDisposable
                     return;
                 }
 
-                // Only verified keys may replace a token latched by an earlier PUNC.
-                c.RemoteToken = remoteToken;
-                c.RemoteTokenKnown = true;
+                // Third flight: our confirm back, which also asks the responder to re-announce
+                // (its first sealed announce may have arrived before we could open it).
+                sendHsck = reply == HandshakeMachine.ReplyHsck;
                 crypto.MarkPeerConfirmed();
-                sendHsck = !c.HsckSent;
-                c.HsckSent = true;
             }
-
-            // Third flight: our confirm back, which also asks the responder to re-announce
-            // (its first sealed announce may have arrived before we could open it).
-            if (sendHsck)
-            {
-                Span<byte> hsck = stackalloc byte[HeaderSize + CryptoWire.HsckBody];
-                WriteHeader(hsck, FrameType.Hsck);
-                BinaryPrimitives.WriteUInt32LittleEndian(hsck[HeaderSize..], c.Token);
-                crypto.MyConfirm().CopyTo(hsck[(HeaderSize + CryptoWire.TokenLength)..]);
-                SendOnArrival(arrival, hsck);
-            }
-            if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
-            else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
         }
-        else
+
+        if (legacyLatched)
         {
             Interlocked.Increment(ref c.PacksReceived);
-            lock (c.Gate)
-            {
-                c.RemoteToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + 4)..]);
-                c.RemoteTokenKnown = true;
-            }
+        }
+
+        if (sendHsck)
+        {
+            Span<byte> hsck = stackalloc byte[HeaderSize + CryptoWire.HsckBody];
+            WriteHeader(hsck, FrameType.Hsck);
+            BinaryPrimitives.WriteUInt32LittleEndian(hsck[HeaderSize..], c.Token);
+            c.Crypto!.MyConfirm().CopyTo(hsck[(HeaderSize + CryptoWire.TokenLength)..]);
+            SendOnArrival(arrival, hsck);
+        }
+        if (cryptoPack)
+        {
+            if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
+            else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
         }
 
         if (arrival.ViaRelay)
@@ -3749,8 +3837,8 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (c.State != PinholeConnectionState.Open)
             {
-                c.State = PinholeConnectionState.Open;
-                c.Path = PathKind.Direct;
+                PathSelectorInput direct = DirectVerdict(c);
+                StepPathSelector(c, in direct);
                 c.PathSince = DateTimeOffset.UtcNow;
                 Interlocked.Exchange(ref c.ConsecutiveSendFailures, 0);
                 ResetPathProbesNoLock(c);
@@ -3760,7 +3848,8 @@ internal sealed partial class NodeEngine : IDisposable
             else if (c.Path != PathKind.Direct)
             {
                 // A direct frame while relayed: newest-path-wins migration.
-                c.Path = PathKind.Direct;
+                PathSelectorInput direct = DirectVerdict(c);
+                StepPathSelector(c, in direct);
                 c.PathSince = DateTimeOffset.UtcNow;
                 ResetPathProbesNoLock(c);
                 c.StateChanged?.Invoke(c.State);
@@ -3795,11 +3884,9 @@ internal sealed partial class NodeEngine : IDisposable
                 c.PacketRelayPeerKey = arrival.PacketRelayPeerKey;
                 c.PacketRelayConfirmed = true;
             }
-            if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
-                && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+            PathSelectorInput relayVerdict = RelayVerdict(c);
+            if (StepPathSelector(c, in relayVerdict))
             {
-                c.State = PinholeConnectionState.Degraded;
-                c.Path = PathKind.Relay;
                 c.PathSince = DateTimeOffset.UtcNow;
                 if (c.IsIncoming && !c.IncomingQueued)
                 { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
@@ -3852,11 +3939,9 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void PromoteRelayLegNoLock(ConnState c)
     {
-        if (!_options.RelaySignalingOnly && (c.Crypto is null || c.Crypto.PeerConfirmed)
-            && c.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead)
+        PathSelectorInput relay = RelayVerdict(c);
+        if (StepPathSelector(c, in relay))
         {
-            c.State = PinholeConnectionState.Degraded;
-            c.Path = PathKind.Relay;
             c.PathSince = DateTimeOffset.UtcNow;
             if (c.IsIncoming && !c.IncomingQueued)
             { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
@@ -3959,25 +4044,18 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            if (c.State == PinholeConnectionState.Open)
+            // The Open fallback additionally honors RelaySignalingOnly (a signaling
+            // relay may not carry the session); a Degraded session already beat that
+            // gate when it was promoted, so only the legs themselves are re-checked.
+            bool legAlive = c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed;
+            bool permitted = c.RelayRemote is not null && c.RelayReady;
+            PathSelectorInput verdict = default;
+            verdict.Kind = PathSelectorInputKind.DirectLost;
+            verdict.RelayUsable = c.State == PinholeConnectionState.Open
+                ? !_options.RelaySignalingOnly && (legAlive || permitted)
+                : legAlive || permitted;
+            if (StepPathSelector(c, in verdict))
             {
-                if (!_options.RelaySignalingOnly && ((c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed) || (c.RelayRemote is not null && c.RelayReady)))
-                {
-                    c.State = PinholeConnectionState.Degraded;
-                    c.Path = PathKind.Relay;
-                }
-                else
-                {
-                    c.State = PinholeConnectionState.Punching;
-                    c.Path = PathKind.None;
-                }
-
-                c.StateChanged?.Invoke(c.State);
-            }
-            else if (c.PacketRelay is not { IsAlive: true } && !(c.RelayRemote is not null && c.RelayReady))
-            {
-                c.State = PinholeConnectionState.Punching;
-                c.Path = PathKind.None;
                 c.StateChanged?.Invoke(c.State);
             }
         }
@@ -4003,6 +4081,35 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
+    // The path-selection transition table lives in PathSelectorMachine; this helper
+    // keeps ConnState's public fields the visible truth: copy in, step, copy back,
+    // and report whether the verdict changed so the site can fire its own reactions.
+    private static bool StepPathSelector(ConnState c, in PathSelectorInput input)
+    {
+        PathSelectorState selector = PathSelectorState.Create((ConnPhase)c.State, (PathSel)c.Path);
+        Span<Effect> effects = stackalloc Effect[1];
+        int n = PathSelectorMachine.Step(ref selector, in input, new Tick(Environment.TickCount64), effects);
+        c.State = (PinholeConnectionState)selector.Phase;
+        c.Path = (PathKind)selector.Path;
+        return n > 0;
+    }
+
+    private static PathSelectorInput DirectVerdict(ConnState c) // c unused: eligibility is settled by the caller
+    {
+        PathSelectorInput input = default;
+        input.Kind = PathSelectorInputKind.DirectConfirmed;
+        return input;
+    }
+
+    private PathSelectorInput RelayVerdict(ConnState c)
+    {
+        PathSelectorInput input = default;
+        input.Kind = PathSelectorInputKind.RelayConfirmed;
+        input.PeerConfirmed = c.Crypto is null || c.Crypto.PeerConfirmed;
+        input.RelaySignalingOnly = _options.RelaySignalingOnly;
+        return input;
+    }
+
     private void Transition(ConnState c, PinholeConnectionState state)
     {
         lock (c.Gate)
@@ -4012,10 +4119,12 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            c.State = state;
+            PathSelectorInput verdict = default;
+            verdict.Kind = PathSelectorInputKind.Forced;
+            verdict.ForcedPhase = (byte)state;
+            StepPathSelector(c, in verdict);
             if (state == PinholeConnectionState.Closed)
             {
-                c.Path = PathKind.None;
                 c.Closed.TrySetResult();
                 c.Buffer?.Complete(); // readers drain what is buffered, then see EOF
             }
@@ -4158,10 +4267,13 @@ internal sealed partial class NodeEngine : IDisposable
                 c.DirectRemoteEp = null;
                 if (c.State == PinholeConnectionState.Open)
                 {
-                    bool relayed = c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed;
-                    c.State = relayed ? PinholeConnectionState.Degraded : PinholeConnectionState.Punching;
-                    c.Path = relayed ? PathKind.Relay : PathKind.None;
-                    c.StateChanged?.Invoke(c.State);
+                    PathSelectorInput verdict = default;
+                    verdict.Kind = PathSelectorInputKind.DirectLost;
+                    verdict.RelayUsable = c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed;
+                    if (StepPathSelector(c, in verdict))
+                    {
+                        c.StateChanged?.Invoke(c.State);
+                    }
                 }
             }
 
@@ -4291,7 +4403,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static string LiveHandshakeSummary(ConnState c)
     {
-        string line = $"self={c.Token:x8} remote={(c.RemoteTokenKnown ? c.RemoteToken.ToString("x8") : "-")} "
+        string line = $"self={c.Token:x8} remote={(c.Handshake.RemoteTokenKnown ? c.Handshake.RemoteToken.ToString("x8") : "-")} "
             + $"my-eph={c.Crypto?.MyEphPrefix ?? "-"} "
             + $"punc↑{Volatile.Read(ref c.PuncsSent)} punc↓{Volatile.Read(ref c.PuncsReceived)} "
             + $"pack↑{Volatile.Read(ref c.PacksSent)} pack↓{Volatile.Read(ref c.PacksReceived)} "

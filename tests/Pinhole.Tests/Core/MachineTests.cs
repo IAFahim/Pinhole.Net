@@ -510,6 +510,641 @@ public sealed class MachineTests
         Assert.Equal(35 * TimeSpan.TicksPerMillisecond, (long)s.RttEwmaTicks);
     }
 
+    // ------------------------------------------------------------------ path selector
+
+    private static int SelectorStep(ref PathSelectorState s, in PathSelectorInput input, Span<Effect> effects) =>
+        PathSelectorMachine.Step(ref s, in input, new Tick(1000), effects);
+
+    private static PathSelectorInput Selector(PathSelectorInputKind kind) => new() { Kind = kind };
+
+    [Fact]
+    public void PathSelector_DirectEvidenceOpensEveryLivePhase_AndClosedAbsorbs()
+    {
+        Span<Effect> effects = stackalloc Effect[1];
+        foreach (ConnPhase phase in new[] { ConnPhase.Punching, ConnPhase.Degraded, ConnPhase.Dead })
+        {
+            PathSelectorState s = PathSelectorState.Create(phase, PathSel.None);
+            int n = SelectorStep(ref s, Selector(PathSelectorInputKind.DirectConfirmed), effects);
+            Assert.Equal(1, n);
+            Assert.Equal(ConnPhase.Open, s.Phase);
+            Assert.Equal(PathSel.Direct, s.Path);
+            // The verdict packs the new pair: phase << 8 | path.
+            Assert.Equal(((long)ConnPhase.Open << (int)PathSelectorMachine.VerdictShift) | (uint)(byte)PathSel.Direct, effects[0].Value);
+        }
+
+        // Open + direct is the steady state: a fresh confirmation is not a transition.
+        PathSelectorState steady = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
+        Assert.Equal(0, SelectorStep(ref steady, Selector(PathSelectorInputKind.DirectConfirmed), effects));
+
+        // Closed is absorbing: stray frames never revive a closed connection.
+        PathSelectorState closed = PathSelectorState.Create(ConnPhase.Closed, PathSel.None);
+        Assert.Equal(0, SelectorStep(ref closed, Selector(PathSelectorInputKind.DirectConfirmed), effects));
+        Assert.Equal(ConnPhase.Closed, closed.Phase);
+    }
+
+    [Fact]
+    public void PathSelector_RelayEvidenceDegradesOnlyPendingPhases_WhenThePeerIsConfirmed()
+    {
+        Span<Effect> effects = stackalloc Effect[1];
+        foreach (ConnPhase phase in new[] { ConnPhase.Punching, ConnPhase.Dead })
+        {
+            PathSelectorInput input = Selector(PathSelectorInputKind.RelayConfirmed);
+            input.PeerConfirmed = true;
+            PathSelectorState s = PathSelectorState.Create(phase, PathSel.None);
+            Assert.Equal(1, SelectorStep(ref s, in input, effects));
+            Assert.Equal(ConnPhase.Degraded, s.Phase);
+            Assert.Equal(PathSel.Relay, s.Path);
+        }
+
+        PathSelectorInput unconfirmed = Selector(PathSelectorInputKind.RelayConfirmed);
+        unconfirmed.PeerConfirmed = false;
+        PathSelectorState pending = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
+        Assert.Equal(0, SelectorStep(ref pending, in unconfirmed, effects)); // relay proves reachability, not the peer
+
+        PathSelectorInput signaling = Selector(PathSelectorInputKind.RelayConfirmed);
+        signaling.PeerConfirmed = true;
+        signaling.RelaySignalingOnly = true;
+        PathSelectorState reserved = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
+        Assert.Equal(0, SelectorStep(ref reserved, in signaling, effects)); // signaling relays never carry sessions
+
+        PathSelectorInput live = Selector(PathSelectorInputKind.RelayConfirmed);
+        live.PeerConfirmed = true;
+        PathSelectorState open = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
+        Assert.Equal(0, SelectorStep(ref open, in live, effects)); // relay evidence never displaces direct
+    }
+
+    [Fact]
+    public void PathSelector_LostDirectFallsToRelay_OrBackToPunching()
+    {
+        Span<Effect> effects = stackalloc Effect[1];
+        PathSelectorInput withRelay = Selector(PathSelectorInputKind.DirectLost);
+        withRelay.RelayUsable = true;
+        PathSelectorState open = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
+        Assert.Equal(1, SelectorStep(ref open, in withRelay, effects));
+        Assert.Equal(ConnPhase.Degraded, open.Phase);
+        Assert.Equal(PathSel.Relay, open.Path);
+
+        PathSelectorInput withoutRelay = Selector(PathSelectorInputKind.DirectLost);
+        PathSelectorState open2 = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
+        Assert.Equal(1, SelectorStep(ref open2, in withoutRelay, effects));
+        Assert.Equal(ConnPhase.Punching, open2.Phase);
+        Assert.Equal(PathSel.None, open2.Path);
+
+        // Degraded with a live relay keeps it; without one there is nothing to send on.
+        PathSelectorState degradedLive = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
+        Assert.Equal(0, SelectorStep(ref degradedLive, in withRelay, effects));
+        PathSelectorState degradedDead = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
+        Assert.Equal(1, SelectorStep(ref degradedDead, in withoutRelay, effects));
+        Assert.Equal(ConnPhase.Punching, degradedDead.Phase);
+
+        // Pending connections have no carrying path to lose.
+        PathSelectorState punching = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
+        Assert.Equal(0, SelectorStep(ref punching, in withoutRelay, effects));
+    }
+
+    [Fact]
+    public void PathSelector_ForcedClosedClearsThePath_DeadKeepsIt()
+    {
+        Span<Effect> effects = stackalloc Effect[1];
+        PathSelectorInput close = Selector(PathSelectorInputKind.Forced);
+        close.ForcedPhase = (byte)ConnPhase.Closed;
+        PathSelectorState open = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
+        Assert.Equal(1, SelectorStep(ref open, in close, effects));
+        Assert.Equal(ConnPhase.Closed, open.Phase);
+        Assert.Equal(PathSel.None, open.Path);
+
+        PathSelectorInput condemn = Selector(PathSelectorInputKind.Forced);
+        condemn.ForcedPhase = (byte)ConnPhase.Dead;
+        PathSelectorState relayed = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
+        Assert.Equal(1, SelectorStep(ref relayed, in condemn, effects));
+        Assert.Equal(ConnPhase.Dead, relayed.Phase);
+        Assert.Equal(PathSel.Relay, relayed.Path); // Dead is revivable; the path survives for the revival
+    }
+
+    [Fact]
+    public void PathSelector_AnEventuallyGoodPathReachesOpenAgainAfterEveryFall()
+    {
+        // P2 in miniature: whatever the fall, live direct evidence restores Open, and
+        // the fall never strands the session in Open on a dead path.
+        Span<Effect> effects = stackalloc Effect[1];
+        PathSelectorState s = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
+
+        PathSelectorInput relay = Selector(PathSelectorInputKind.RelayConfirmed);
+        relay.PeerConfirmed = true;
+        Assert.Equal(1, SelectorStep(ref s, in relay, effects));
+        Assert.Equal(ConnPhase.Degraded, s.Phase);
+
+        Assert.Equal(1, SelectorStep(ref s, Selector(PathSelectorInputKind.DirectConfirmed), effects));
+        Assert.Equal(ConnPhase.Open, s.Phase);
+
+        Assert.Equal(1, SelectorStep(ref s, Selector(PathSelectorInputKind.DirectLost), effects));
+        Assert.Equal(ConnPhase.Punching, s.Phase);
+
+        Assert.Equal(1, SelectorStep(ref s, Selector(PathSelectorInputKind.DirectConfirmed), effects));
+        Assert.Equal(ConnPhase.Open, s.Phase);
+        Assert.Equal(PathSel.Direct, s.Path);
+    }
+
+    // ------------------------------------------------------------------ handshake
+
+    private static HandshakeState Handshake(uint self = 0xA0A0_1010, bool offeredCrypto = false) =>
+        HandshakeState.Create(self, offeredCrypto);
+
+    private static (long Kind, long Reply, long Fail) HandshakeStep(ref HandshakeState s, in HandshakeInput input, Span<Effect> effects)
+    {
+        int n = HandshakeMachine.Step(ref s, in input, new Tick(1000), effects);
+        long kind = 0, reply = -1, fail = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (effects[i].Kind == EffectKind.Notify) kind = effects[i].Value;
+            else if (effects[i].Kind == EffectKind.Transmit) reply = effects[i].Value;
+            else if (effects[i].Kind == EffectKind.Close) fail = effects[i].Value;
+        }
+
+        return (kind, reply, fail);
+    }
+
+    [Fact]
+    public void Handshake_PlaintextPuncLatchesTheTokenAndEarnsALegacyPack()
+    {
+        HandshakeState s = Handshake();
+        Span<Effect> effects = stackalloc Effect[2];
+        HandshakeInput punc = default;
+        punc.Kind = HandshakeInputKind.PuncBegin;
+        punc.FrameToken = 0x0BADC0DE;
+        (long kind, long reply, long fail) = HandshakeStep(ref s, in punc, effects);
+        Assert.Equal(0, kind);
+        Assert.Equal(HandshakeMachine.ReplyPackLegacy, reply);
+        Assert.Equal(0, fail);
+        Assert.True(s.RemoteTokenKnown);
+        Assert.Equal(0x0BADC0DEu, s.RemoteToken);
+    }
+
+    [Fact]
+    public void Handshake_CryptoPuncSequencesKeyAgreementBetweenTheVerdicts()
+    {
+        HandshakeState s = Handshake(offeredCrypto: true);
+        Span<Effect> effects = stackalloc Effect[2];
+
+        HandshakeInput punc = default;
+        punc.Kind = HandshakeInputKind.PuncBegin;
+        punc.CryptoBody = true;
+        punc.PinMatches = true;
+        punc.FrameToken = 0x0BADC0DE;
+        (long kind, long reply, _) = HandshakeStep(ref s, in punc, effects);
+        Assert.Equal(HandshakeMachine.NeedKeys, kind);
+        Assert.Equal(-1, reply);
+        Assert.False(s.RemoteTokenKnown); // a low-order PUNC must not install even a provisional token
+
+        // Rejected keys leave the latch untouched; an honest retry still works.
+        HandshakeInput badKeys = default;
+        badKeys.Kind = HandshakeInputKind.PuncKeys;
+        badKeys.Accepted = false;
+        badKeys.FrameToken = 0x0BADC0DE;
+        Assert.Equal(HandshakeMachine.RejectPuncKeys, HandshakeStep(ref s, in badKeys, effects).Kind);
+        Assert.False(s.RemoteTokenKnown);
+
+        HandshakeInput keys = badKeys;
+        keys.Accepted = true;
+        (kind, reply, _) = HandshakeStep(ref s, in keys, effects);
+        Assert.Equal(0, kind);
+        Assert.Equal(HandshakeMachine.ReplyPackCrypto, reply);
+        Assert.True(s.RemoteTokenKnown);
+        Assert.Equal(0x0BADC0DEu, s.RemoteToken);
+    }
+
+    [Fact]
+    public void Handshake_PuncRefusals_PinBeforeTokenBeforeMixedMode()
+    {
+        HandshakeState s = Handshake(offeredCrypto: true);
+        s.RemoteToken = 0x1111_2222;
+        s.RemoteTokenKnown = true;
+        s.RemoteTokenAuthenticated = true;
+        Span<Effect> effects = stackalloc Effect[2];
+
+        // All three would apply; the pin verdict wins.
+        HandshakeInput pinned = default;
+        pinned.Kind = HandshakeInputKind.PuncBegin;
+        pinned.CryptoBody = true;
+        pinned.PinMatches = false;
+        pinned.FrameToken = 0x9999_9999; // not the latched token
+        Assert.Equal(HandshakeMachine.RejectPin, HandshakeStep(ref s, in pinned, effects).Kind);
+
+        // Stale frames from an older connection: a known token that stopped matching.
+        HandshakeInput stale = default;
+        stale.Kind = HandshakeInputKind.PuncBegin;
+        stale.CryptoBody = true;
+        stale.PinMatches = true;
+        stale.FrameToken = 0x9999_9999;
+        Assert.Equal(HandshakeMachine.RejectPuncToken, HandshakeStep(ref s, in stale, effects).Kind);
+
+        // Crossed modes: plaintext PUNC on a crypto connection.
+        HandshakeInput crossed = default;
+        crossed.Kind = HandshakeInputKind.PuncBegin;
+        crossed.CryptoBody = false;
+        crossed.FrameToken = 0x1111_2222; // token matches, so the mode check is reached
+        Assert.Equal(HandshakeMachine.RejectMixedMode, HandshakeStep(ref s, in crossed, effects).Kind);
+
+        // An UNauthenticated latched token may still be replaced by the real one.
+        s.RemoteTokenAuthenticated = false;
+        HandshakeInput replace = default;
+        replace.Kind = HandshakeInputKind.PuncBegin;
+        replace.CryptoBody = true;
+        replace.PinMatches = true;
+        replace.FrameToken = 0x3333_4444;
+        Assert.Equal(HandshakeMachine.NeedKeys, HandshakeStep(ref s, in replace, effects).Kind);
+    }
+
+    [Fact]
+    public void Handshake_PackEchoAndLengthVerdicts()
+    {
+        HandshakeState s = Handshake();
+        Span<Effect> effects = stackalloc Effect[2];
+
+        HandshakeInput pack = default;
+        pack.Kind = HandshakeInputKind.PackBegin;
+        pack.BodyPlausible = false;
+        Assert.Equal(HandshakeMachine.RejectPackLength, HandshakeStep(ref s, in pack, effects).Kind);
+
+        pack.BodyPlausible = true;
+        pack.FrameToken = 0xDEAD_BEEF; // not ours
+        Assert.Equal(HandshakeMachine.RejectPackEcho, HandshakeStep(ref s, in pack, effects).Kind);
+
+        pack.FrameToken = 0xA0A0_1010; // ours
+        pack.LengthClassOk = false;
+        Assert.Equal(0, HandshakeStep(ref s, in pack, effects).Kind); // silently ignored
+        Assert.False(s.RemoteTokenKnown);
+
+        // Legacy body on a plaintext connection: latch the responder's token.
+        pack.LengthClassOk = true;
+        pack.CryptoBody = false;
+        pack.PeerToken = 0x5555_6666;
+        Assert.Equal(0, HandshakeStep(ref s, in pack, effects).Kind);
+        Assert.True(s.RemoteTokenKnown);
+        Assert.Equal(0x5555_6666u, s.RemoteToken);
+    }
+
+    [Fact]
+    public void Handshake_CryptoPackFailsClosed_AndSendsTheThirdFlightOnce()
+    {
+        HandshakeState s = Handshake(offeredCrypto: true);
+        Span<Effect> effects = stackalloc Effect[2];
+
+        // A stripped handshake never falls back to plaintext.
+        HandshakeInput stripped = default;
+        stripped.Kind = HandshakeInputKind.PackBegin;
+        stripped.BodyPlausible = true;
+        stripped.LengthClassOk = true;
+        stripped.CryptoBody = false;
+        stripped.FrameToken = 0xA0A0_1010;
+        (long kind, _, long fail) = HandshakeStep(ref s, in stripped, effects);
+        Assert.Equal(HandshakeMachine.RejectMixedMode, kind);
+        Assert.Equal(HandshakeMachine.RejectMixedMode, fail);
+
+        // A pinned static key that stops matching is a MITM: refused, failed.
+        HandshakeInput mitm = default;
+        mitm.Kind = HandshakeInputKind.PackBegin;
+        mitm.BodyPlausible = true;
+        mitm.LengthClassOk = true;
+        mitm.CryptoBody = true;
+        mitm.PinMatches = false;
+        mitm.FrameToken = 0xA0A0_1010;
+        (kind, _, fail) = HandshakeStep(ref s, in mitm, effects);
+        Assert.Equal(HandshakeMachine.RejectPin, kind);
+        Assert.Equal(HandshakeMachine.RejectPin, fail);
+
+        // Keys rejected, then confirm rejected: each with its own kind, only confirm fails closed.
+        HandshakeInput begin = default;
+        begin.Kind = HandshakeInputKind.PackBegin;
+        begin.BodyPlausible = true;
+        begin.LengthClassOk = true;
+        begin.CryptoBody = true;
+        begin.PinMatches = true;
+        begin.FrameToken = 0xA0A0_1010;
+        begin.PeerToken = 0x7777_8888;
+        Assert.Equal(HandshakeMachine.NeedKeys, HandshakeStep(ref s, in begin, effects).Kind);
+
+        HandshakeInput keys = default;
+        keys.Kind = HandshakeInputKind.PackKeys;
+        keys.FrameToken = 0xA0A0_1010;
+        keys.PeerToken = 0x7777_8888;
+        keys.Accepted = false;
+        Assert.Equal(HandshakeMachine.RejectPuncKeys, HandshakeStep(ref s, in keys, effects).Kind);
+        Assert.False(s.RemoteTokenKnown);
+
+        keys.Accepted = true;
+        keys.ConfirmOk = false;
+        (kind, _, fail) = HandshakeStep(ref s, in keys, effects);
+        Assert.Equal(HandshakeMachine.RejectPackConfirm, kind);
+        Assert.Equal(HandshakeMachine.RejectPackConfirm, fail);
+        Assert.False(s.RemoteTokenKnown);
+
+        // Success: verified keys latch the token, the confirm goes out once, and a
+        // replayed PACK re-confirms without a second flight.
+        keys.ConfirmOk = true;
+        (kind, long reply, long none) = HandshakeStep(ref s, in keys, effects);
+        Assert.Equal(HandshakeMachine.PeerConfirmed, kind);
+        Assert.Equal(HandshakeMachine.ReplyHsck, reply);
+        Assert.Equal(0, none);
+        Assert.True(s.RemoteTokenKnown);
+        Assert.Equal(0x7777_8888u, s.RemoteToken);
+
+        (kind, reply, _) = HandshakeStep(ref s, in keys, effects);
+        Assert.Equal(HandshakeMachine.PeerConfirmed, kind);
+        Assert.Equal(-1, reply);
+    }
+
+    [Fact]
+    public void Handshake_AnAuthenticatedTokenSurvivesEditedReplays()
+    {
+        HandshakeState s = Handshake(offeredCrypto: true);
+        s.RemoteToken = 0x1111_2222;
+        s.RemoteTokenKnown = true;
+        s.RemoteTokenAuthenticated = true;
+        Span<Effect> effects = stackalloc Effect[2];
+
+        HandshakeInput edited = default;
+        edited.Kind = HandshakeInputKind.PackBegin;
+        edited.BodyPlausible = true;
+        edited.LengthClassOk = true;
+        edited.CryptoBody = true;
+        edited.PinMatches = true;
+        edited.FrameToken = 0xA0A0_1010;
+        edited.PeerToken = 0x9999_9999; // the authenticated session's token, edited
+        Assert.Equal(HandshakeMachine.RejectPackPeerToken, HandshakeStep(ref s, in edited, effects).Kind);
+        Assert.Equal(0x1111_2222u, s.RemoteToken);
+    }
+
+    // ------------------------------------------------------------------ punch scheduler
+
+    private static PunchState Punch(long connectTimeoutMs = 60_000) => PunchState.Create(connectTimeoutMs);
+
+    private static PunchInput PunchTick(byte phase = (byte)ConnPhase.Punching, long now = 5000, long kickedAt = 0, long deadSince = -1)
+    {
+        PunchInput input = default;
+        input.Kind = PunchInputKind.Tick;
+        input.Phase = phase;
+        input.NowMs = now;
+        input.KickedAtMs = kickedAt;
+        input.DeadSinceMs = deadSince;
+        return input;
+    }
+
+    private static (bool Stop, bool Condemn, bool Lookup, bool Announce, bool Tcp, bool Relay, bool Direct, bool LinkLocal, long WakeAt) PunchFx(
+        Span<Effect> effects, int n)
+    {
+        bool stop = false, condemn = false, lookup = false, announce = false, tcp = false;
+        bool relay = false, direct = false, linkLocal = false;
+        long wakeAt = 0;
+        for (int i = 0; i < n; i++)
+        {
+            switch (effects[i].Kind)
+            {
+                case EffectKind.Notify:
+                    switch ((PunchNotify)effects[i].Value)
+                    {
+                        case PunchNotify.Stop: stop = true; break;
+                        case PunchNotify.CondemnDead: condemn = true; break;
+                        case PunchNotify.Lookup: lookup = true; break;
+                        case PunchNotify.Announce: announce = true; break;
+                        case PunchNotify.TcpProbe: tcp = true; break;
+                    }
+                    break;
+                case EffectKind.Transmit:
+                    if (effects[i].Path == EffectPath.Relay) relay = true;
+                    else if (effects[i].Path == EffectPath.DirectLinkLocal) linkLocal = true;
+                    else if (effects[i].Path == EffectPath.Direct) direct = true;
+                    break;
+                case EffectKind.Arm:
+                    wakeAt = effects[i].Value;
+                    break;
+            }
+        }
+
+        return (stop, condemn, lookup, announce, tcp, relay, direct, linkLocal, wakeAt);
+    }
+
+    [Fact]
+    public void Punch_ConnectTimeoutCondemns_AndOnlyRealSessionsBeaconAfterward()
+    {
+        PunchState s = Punch(connectTimeoutMs: 5000);
+        Span<Effect> effects = stackalloc Effect[8];
+
+        // Before the deadline: no verdict, ordinary scheduling.
+        PunchInput before = PunchTick(now: 5000);
+        var pre = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in before, new Tick(5000), effects));
+        Assert.False(pre.Condemn);
+
+        PunchInput deadline = PunchTick(now: 5001);
+        int n = PunchSchedulerMachine.Step(ref s, in deadline, new Tick(5001), effects);
+        var husk = PunchFx(effects, n);
+        Assert.True(husk.Condemn);
+        Assert.True(husk.Stop); // never-connected husks never beacon: no reflection amplification
+
+        // A real session keeps beeping until the five-minute budget is spent.
+        PunchState live = Punch(connectTimeoutMs: 5000);
+        PunchInput condemned = PunchTick(now: 5001);
+        condemned.ConnectedCompleted = true;
+        var beacons = PunchFx(effects, PunchSchedulerMachine.Step(ref live, in condemned, new Tick(5001), effects));
+        Assert.True(beacons.Condemn);
+        Assert.False(beacons.Stop);
+        Assert.True(beacons.Relay);
+        Assert.Equal(5001 + PunchSchedulerMachine.DeadBeaconPaceMs, beacons.WakeAt);
+
+        // Regression: on a host up longer than the budget, the condemn tick still sees
+        // the PRE-stamp dead-since (0). The budget must read the condemn's own instant,
+        // not the stale zero — or every long-lived host stops the beacon at birth and
+        // dead sessions never revive.
+        PunchState longUp = Punch(connectTimeoutMs: 5000);
+        PunchInput lateCondemn = PunchTick(now: 10_000_000_000);
+        lateCondemn.ConnectedCompleted = true;
+        lateCondemn.DeadSinceMs = 0; // captured before the shell stamps it
+        var stillBeacons = PunchFx(effects, PunchSchedulerMachine.Step(ref longUp, in lateCondemn, new Tick(0), effects));
+        Assert.True(stillBeacons.Condemn);
+        Assert.False(stillBeacons.Stop);
+        Assert.True(stillBeacons.Relay);
+
+        // An UNSTAMPED dead-since on an ordinary Dead tick keeps the old shell reading:
+        // the budget reads as long spent and the loop goes quiet.
+        PunchState unstamped = Punch();
+        PunchInput stale = PunchTick(phase: (byte)ConnPhase.Dead, now: 10_000_000_000, deadSince: 0);
+        Assert.True(PunchFx(effects, PunchSchedulerMachine.Step(ref unstamped, in stale, new Tick(0), effects)).Stop);
+
+        // Dead past the budget: passive revival is all that is left.
+        PunchInput spent = PunchTick(phase: (byte)ConnPhase.Dead, now: 5001 + PunchSchedulerMachine.DeadBeaconBudgetMs + 1, deadSince: 5001);
+        var after = PunchFx(effects, PunchSchedulerMachine.Step(ref live, in spent, new Tick(6001), effects));
+        Assert.True(after.Stop);
+        Assert.False(after.Relay);
+
+        // Inside the budget the beacon keeps a slow pace.
+        PunchInput inside = PunchTick(phase: (byte)ConnPhase.Dead, now: 5001 + 1000, deadSince: 5001);
+        var pacing = PunchFx(effects, PunchSchedulerMachine.Step(ref live, in inside, new Tick(6100), effects));
+        Assert.False(pacing.Stop);
+        Assert.True(pacing.Relay);
+    }
+
+    [Fact]
+    public void Punch_OpenWithoutTcpStops_AndTheUpgradeBudgetIsPerRun()
+    {
+        PunchState s = Punch();
+        Span<Effect> effects = stackalloc Effect[8];
+
+        // Direct already won on UDP: nothing left to upgrade.
+        PunchInput open = PunchTick(phase: (byte)ConnPhase.Open);
+        open.OpenWithoutDirectTcp = true;
+        var won = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in open, new Tick(5000), effects));
+        Assert.True(won.Stop);
+
+        // Degraded poking is budgeted: MaxUpgradeAttempts rounds, then passive.
+        PunchState degraded = Punch();
+        PunchInput tick = PunchTick(phase: (byte)ConnPhase.Degraded);
+        bool stopped = false;
+        for (int i = 0; i <= PunchSchedulerMachine.MaxUpgradeAttempts; i++)
+        {
+            var r = PunchFx(effects, PunchSchedulerMachine.Step(ref degraded, in tick, new Tick(5000 + i * 1000), effects));
+            stopped = r.Stop;
+        }
+
+        Assert.True(stopped);
+
+        // A fresh kick resets the budget — a new run pokes again.
+        PunchInput kick = default;
+        kick.Kind = PunchInputKind.Kick;
+        PunchSchedulerMachine.Step(ref degraded, in kick, new Tick(9999), Span<Effect>.Empty);
+        var fresh = PunchFx(effects, PunchSchedulerMachine.Step(ref degraded, in tick, new Tick(10_000), effects));
+        Assert.False(fresh.Stop);
+    }
+
+    [Fact]
+    public void Punch_SymmetricTrickleThrottlesDirects_PredictionHoldsThem()
+    {
+        PunchState s = Punch();
+        Span<Effect> effects = stackalloc Effect[8];
+        PunchInput tick = PunchTick();
+        tick.SymmetricHint = true;
+
+        // Window open (never punched): directs go out and stamp the clock.
+        var first = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in tick, new Tick(5000), effects));
+        Assert.True(first.Direct);
+        Assert.True(first.Relay);
+
+        // Half a second later the trickle window is closed: relays only.
+        PunchInput throttledInput = PunchTick(now: 5500);
+        throttledInput.SymmetricHint = true;
+        var throttled = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in throttledInput, new Tick(5500), effects));
+        Assert.False(throttled.Direct);
+        Assert.True(throttled.Relay);
+
+        // A fresh window at +1s, but port prediction holds directs — and does not
+        // consume the trickle stamp, so the window stays open for the next tick.
+        PunchInput predicting = PunchTick(now: 6001);
+        predicting.SymmetricHint = true;
+        predicting.PredictionActive = true;
+        var held = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in predicting, new Tick(6001), effects));
+        Assert.False(held.Direct);
+        Assert.True(held.Relay);
+        Assert.False(held.LinkLocal);
+
+        PunchInput released = PunchTick(now: 6100);
+        released.SymmetricHint = true;
+        var resumed = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in released, new Tick(6100), effects));
+        Assert.True(resumed.Direct); // the window survived the hold
+    }
+
+    [Fact]
+    public void Punch_LinkLocalWaitsForOrdinaryRoutes_AndTheExchangeGatesDirects()
+    {
+        PunchState s = Punch();
+        Span<Effect> effects = stackalloc Effect[8];
+
+        // Before the fallback delay: ordinary directs yes, link-local no.
+        PunchInput early = PunchTick(now: 5000 + PunchSchedulerMachine.LinkLocalFallbackDelayMs - 1, kickedAt: 5000);
+        var e = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in early, new Tick(5599), effects));
+        Assert.True(e.Direct);
+        Assert.False(e.LinkLocal);
+
+        PunchInput late = PunchTick(now: 5000 + PunchSchedulerMachine.LinkLocalFallbackDelayMs + 1, kickedAt: 5000);
+        var l = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in late, new Tick(5601), effects));
+        Assert.True(l.LinkLocal);
+
+        // The peer's candidate exchange gates directs; relays are always worth a datagram.
+        PunchState exchanging = Punch();
+        PunchInput waiting = PunchTick(now: 9000);
+        waiting.AwaitExchange = true;
+        waiting.PeerCandidatesReceived = false;
+        var w = PunchFx(effects, PunchSchedulerMachine.Step(ref exchanging, in waiting, new Tick(9000), effects));
+        Assert.False(w.Direct);
+        Assert.False(w.LinkLocal);
+        Assert.True(w.Relay);
+
+        waiting.PeerCandidatesReceived = true;
+        var ready = PunchFx(effects, PunchSchedulerMachine.Step(ref exchanging, in waiting, new Tick(9100), effects));
+        Assert.True(ready.Direct);
+        Assert.True(ready.LinkLocal); // past the delay, exchange done
+    }
+
+    [Fact]
+    public void Punch_LookupAnnounceAndTcpCadences()
+    {
+        PunchState s = Punch();
+        Span<Effect> effects = stackalloc Effect[8];
+
+        // Lookup: pinned key + providers, retried at most once per LookupRetryMs.
+        PunchInput lookup = PunchTick(now: 5000);
+        lookup.PinnedLookupPossible = true;
+        var first = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in lookup, new Tick(5000), effects));
+        Assert.True(first.Lookup);
+        PunchInput soonInput = PunchTick(now: 5500);
+        soonInput.PinnedLookupPossible = true;
+        var soon = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in soonInput, new Tick(5500), effects));
+        Assert.False(soon.Lookup);
+        PunchInput laterInput = PunchTick(now: 5000 + PunchSchedulerMachine.LookupRetryMs + 1);
+        laterInput.PinnedLookupPossible = true;
+        var later = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in laterInput, new Tick(6001), effects));
+        Assert.True(later.Lookup);
+
+        // Announce: only relay-signaling sessions still punching, on the retry window.
+        PunchState announcing = Punch();
+        PunchInput announce = PunchTick(now: 5000);
+        announce.RelaySignalingOnly = true;
+        announce.Established = true;
+        announce.AnnounceRetryDue = true;
+        Assert.True(PunchFx(effects, PunchSchedulerMachine.Step(ref announcing, in announce, new Tick(5000), effects)).Announce);
+        announce.Phase = (byte)ConnPhase.Degraded;
+        Assert.False(PunchFx(effects, PunchSchedulerMachine.Step(ref announcing, in announce, new Tick(5200), effects)).Announce);
+
+        // TCP: eligible after the kick delay, never before.
+        PunchState tcp = Punch();
+        PunchInput before = PunchTick(now: PunchSchedulerMachine.TcpKickDelayMs - 1);
+        before.TcpEligible = true;
+        Assert.False(PunchFx(effects, PunchSchedulerMachine.Step(ref tcp, in before, new Tick(1199), effects)).Tcp);
+        PunchInput after = PunchTick(now: PunchSchedulerMachine.TcpKickDelayMs + 1);
+        after.TcpEligible = true;
+        Assert.True(PunchFx(effects, PunchSchedulerMachine.Step(ref tcp, in after, new Tick(1201), effects)).Tcp);
+    }
+
+    [Fact]
+    public void Punch_PaceFollowsThePhase()
+    {
+        PunchState s = Punch();
+        Span<Effect> effects = stackalloc Effect[8];
+        long t = 10_000;
+        foreach ((byte phase, long pace) in new[]
+        {
+            ((byte)ConnPhase.Punching, PunchSchedulerMachine.PunchPaceMs),
+            ((byte)ConnPhase.Dead, PunchSchedulerMachine.DeadBeaconPaceMs),
+            ((byte)ConnPhase.Degraded, PunchSchedulerMachine.UpgradePaceMs),
+            ((byte)ConnPhase.Open, PunchSchedulerMachine.UpgradePaceMs),
+        })
+        {
+            t += 5000;
+            PunchInput pacing = PunchTick(phase: phase, now: t);
+            var r = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in pacing, new Tick(t), effects));
+            Assert.False(r.Stop);
+            Assert.Equal(t + pace, r.WakeAt);
+        }
+    }
+
     // ------------------------------------------------------------------ totality and span discipline
 
     [Fact]
@@ -542,6 +1177,9 @@ public sealed class MachineTests
         Span<Effect> effects = stackalloc Effect[4];
         PmtuState p = Pmtu();
         KeepaliveState k = Keepalive(intervalMs: 100, timeoutMs: 50, maxUnanswered: 3);
+        PathSelectorState sel = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
+        PunchState punch = Punch();
+        HandshakeState hs = Handshake(offeredCrypto: true);
 
         for (int i = 0; i < 10_000; i++)
         {
@@ -566,6 +1204,68 @@ public sealed class MachineTests
             Assert.InRange(kn, 0, effects.Length);
             Assert.True(k.UnansweredProbes is >= 0 and <= 3);
             Assert.True(k.ProbeNonce == 0 || k.ProbeNonce < 0);
+
+            PathSelectorInput si = default;
+            si.Kind = (PathSelectorInputKind)rng.Next(256);
+            si.PeerConfirmed = rng.Next(2) == 0;
+            si.RelaySignalingOnly = rng.Next(2) == 0;
+            si.RelayUsable = rng.Next(2) == 0;
+            si.ForcedPhase = (byte)rng.Next(256); // includes phases that are not ConnPhase values
+            int sn = PathSelectorMachine.Step(ref sel, in si, new Tick(rng.NextInt64(0, long.MaxValue / 2)), effects);
+            Assert.InRange(sn, 0, effects.Length);
+            Assert.True(sel.Phase is >= (ConnPhase)0 and <= ConnPhase.Closed);
+            Assert.True(sel.Path is >= (PathSel)0 and <= PathSel.Relay);
+            if (sel.Phase == ConnPhase.Closed)
+            {
+                Assert.Equal(PathSel.None, sel.Path); // Closed always clears the path
+            }
+
+            PunchInput pin = default;
+            pin.Kind = (PunchInputKind)rng.Next(256);
+            pin.Phase = (byte)rng.Next(256);
+            pin.NowMs = rng.NextInt64(0, long.MaxValue / 4);
+            pin.KickedAtMs = rng.NextInt64(0, long.MaxValue / 4);
+            pin.DeadSinceMs = rng.NextInt64(-10, long.MaxValue / 4);
+            bool pb1 = rng.Next(2) == 0, pb2 = rng.Next(2) == 0, pb3 = rng.Next(2) == 0;
+            pin.OpenWithoutDirectTcp = pb1;
+            pin.ConnectedCompleted = pb2;
+            pin.PinnedLookupPossible = pb3;
+            pin.RelaySignalingOnly = rng.Next(2) == 0;
+            pin.Established = rng.Next(2) == 0;
+            pin.SymmetricHint = rng.Next(2) == 0;
+            pin.PredictionActive = rng.Next(2) == 0;
+            pin.AwaitExchange = rng.Next(2) == 0;
+            pin.PeerCandidatesReceived = rng.Next(2) == 0;
+            pin.TcpEligible = rng.Next(2) == 0;
+            pin.AnnounceRetryDue = rng.Next(2) == 0;
+            int pn2 = PunchSchedulerMachine.Step(ref punch, in pin, new Tick(0), effects);
+            Assert.InRange(pn2, 0, effects.Length);
+            bool punchStopped = false;
+            for (int e = 0; e < pn2; e++)
+            {
+                if (effects[e].Kind == EffectKind.Notify && effects[e].Value == (long)PunchNotify.Stop) punchStopped = true;
+                if (punchStopped)
+                {
+                    // A stopped scheduler emits nothing schedulable after the verdict.
+                    Assert.NotEqual(EffectKind.Transmit, effects[e].Kind);
+                    Assert.NotEqual(EffectKind.Arm, effects[e].Kind);
+                }
+            }
+
+            Assert.True(punch.UpgradeAttempts is >= 0 and <= PunchSchedulerMachine.MaxUpgradeAttempts + 1);
+
+            HandshakeInput hi = default;
+            hi.Kind = (HandshakeInputKind)rng.Next(256);
+            hi.CryptoBody = rng.Next(2) == 0;
+            hi.PinMatches = rng.Next(2) == 0;
+            hi.BodyPlausible = rng.Next(2) == 0;
+            hi.LengthClassOk = rng.Next(2) == 0;
+            hi.Accepted = rng.Next(2) == 0;
+            hi.ConfirmOk = rng.Next(2) == 0;
+            hi.FrameToken = unchecked((uint)rng.NextInt64());
+            hi.PeerToken = unchecked((uint)rng.NextInt64());
+            int hn = HandshakeMachine.Step(ref hs, in hi, new Tick(0), effects);
+            Assert.InRange(hn, 0, effects.Length);
         }
 
         // Default-constructed states (all-zero options) stay total too.

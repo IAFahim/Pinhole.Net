@@ -839,8 +839,8 @@ public class CryptoTests
         await oracle.ShakeHandsAsync(node, advertisedToken: OraclePeer.Token + 1);
         PinholeConnection conn = await dial.WaitAsync(Timeout);
         ConnState state = node.Engine.Lookup(oracle.PeerId)!;
-        Assert.True(state.RemoteTokenAuthenticated);
-        Assert.Equal(OraclePeer.Token, state.RemoteToken);
+        Assert.True(state.Handshake.RemoteTokenAuthenticated);
+        Assert.Equal(OraclePeer.Token, state.Handshake.RemoteToken);
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         conn.Received += p => got.TrySetResult(p.ToArray());
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "real token"u8),
@@ -859,7 +859,7 @@ public class CryptoTests
         await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirmOldKeys);
         ConnState incoming = node.Engine.Lookup(oracle.PeerId)!;
         Assert.True(incoming.IsIncoming);
-        Assert.False(incoming.RemoteTokenAuthenticated);
+        Assert.False(incoming.Handshake.RemoteTokenAuthenticated);
         Assert.False(incoming.Connected.Task.IsCompleted);
 
         using var deadline = new CancellationTokenSource(Timeout);
@@ -868,7 +868,7 @@ public class CryptoTests
         await using var connected = await dial.WaitAsync(Timeout);
         Assert.Same(incoming.Public, connected);
         Assert.Equal(oracle.Identity.PublicKey, incoming.PinnedStaticKey);
-        Assert.True(incoming.RemoteTokenAuthenticated);
+        Assert.True(incoming.Handshake.RemoteTokenAuthenticated);
         Assert.True(connected.IsEncrypted);
     }
 
@@ -916,7 +916,7 @@ public class CryptoTests
         byte[] latePunch = await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirmed);
         ConnState previous = node.Engine.Lookup(oracle.PeerId)!;
         Assert.Equal(confirmed, previous.Crypto!.PeerConfirmed);
-        Assert.False(previous.RemoteTokenAuthenticated); // key proof precedes the first sealed frame
+        Assert.False(previous.Handshake.RemoteTokenAuthenticated); // key proof precedes the first sealed frame
         await previous.Public!.CloseAsync();
         await oracle.Sock.SendToAsync(latePunch, new IPEndPoint(IPAddress.Loopback, node.LocalPort));
         if (confirmed)
@@ -996,7 +996,7 @@ public class CryptoTests
 
         Assert.Equal(PinholeConnectionState.Open, conn.State);
         Assert.Equal(originalRemote, conn.Path.Remote);
-        Assert.Equal(OraclePeer.Token, state.RemoteToken);
+        Assert.Equal(OraclePeer.Token, state.Handshake.RemoteToken);
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         conn.Received += p => got.TrySetResult(p.ToArray());
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "still authenticated"u8),

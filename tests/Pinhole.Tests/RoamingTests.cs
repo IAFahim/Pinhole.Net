@@ -154,4 +154,20 @@ internal static class TestPoll
             await Task.Delay(50);
         }
     }
+
+    public static async Task<bool> TryUntilAsync(TimeSpan budget, Func<bool> condition)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (sw.Elapsed >= budget)
+            {
+                return false;
+            }
+
+            await Task.Delay(50);
+        }
+
+        return true;
+    }
 }

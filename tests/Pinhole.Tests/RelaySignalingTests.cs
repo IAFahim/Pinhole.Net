@@ -244,7 +244,7 @@ public sealed class RelaySignalingTests
         using var attacker = lab.Net.CreateHost(new(IPAddress.Parse("192.0.2.66"), 60666));
         attacker.SendTo(forged, new IPEndPoint(IPAddress.Parse("192.0.2.10").MapToIPv6(), a.LocalPort).Serialize());
         await Until(() => state.Public!.FramesRejected > 0);
-        Assert.False(state.RemoteTokenKnown); Assert.False(state.Crypto!.Established);
+        Assert.False(state.Handshake.RemoteTokenKnown); Assert.False(state.Crypto!.Established);
         Assert.False(state.Connected.Task.IsCompleted); Assert.Null(state.Crypto.PeerStaticPublic);
         await a.Engine.CloseAsync(state);
     }

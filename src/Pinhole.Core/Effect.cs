@@ -27,6 +27,10 @@ public static class EffectPath
 {
     public const int Direct = 0;
     public const int Relay = 1;
+
+    // Scheduling tag, not a routed path: PunchScheduler uses it to gate the link-local
+    // candidate class separately from ordinary directs (they wait out the fallback delay).
+    public const int DirectLinkLocal = 2;
 }
 
 // Machines never throw on a full span: they emit what fits and report the written count,
