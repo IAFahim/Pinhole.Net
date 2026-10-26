@@ -1049,7 +1049,7 @@ public static class BlobClient
                 }
 
                 int desired = (int)Math.Min(_controller.MaxRunChunks, limit - start);
-                int count = Math.Min(desired, _controller.AffordableChunks(desired));
+                int count = Math.Min(desired, _controller.AffordableChunks(desired, now));
                 if (count < 1)
                 {
                     return; // pacer credit exhausted; retry next tick

@@ -117,14 +117,17 @@ internal sealed class BlobController
         ? BlobWire.MaxRequestCount
         : (int)Math.Clamp(_window / (8 * ChunkBytes), 2, BlobWire.MaxRequestCount);
 
-    public int AffordableChunks(int desired)
+    // The pacer runs on the caller's clock (D-02): both credit accrual points must
+    // see the same timebase the control loop chose, not an ambient read that can
+    // jump ahead of it.
+    public int AffordableChunks(int desired, long nowMs)
     {
         if (_fixedWindow)
         {
             return desired;
         }
 
-        AccruePacerCredit(Environment.TickCount64);
+        AccruePacerCredit(nowMs);
         return (int)Math.Min(desired, _pacerCreditBytes / ChunkBytes);
     }
 
