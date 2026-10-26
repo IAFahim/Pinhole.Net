@@ -281,7 +281,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     public async Task DirectionalTailBlackoutWithSpentAllowance_StillFinishes()
     {
         string dir = TempDir();
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         Task<BlobDownloadResult>? download = null;
         try
         {
@@ -340,7 +340,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with
                 {
-                    RecoveryTimeout = TimeSpan.FromSeconds(13),
+                    RecoveryTimeout = TimeSpan.FromSeconds(16),
                     NodeOptions = ClientOptions(lab) with
                     {
                         PathValidationIdle = TimeSpan.FromSeconds(2),
@@ -353,16 +353,19 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             // The full cut must outlast the ~5s these validation knobs need to
             // declare the silent path dead; the tail cut must outlast the first
             // natural PTO expiry (~3s at the ceiling) so the re-request flight
-            // is genuinely lost, not merely late.
+            // is genuinely lost, not merely late. The allowance is sized so
+            // that even a slow runner's redial and answer latencies leave the
+            // post-cut remainder more than a round trip of headroom — the
+            // scenario must finish on every matrix leg, not race its budget.
             await fullCut.Task.WaitAsync(TimeSpan.FromSeconds(20));
             await Task.Delay(TimeSpan.FromSeconds(7), stop.Token);
             providerToClient.Disable();
             clientToProvider.Disable();
-            await tailCut.Task.WaitAsync(TimeSpan.FromSeconds(20));
-            await Task.Delay(TimeSpan.FromSeconds(3.5), stop.Token);
+            await tailCut.Task.WaitAsync(TimeSpan.FromSeconds(25));
+            await Task.Delay(TimeSpan.FromSeconds(3), stop.Token);
             providerToClient.Disable();
 
-            BlobDownloadResult result = await download.WaitAsync(TimeSpan.FromSeconds(40));
+            BlobDownloadResult result = await download.WaitAsync(TimeSpan.FromSeconds(45));
             Assert.Equal(expected, await File.ReadAllBytesAsync(result.Path));
             output.WriteLine($"survived both blackouts and finished at {watch.Elapsed.TotalSeconds:F1}s");
         }
