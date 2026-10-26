@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using Xunit;
 using Xunit.Abstractions;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

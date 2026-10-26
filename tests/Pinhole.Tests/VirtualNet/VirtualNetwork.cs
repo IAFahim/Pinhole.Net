@@ -1,22 +1,27 @@
 using System.Net;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
+// The wall-clock delivery vehicle around Pinhole.Sim's link pipeline: a socket
+// map, NAT registration, a scheduler thread for delayed crossings and shaper
+// drains. Rule matching, loss, shaping, and jitter all live in LinkPipeline;
+// endpoint translation lives in VirtualNat.
 internal sealed class VirtualNetwork : IDisposable
 {
     private readonly object _gate = new();
     private readonly Dictionary<IPEndPoint, VirtualUdpSocket> _internet = new();
     private readonly List<VirtualNat> _nats = [];
-    private readonly List<LinkRule> _rules = [];
+    private readonly Dictionary<IPEndPoint, VirtualUdpSocket> _behindNat = new();
+    private readonly LinkPipeline _links = new(new Random());
     private readonly List<ScheduledPacket> _inflight = [];
-    private readonly Dictionary<LinkRule, Shaper> _shapers = new();
     private readonly Thread _scheduler;
     private readonly AutoResetEvent _wake = new(false);
     private volatile bool _disposed;
 
     public long Delivered;
-    public long DroppedByPolicy;
     public long Unroutable;
+    public long DroppedByPolicy => _links.DroppedByPolicy;
 
     public int LiveSockets => _liveSockets;
     private int _liveSockets;
@@ -29,21 +34,9 @@ internal sealed class VirtualNetwork : IDisposable
         _scheduler.Start();
     }
 
-    public void AddRule(LinkRule rule)
-    {
-        lock (_gate)
-        {
-            _rules.Add(rule);
-        }
-    }
+    public void AddRule(LinkRule rule) => _links.AddRule(rule);
 
-    public void RemoveRule(LinkRule rule)
-    {
-        lock (_gate)
-        {
-            _rules.Remove(rule);
-        }
-    }
+    public void RemoveRule(LinkRule rule) => _links.RemoveRule(rule);
 
     public VirtualUdpSocket CreateHost(IPEndPoint address)
     {
@@ -66,7 +59,15 @@ internal sealed class VirtualNetwork : IDisposable
 
     private int _nextEphemeralPort = 50000;
 
-    public VirtualUdpSocket CreateBehindNat(VirtualNat nat) => nat.Attach();
+    public VirtualUdpSocket CreateBehindNat(VirtualNat nat)
+    {
+        lock (_gate)
+        {
+            var socket = new VirtualUdpSocket(this, nat.AllocateInternalEndpoint(), nat);
+            _behindNat[socket.Address] = socket;
+            return socket;
+        }
+    }
 
     // Called by sockets: one datagram leaves an attached socket toward dest.
     internal void RouteFrom(VirtualUdpSocket sender, IPEndPoint dest, byte[] payload)
@@ -74,7 +75,7 @@ internal sealed class VirtualNetwork : IDisposable
         IPEndPoint source = sender.Address;
         if (sender.Nat is { } nat)
         {
-            if (!nat.TryTranslateOutbound(sender, dest, out source))
+            if (!nat.TryTranslateOutbound(sender.Address, dest, out source))
             {
                 Interlocked.Increment(ref Unroutable); // a fully blocked NAT: not one direct byte leaves
                 return;
@@ -84,72 +85,26 @@ internal sealed class VirtualNetwork : IDisposable
         Continue(source, dest, payload);
     }
 
-    // Post-NAT routing: shape the internet leg, then deliver.
+    // Post-NAT routing: the Sim pipeline decides loss/shape/delay, this class delivers.
     private void Continue(IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
-        LinkRule? rule;
-        lock (_gate)
+        LinkDecision decision = _links.Cross(source, dest, payload);
+        switch (decision.Kind)
         {
-            rule = _rules.FirstOrDefault(r => r.Match(source, dest));
+            case LinkDecisionKind.Deliver:
+                Deliver(source, dest, payload);
+                break;
+            case LinkDecisionKind.Schedule:
+                ScheduleCrossing(decision.Delay, source, dest, payload);
+                break;
+            case LinkDecisionKind.Shaped:
+            case LinkDecisionKind.Dropped:
+                break;
         }
-
-        bool lost = rule switch
-        {
-            { DropAll: true } => true,
-            _ => rule?.LossFor(source, dest)?.LoseNext() == true,
-        };
-        if (lost)
-        {
-            if (rule is not null)
-            {
-                Interlocked.Increment(ref rule.Lost);
-            }
-
-            Interlocked.Increment(ref DroppedByPolicy);
-            return;
-        }
-
-        if (rule is not null)
-        {
-            Interlocked.Increment(ref rule.Passed);
-        }
-
-        // A finite-bandwidth rule parks the packet in its shared FIFO instead of crossing
-        // now; the scheduler drains it at the configured rate and applies the rule's
-        // propagation delay as the packet leaves the queue.
-        if (rule is { BitsPerSecond: > 0 } shaped)
-        {
-            Shaper shaper;
-            lock (_gate)
-            {
-                if (!_shapers.TryGetValue(shaped, out shaper!))
-                {
-                    shaper = new Shaper(this, shaped.BitsPerSecond, shaped.QueuePackets);
-                    _shapers[shaped] = shaper;
-                }
-            }
-
-            shaper.Enqueue(source, dest, payload);
-            return;
-        }
-
-        ScheduleCrossing(rule, source, dest, payload);
     }
 
-    private void ScheduleCrossing(LinkRule? rule, IPEndPoint source, IPEndPoint dest, byte[] payload)
+    private void ScheduleCrossing(TimeSpan delay, IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
-        TimeSpan delay = rule?.Delay ?? TimeSpan.Zero;
-        if (rule is { } shaped && shaped.Jitter > TimeSpan.Zero)
-        {
-            delay += TimeSpan.FromMilliseconds(Random.Shared.NextDouble() * shaped.Jitter.TotalMilliseconds);
-        }
-
-        if (delay <= TimeSpan.Zero)
-        {
-            Deliver(source, dest, payload);
-            return;
-        }
-
         lock (_gate)
         {
             if (_disposed)
@@ -165,26 +120,23 @@ internal sealed class VirtualNetwork : IDisposable
     private void Deliver(IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
         VirtualUdpSocket? host = null;
-        VirtualNat? owner = null;
+        VirtualUdpSocket? behindNat = null;
         lock (_gate)
         {
             if (!_internet.TryGetValue(dest, out host))
             {
-                owner = _nats.FirstOrDefault(n => n.Owns(dest));
+                VirtualNat? owner = _nats.FirstOrDefault(n => n.Owns(dest));
+                if (owner is not null && owner.TryTranslateInbound(dest, source, out IPEndPoint? internalDest))
+                {
+                    _behindNat.TryGetValue(internalDest!, out behindNat);
+                }
             }
         }
 
-        if (host is not null)
+        if (host is not null || behindNat is not null)
         {
             Interlocked.Increment(ref Delivered);
-            host.Enqueue(source, payload);
-            return;
-        }
-
-        if (owner is not null && owner.TryTranslateInbound(dest, source, out VirtualUdpSocket? internalSocket))
-        {
-            Interlocked.Increment(ref Delivered);
-            internalSocket!.Enqueue(source, payload);
+            (host ?? behindNat)!.Enqueue(source, payload);
             return;
         }
 
@@ -197,7 +149,6 @@ internal sealed class VirtualNetwork : IDisposable
         while (!_disposed)
         {
             List<ScheduledPacket> due = [];
-            List<(LinkRule Rule, List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Emitted)> drained = [];
             lock (_gate)
             {
                 DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -209,16 +160,10 @@ internal sealed class VirtualNetwork : IDisposable
                         _inflight.RemoveAt(i);
                     }
                 }
-
-                foreach ((LinkRule rule, Shaper shaper) in _shapers)
-                {
-                    List<(IPEndPoint, IPEndPoint, byte[])> emitted = shaper.Drain(now);
-                    if (emitted.Count > 0)
-                    {
-                        drained.Add((rule, emitted));
-                    }
-                }
             }
+
+            List<(LinkRule Rule, List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Emitted)> drained =
+                _links.DrainShapers(DateTimeOffset.UtcNow);
 
             // Due packets were collected newest-first (backwards removal is O(1)); deliver
             // oldest-first: chronological, causal order — exactly what loopback UDP gives.
@@ -234,7 +179,7 @@ internal sealed class VirtualNetwork : IDisposable
             {
                 foreach ((IPEndPoint source, IPEndPoint dest, byte[] payload) in emitted)
                 {
-                    ScheduleCrossing(rule, source, dest, payload);
+                    ScheduleCrossing(_links.PropagationDelay(rule), source, dest, payload);
                 }
             }
 
@@ -246,25 +191,25 @@ internal sealed class VirtualNetwork : IDisposable
     {
         lock (_gate)
         {
-            _nats.Add(nat);
+            if (!_nats.Contains(nat))
+            {
+                _nats.Add(nat);
+            }
         }
     }
 
     public string Counters()
     {
+        VirtualNat[] boxes;
         lock (_gate)
         {
-            string rules = string.Join("; ", _rules.Select(r =>
-            {
-                string shaper = _shapers.TryGetValue(r, out Shaper? s) && (s.QueuedDropped > 0 || s.Dequeued > 0)
-                    ? $" shaped(dequeued={s.Dequeued},tailDropped={s.QueuedDropped},depth={s.Depth})"
-                    : "";
-                return $"rule(passed={Interlocked.Read(ref r.Passed)},lost={Interlocked.Read(ref r.Lost)}){shaper}";
-            }));
-            string nats = string.Join("; ", _nats.Select(n => n.Counters()));
-            return $"delivered={Interlocked.Read(ref Delivered)} dropped={Interlocked.Read(ref DroppedByPolicy)} " +
-                   $"unroutable={Interlocked.Read(ref Unroutable)} {rules} {nats}".Trim();
+            boxes = _nats.ToArray();
         }
+
+        string rules = _links.RuleCounters();
+        string nats = string.Join("; ", boxes.Select(n => n.Counters()));
+        return $"delivered={Interlocked.Read(ref Delivered)} dropped={Interlocked.Read(ref _links.DroppedByPolicy)} " +
+               $"unroutable={Interlocked.Read(ref Unroutable)} {rules} {nats}".Trim();
     }
 
     public void Dispose()
@@ -299,60 +244,4 @@ internal sealed class VirtualNetwork : IDisposable
 
     private readonly record struct ScheduledPacket(
         DateTimeOffset Due, IPEndPoint Source, IPEndPoint Dest, byte[] Payload);
-
-    internal sealed class Shaper(VirtualNetwork net, long bitsPerSecond, int queuePackets)
-    {
-        private readonly object _gate = new();
-        private readonly Queue<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> _queue = new();
-        private double _creditBits;
-        private DateTimeOffset _lastDrain = DateTimeOffset.UtcNow;
-
-        public long QueuedDropped;
-        public long Dequeued;
-        public int Depth { get { lock (_gate) { return _queue.Count; } } }
-
-        public void Enqueue(IPEndPoint source, IPEndPoint dest, byte[] payload)
-        {
-            lock (_gate)
-            {
-                if (_queue.Count >= queuePackets)
-                {
-                    Interlocked.Increment(ref QueuedDropped);
-                    Interlocked.Increment(ref net.DroppedByPolicy);
-                    return;
-                }
-
-                _queue.Enqueue((source, dest, payload));
-            }
-        }
-
-        public List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Drain(DateTimeOffset now)
-        {
-            lock (_gate)
-            {
-                if (_queue.Count == 0)
-                {
-                    _lastDrain = now;
-                    _creditBits = 0;
-                    return [];
-                }
-
-                _creditBits += (now - _lastDrain).TotalSeconds * bitsPerSecond;
-                _lastDrain = now;
-                // A modest burst allowance keeps the link from idling between scheduler
-                // ticks; real links serialize packet-by-packet, the lab per 5 ms tick.
-                _creditBits = Math.Min(_creditBits, bitsPerSecond * 0.2);
-                var emitted = new List<(IPEndPoint, IPEndPoint, byte[])>();
-                while (_queue.Count > 0 && _queue.Peek().Payload.Length * 8L <= _creditBits)
-                {
-                    (IPEndPoint source, IPEndPoint dest, byte[] payload) = _queue.Dequeue();
-                    _creditBits -= payload.Length * 8L;
-                    Interlocked.Increment(ref Dequeued);
-                    emitted.Add((source, dest, payload));
-                }
-
-                return emitted;
-            }
-        }
-    }
 }

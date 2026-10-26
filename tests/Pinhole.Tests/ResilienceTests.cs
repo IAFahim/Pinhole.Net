@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Xunit;
 using Xunit.Abstractions;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using Pinhole;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

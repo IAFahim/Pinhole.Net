@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Xunit;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

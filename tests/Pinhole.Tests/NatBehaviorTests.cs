@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using Xunit;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

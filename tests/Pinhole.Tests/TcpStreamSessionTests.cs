@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Threading.Channels;
 using Xunit;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 

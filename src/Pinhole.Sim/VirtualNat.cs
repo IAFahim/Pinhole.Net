@@ -1,6 +1,6 @@
 using System.Net;
 
-namespace Pinhole.Tests;
+namespace Pinhole.Sim;
 
 public enum VirtualNatKind
 {
@@ -10,9 +10,13 @@ public enum VirtualNatKind
     Symmetric,
 }
 
+// The endpoint-translation semantics of the four NAT behaviors: a mapping table
+// from internal endpoints to public ones plus the per-kind inbound filter. It is
+// deliberately socket-free — the caller resolves the returned internal endpoint
+// to whatever peer object it attached there — so a deterministic, thread-free
+// sim can drive it exactly like the wall-clock fixture does.
 internal sealed class VirtualNat : IDisposable
 {
-    private readonly VirtualNetwork _net;
     private readonly IPAddress _publicAddress;
     private readonly byte[] _internalBase;
     private readonly int _internalPrefix;
@@ -22,9 +26,9 @@ internal sealed class VirtualNat : IDisposable
     private int _nextInternalHost = 2; // .1 is the box itself
     private int _nextPublicPort = 49152;
 
-    private sealed class Mapping(VirtualUdpSocket socket, IPEndPoint @public)
+    private sealed class Mapping(IPEndPoint internalEndpoint, IPEndPoint @public)
     {
-        public readonly VirtualUdpSocket Socket = socket;
+        public readonly IPEndPoint Internal = internalEndpoint;
         public readonly IPEndPoint Public = @public;
         public HashSet<IPAddress> SentToAddresses { get; } = [];
         public HashSet<IPEndPoint> SentToEndpoints { get; } = [];
@@ -32,15 +36,13 @@ internal sealed class VirtualNat : IDisposable
         public bool Dead;
     }
 
-    public VirtualNat(VirtualNetwork net, VirtualNatKind kind, IPAddress publicAddress, string internalCidr)
+    public VirtualNat(VirtualNatKind kind, IPAddress publicAddress, string internalCidr)
     {
-        _net = net;
         Kind = kind;
         _publicAddress = publicAddress;
         Subnet internalSide = Subnet.Parse(internalCidr);
         _internalBase = internalSide.Base.GetAddressBytes();
         _internalPrefix = internalSide.PrefixLength;
-        _net.Register(this);
     }
 
     public VirtualNatKind Kind { get; }
@@ -56,7 +58,8 @@ internal sealed class VirtualNat : IDisposable
     public long FilterDrops;
     public long ExpiredMappings;
 
-    internal VirtualUdpSocket Attach()
+    // The next internal address for a socket that will live behind this NAT.
+    public IPEndPoint AllocateInternalEndpoint()
     {
         lock (_gate)
         {
@@ -64,13 +67,13 @@ internal sealed class VirtualNat : IDisposable
             int hostOffset = _internalPrefix / 8 - 1;
             int candidate = _nextInternalHost++;
             host[hostOffset] = (byte)(_internalBase[hostOffset] + candidate);
-            return new VirtualUdpSocket(_net, new IPEndPoint(new IPAddress(host), 40000 + candidate), nat: this);
+            return new IPEndPoint(new IPAddress(host), 40000 + candidate);
         }
     }
 
-    internal bool Owns(IPEndPoint endpoint) => endpoint.Address.Equals(_publicAddress);
+    public bool Owns(IPEndPoint endpoint) => endpoint.Address.Equals(_publicAddress);
 
-    internal bool TryTranslateOutbound(VirtualUdpSocket sender, IPEndPoint dest, out IPEndPoint publicSource)
+    public bool TryTranslateOutbound(IPEndPoint internalSource, IPEndPoint dest, out IPEndPoint publicSource)
     {
         if (BlockAllOutboundDirect)
         {
@@ -84,19 +87,19 @@ internal sealed class VirtualNat : IDisposable
             if (Kind == VirtualNatKind.Symmetric)
             {
                 mapping = _mappings.FirstOrDefault(m => !m.Dead
-                    && m.Socket.Address.Equals(sender.Address) && m.SoleRemote is { } r && r.Equals(dest));
+                    && m.Internal.Equals(internalSource) && m.SoleRemote is { } r && r.Equals(dest));
                 if (mapping is null)
                 {
-                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, NextPort())) { SoleRemote = dest };
+                    mapping = new Mapping(internalSource, new IPEndPoint(_publicAddress, NextPort())) { SoleRemote = dest };
                     Adopt(mapping);
                 }
             }
             else
             {
-                mapping = _mappings.FirstOrDefault(m => !m.Dead && m.Socket.Address.Equals(sender.Address));
+                mapping = _mappings.FirstOrDefault(m => !m.Dead && m.Internal.Equals(internalSource));
                 if (mapping is null)
                 {
-                    mapping = new Mapping(sender, new IPEndPoint(_publicAddress, NextPort()));
+                    mapping = new Mapping(internalSource, new IPEndPoint(_publicAddress, NextPort()));
                     Adopt(mapping);
                 }
             }
@@ -116,11 +119,11 @@ internal sealed class VirtualNat : IDisposable
         Interlocked.Increment(ref MappingsCreated);
     }
 
-    internal bool TryTranslateInbound(IPEndPoint publicDest, IPEndPoint source, out VirtualUdpSocket? socket)
+    public bool TryTranslateInbound(IPEndPoint publicDest, IPEndPoint source, out IPEndPoint? internalDest)
     {
         lock (_gate)
         {
-            socket = null;
+            internalDest = null;
             if (!_byPublic.TryGetValue(publicDest, out Mapping? mapping) || mapping.Dead)
             {
                 return false;
@@ -140,7 +143,7 @@ internal sealed class VirtualNat : IDisposable
                 return false;
             }
 
-            socket = mapping.Socket;
+            internalDest = mapping.Internal;
             return true;
         }
     }

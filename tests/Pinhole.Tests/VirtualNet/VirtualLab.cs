@@ -1,5 +1,6 @@
 using System.Net;
 using Pinhole;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
@@ -49,8 +50,12 @@ internal sealed class VirtualLab : IDisposable
 
     public IReadOnlyList<IPEndPoint> StunServers => _stun.Select(s => s.LocalEndPoint).ToArray();
 
-    public VirtualNat Nat(VirtualNatKind kind, string publicAddress, string internalCidr) =>
-        new(Net, kind, IPAddress.Parse(publicAddress), internalCidr);
+    public VirtualNat Nat(VirtualNatKind kind, string publicAddress, string internalCidr)
+    {
+        var nat = new VirtualNat(kind, IPAddress.Parse(publicAddress), internalCidr);
+        Net.Register(nat);
+        return nat;
+    }
 
     public PinholeOptions BaseOptions(Func<PinholeOptions, PinholeOptions>? tweak = null)
     {

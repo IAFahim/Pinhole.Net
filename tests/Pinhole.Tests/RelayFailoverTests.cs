@@ -4,6 +4,7 @@ using System.Text;
 using Pinhole.Rendezvous;
 using Xunit;
 using Xunit.Abstractions;
+using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
