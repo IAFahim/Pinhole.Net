@@ -347,6 +347,29 @@ public static class BlobClient
         return Math.Max(armMs, Math.Min(SweepFloorMs, ptoMs));
     }
 
+    // Iteration gaps shorter than this many control ticks are ordinary scheduling
+    // jitter around the idle-wait cadence and must credit nothing: a healthy
+    // flight keeps aging through them. The margin must also clear Windows' ~16 ms
+    // timer granularity — an idle loop's WaitAsync(5 ms) wakes land ~16 ms apart
+    // there, and a threshold at that boundary would credit every idle iteration
+    // and stretch every PTO ~3x on an otherwise quiet connection.
+    internal const long LocalStallGapTicks = 10;
+
+    // Wire-time clocks may only count time the control loop was actually running.
+    // An inter-iteration gap beyond LocalStallGapTicks ticks means the loop itself
+    // was blocked — a verifier callback stalling on the loop's own thread, a
+    // whole-process GC pause, descheduling on a loaded runner — which is not path
+    // loss: the answers the PTO would expire are buffered or still in flight, and
+    // retransmitting into them manufactures duplicate load the wire never asked
+    // for. Such a gap credits back gap - one tick, so a flight already at its PTO
+    // edge when the stall hit still expires promptly and a genuinely lost flight
+    // is never forgiven. The pathological production case — a pause long enough
+    // that the responses were paused with it — errs toward delaying a retransmit
+    // by the pause length; late healing is the safe direction, a retransmit storm
+    // is not.
+    internal static long LocalStallCreditMs(long gapMs, long tickMs) =>
+        gapMs > LocalStallGapTicks * tickMs ? gapMs - tickMs : 0;
+
     // ---------------------------------------------------------------- stream downloader
 
     private sealed class StreamDownloader
@@ -513,6 +536,7 @@ public static class BlobClient
         {
             _lastVerifiedTicks = Environment.TickCount64;
             _traceStartTicks = _lastVerifiedTicks;
+            long lastLoopTicks = _lastVerifiedTicks;
             try
             {
                 while (true)
@@ -536,6 +560,13 @@ public static class BlobClient
                     }
 
                     long now = Environment.TickCount64;
+                    // The gap since the previous iteration's clock read measures how
+                    // long this loop was NOT running (the drain above may stall on
+                    // this very thread): idle waits wake at the ControlTick cadence,
+                    // so anything past that is a local stall, not wire time, and is
+                    // credited back before any sweep or stall decision below.
+                    CreditLocalStall(now, now - lastLoopTicks);
+                    lastLoopTicks = now;
                     bool pathPresent = WatchPath(now);
                     TraceState(now, pathPresent);
                     _recovery.Check();
@@ -801,6 +832,44 @@ public static class BlobClient
             }
 
             return true;
+        }
+
+        // A local stall is not path loss (see LocalStallCreditMs): the flight's
+        // answer is queued or in flight, only our own loop stopped looking, so the
+        // stall's duration comes off every wire-time clock before SweepStale or
+        // CheckStall can act on ages the loop never observed passing. Clocks
+        // stamped after the stall began (a chunk verified during this very
+        // iteration's drain) are already at `now` and clamp to it; ProofSentAt /
+        // FullyStagedAt are -1 until they start and are left that way.
+        private void CreditLocalStall(long now, long gapMs)
+        {
+            long credit = LocalStallCreditMs(gapMs, (long)ControlTick.TotalMilliseconds);
+            if (credit <= 0)
+            {
+                return;
+            }
+
+            long[] flights = [.. _outstanding.Keys];
+            foreach (long idx in flights)
+            {
+                (long sentAt, int retransmits, bool sampleRtt, bool holdReleased) = _outstanding[idx];
+                _outstanding[idx] = (Math.Min(sentAt + credit, now), retransmits, sampleRtt, holdReleased);
+            }
+
+            foreach (RunStage stage in _staging.Values)
+            {
+                if (stage.ProofSentAt >= 0)
+                {
+                    stage.ProofSentAt = Math.Min(stage.ProofSentAt + credit, now);
+                }
+
+                if (stage.FullyStagedAt >= 0)
+                {
+                    stage.FullyStagedAt = Math.Min(stage.FullyStagedAt + credit, now);
+                }
+            }
+
+            _lastVerifiedTicks = Math.Min(_lastVerifiedTicks + credit, now);
         }
 
         private void ReceiveChunk(BlobWire.Frame f, long arrivedAtMs, long now)

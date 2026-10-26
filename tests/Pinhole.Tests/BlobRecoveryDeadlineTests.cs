@@ -181,6 +181,28 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void LocalStallCredit_IgnoresJitterAndForgivesOnlyBlockedTime()
+    {
+        const long tick = 5; // the downloader's ControlTick cadence
+
+        // Normal iteration cadence and scheduling jitter around it — including the
+        // ~16 ms idle-wake granularity of Windows timers — credit nothing: a
+        // healthy flight keeps aging toward its PTO.
+        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 3, tickMs: tick));
+        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 16, tickMs: tick)); // Windows idle-wake gap
+        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 50, tickMs: tick)); // at the threshold, not past it
+
+        // A blocked loop — a verifier stall on the loop's own thread, a GC pause —
+        // is not wire time: all but one tick comes back, so a flight's age at
+        // resume is its pre-stall age plus one tick. A 350 ms verifier stall (the
+        // BufferedResponses shape) cannot age a young flight toward the 150 ms
+        // PTO floor, while a flight already at its PTO edge still expires.
+        Assert.Equal(55, BlobClient.LocalStallCreditMs(gapMs: 60, tickMs: tick));
+        Assert.Equal(345, BlobClient.LocalStallCreditMs(gapMs: 350, tickMs: tick));
+        Assert.Equal(4_995, BlobClient.LocalStallCreditMs(gapMs: 5_000, tickMs: tick));
+    }
+
+    [Fact]
     public async Task HealthyTimeBeforeProviderRestart_DoesNotSpendRecoveryAllowance()
     {
         string dir = TempDir();
