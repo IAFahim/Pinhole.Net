@@ -1,9 +1,8 @@
 using System.Buffers.Binary;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading.Channels;
-using Org.BouncyCastle.Crypto.Digests;
+using Pinhole.Crypto;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.Signers;
 
@@ -34,11 +33,7 @@ internal sealed class RelayIdentity
     public byte[] Authenticate(ReadOnlySpan<byte> challenge)
     {
         if (challenge.Length != 16) throw new InvalidDataException("invalid iroh relay challenge");
-        var hash = new Blake3Digest();
-        hash.Init(Blake3Parameters.Context(Encoding.UTF8.GetBytes("iroh-relay handshake v1 challenge signature")));
-        hash.BlockUpdate(challenge);
-        byte[] message = new byte[32];
-        hash.DoFinal(message);
+        byte[] message = Blake3.HashDeriveKey("iroh-relay handshake v1 challenge signature"u8, challenge);
         var signer = new Ed25519Signer();
         signer.Init(true, _secret);
         signer.BlockUpdate(message);

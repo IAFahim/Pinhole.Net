@@ -74,6 +74,30 @@ public sealed class IrohRelayTests
     }
 
     [Fact]
+    public void Authenticate_SignsTheBcBlake3DeriveKeyChallengeHash()
+    {
+        byte[] seed = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        byte[] challenge = Enumerable.Range(200, 16).Select(i => (byte)i).ToArray();
+        // The signed message was historically produced by BouncyCastle's BLAKE3 derive-key
+        // mode; the real relay rejects any other 32 bytes, so this pins byte-for-byte equality.
+        byte[] message = new byte[32];
+        var hash = new Blake3Digest();
+        hash.Init(Blake3Parameters.Context(Encoding.UTF8.GetBytes("iroh-relay handshake v1 challenge signature")));
+        hash.BlockUpdate(challenge);
+        hash.DoFinal(message);
+        var identity = new RelayIdentity(seed);
+        byte[] auth = identity.Authenticate(challenge);
+        Assert.Equal(98, auth.Length);
+        Assert.Equal((byte)1, auth[0]); // ClientAuth, QUIC varint.
+        Assert.Equal(identity.PublicKey, auth.AsSpan(1, 32).ToArray());
+        Assert.Equal((byte)64, auth[33]); // postcard serde_bytes signature length.
+        var verifier = new Ed25519Signer();
+        verifier.Init(false, new Ed25519PublicKeyParameters(auth.AsSpan(1, 32).ToArray()));
+        verifier.BlockUpdate(message);
+        Assert.True(verifier.VerifySignature(auth.AsSpan(34).ToArray()));
+    }
+
+    [Fact]
     public async Task FreshDirectAnnouncement_RestartsPassiveRelayedSession_ThenUpgrades()
     {
         await using var server = new FakeIrohRelay();
