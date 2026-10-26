@@ -810,10 +810,11 @@ public static class BlobClient
             // here: the arrival's bytes stopped counting against window and budget
             // the moment their lost flight was reclassified as healing traffic.
             bool liveHold = hadReservation && !entry.HoldReleased;
+            bool retransmitted = hadReservation && entry.Retransmits > 0;
             if (!_v4)
             {
                 bool fresh = _sink.Apply(f.Index, f.ChunkData);
-                _controller.OnChunkArrived(len, liveHold, fresh, now);
+                _controller.OnChunkArrived(len, liveHold, fresh, retransmitted, now);
                 if (fresh)
                 {
                     _verified += len;
@@ -834,7 +835,7 @@ public static class BlobClient
                     throw new InvalidDataException("chunk 0 failed root verification");
                 }
 
-                _controller.OnChunkArrived(len, liveHold, true, now);
+                _controller.OnChunkArrived(len, liveHold, true, retransmitted, now);
                 _sink.ApplyRun(0, 1, [f.ChunkData], Blake3.ChunkCv(f.ChunkData, 0, root: true));
                 _verified += len;
                 _lastVerifiedTicks = now;
@@ -842,16 +843,16 @@ public static class BlobClient
                 return;
             }
 
-            ReceiveRunChunk(f, len, liveHold, now);
+            ReceiveRunChunk(f, len, liveHold, retransmitted, now);
         }
 
-        private void ReceiveRunChunk(BlobWire.Frame f, int len, bool hadReservation, long now)
+        private void ReceiveRunChunk(BlobWire.Frame f, int len, bool hadReservation, bool retransmitted, long now)
         {
             long run = f.Index / RunVerify.RunChunks;
             if (run < _lowestIncomplete || run * RunVerify.RunChunks > _maxRequested)
             {
                 // Committed or never-requested territory: unsolicited, dropped silently.
-                _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                _controller.OnChunkArrived(len, hadReservation, fresh: false, retransmitted, now);
                 return;
             }
 
@@ -861,7 +862,7 @@ public static class BlobClient
                 {
                     // Beyond the staging bound: drop; the run is re-requested once the
                     // horizon reaches it again.
-                    _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                    _controller.OnChunkArrived(len, hadReservation, fresh: false, retransmitted, now);
                     return;
                 }
 
@@ -872,14 +873,14 @@ public static class BlobClient
             int slot = (int)(f.Index - run * RunVerify.RunChunks);
             if (stage.Chunks[slot] is not null)
             {
-                _controller.OnChunkArrived(len, hadReservation, fresh: false, now);
+                _controller.OnChunkArrived(len, hadReservation, fresh: false, retransmitted, now);
                 return; // duplicate transmission
             }
 
             stage.Chunks[slot] = f.ChunkData;
             stage.Cvs[slot] = f.ChunkCv;
             stage.Staged++;
-            _controller.OnChunkArrived(len, hadReservation, fresh: true, now);
+            _controller.OnChunkArrived(len, hadReservation, fresh: true, retransmitted, now);
             _verified += len;
             _lastVerifiedTicks = now;
             _onVerified(_verified);

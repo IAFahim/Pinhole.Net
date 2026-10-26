@@ -133,8 +133,50 @@ public sealed class CongestionTests(ITestOutputHelper output)
         Assert.Equal(window, controller.WindowBytes);
         Assert.Equal(initial, controller.PtoFor(0));
         Assert.Null(stats.SmoothedRtt); // the old route's sample cannot describe the new one
-        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, 2000);
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, 2000);
         Assert.Equal(window + 1024, controller.WindowBytes); // fresh-route slow start is restored
+    }
+
+    [Fact]
+    public void Controller_StandingDelayExpiries_CollapseOnlyOnClusters_AndDuplicatesOverturnSpuriousCollapses()
+    {
+        var stats = new BlobTransferStats();
+        var controller = new BlobController(1024 * 1024, new BlobFlowBudget(1024 * 1024), stats, fixedWindow: false);
+        // A deep-queue path: 40 ms base delay, a standing queue holds srtt near double.
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(40));
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
+
+        long window = controller.WindowBytes;
+        controller.OnRetransmit(10_000);
+        Assert.Equal(window, controller.WindowBytes); // one expiry under standing delay is not loss
+
+        controller.OnRetransmit(10_001);
+        Assert.True(controller.WindowBytes < window); // a cluster collapses it
+        Assert.Equal(1, stats.LossEvents);
+        long collapsed = controller.WindowBytes;
+
+        // The retransmissions deliver what the originals never did: real-loss votes.
+        // No duplicate verdict ever arrives, so nothing may come back.
+        for (int i = 0; i < 3; i++)
+        {
+            controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050 + i);
+        }
+
+        Assert.Equal(0, stats.RestoredWindows);
+
+        // A second collapse one loss window later; this time the "lost" originals land
+        // as duplicates — the timer fired on queue delay, and the verdict undoes it.
+        controller.OnRetransmit(10_600);
+        Assert.Equal(collapsed + 3 * 1024, controller.WindowBytes); // still the first collapse's shape
+        controller.OnRetransmit(10_601);
+        Assert.Equal(2, stats.LossEvents);
+        long beforeSpuriousVerdict = controller.WindowBytes;
+        Assert.True(beforeSpuriousVerdict < window);
+
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: true, 10_700);
+        Assert.Equal(1, stats.RestoredWindows);
+        Assert.Equal(collapsed + 3 * 1024, controller.WindowBytes); // restored to the pre-collapse window
     }
 
     [Theory]
@@ -145,7 +187,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
     {
         var controller = new BlobController(maximum, new BlobFlowBudget(64 * 1024), null, fixedWindow: false);
         Assert.InRange(controller.WindowBytes, 4096, maximum);
-        for (int i = 0; i < 100; i++) controller.OnChunkArrived(1024, hadReservation: false, fresh: true, i);
+        for (int i = 0; i < 100; i++) controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, i);
         Assert.InRange(controller.WindowBytes, 4096, maximum);
         controller.OnPathChanged();
         Assert.InRange(controller.WindowBytes, 4096, maximum);

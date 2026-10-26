@@ -102,6 +102,7 @@ Pinhole.Blobs.BlobTransferStats.DuplicateBytes.get -> long
 Pinhole.Blobs.BlobTransferStats.LossEvents.get -> long
 Pinhole.Blobs.BlobTransferStats.ReceivedBytes.get -> long
 Pinhole.Blobs.BlobTransferStats.RequestsSent.get -> long
+Pinhole.Blobs.BlobTransferStats.RestoredWindows.get -> long
 Pinhole.Blobs.BlobTransferStats.Retransmits.get -> long
 Pinhole.Blobs.BlobTransferStats.SmoothedRtt.get -> System.TimeSpan?
 Pinhole.Blobs.BlobTransferStats.VerifiedBytes.get -> long

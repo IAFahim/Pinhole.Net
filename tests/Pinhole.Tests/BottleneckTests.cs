@@ -37,9 +37,23 @@ public sealed class BottleneckTests(ITestOutputHelper output)
 
             var transfer = new TransferProgress(startAfterBytes: bytes / 6);
             var stats = new BlobTransferStats();
+            // Controller forensics: the collapse/restore timeline is the first thing
+            // wanted when the floor fails on a slow runner, and it only exists in the
+            // job log if the test collected it before the assertion threw.
+            var timeline = new List<string>();
+            BlobTestHooks.Trace = line => { lock (timeline) timeline.Add(line); };
+            BlobDownloadResult result;
             var sw = Stopwatch.StartNew();
-            BlobDownloadResult result = await DownloadAsync(lab, server, dir, transfer, stats).WaitAsync(FlowBudget);
-            sw.Stop();
+            try
+            {
+                result = await DownloadAsync(lab, server, dir, transfer, stats).WaitAsync(FlowBudget);
+            }
+            finally
+            {
+                sw.Stop();
+                BlobTestHooks.Trace = null;
+            }
+
             Assert.Equal(bytes, result.Bytes);
 
             Assert.True(transfer.Bytes > 0 && transfer.Elapsed > TimeSpan.Zero);
@@ -48,8 +62,14 @@ public sealed class BottleneckTests(ITestOutputHelper output)
                 $"{transfer.Bytes} B in {transfer.Elapsed.TotalSeconds:F2}s sustained = {kibPerSecond:F0} KiB/s " +
                 $"(link ceiling {LinkBits / 8 / 1024:F0} KiB/s) | {lab.Net.Counters()} | " +
                 $"requests={stats.RequestsSent}, retransmits={stats.Retransmits}, loss-windows={stats.LossEvents}, " +
+                $"restores={stats.RestoredWindows}, " +
                 $"resumes={stats.ConservativeResumes}, duplicate-bytes={stats.DuplicateBytes}, " +
                 $"rtt-ms={stats.SmoothedRtt?.TotalMilliseconds:F1}, window={stats.WindowBytes}");
+            foreach (string line in timeline)
+            {
+                output.WriteLine(line);
+            }
+
             Assert.True(kibPerSecond <= LinkBits / 8 / 1024 * 1.05,
                 $"measured {kibPerSecond:F0} KiB/s exceeds the 16 Mbit/s link — the shaper is not shaping");
             // The floor keeps its 25%-of-ceiling meaning but is asserted over the sustained
@@ -57,7 +77,8 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             // far more than the steady drain, which is exactly what must not read as a
             // broken baseline (the CI flake measured ~110 KiB/s with the ramp included).
             Assert.True(kibPerSecond >= LinkBits / 8 / 1024 * 0.25,
-                $"goodput collapsed to {kibPerSecond:F0} KiB/s on a clean 16 Mbit/s link — the baseline is broken");
+                $"goodput collapsed to {kibPerSecond:F0} KiB/s on a clean 16 Mbit/s link — the baseline is broken. " +
+                $"Controller timeline:{Environment.NewLine}{string.Join(Environment.NewLine, timeline.TakeLast(80))}");
         }
         finally
         {

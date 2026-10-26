@@ -14,6 +14,8 @@ public sealed class BlobTransferStats
 
     public long LossEvents { get; internal set; }
 
+    public long RestoredWindows { get; internal set; }
+
     public long ConservativeResumes { get; internal set; }
 
     public TimeSpan? SmoothedRtt { get; internal set; }
@@ -86,6 +88,11 @@ internal sealed class BlobController
     private long _lossWindowStartMs;  // TickCount64 is positive; 0 is "the clock started now"
     private long _lastLossMs = -long.MaxValue / 2; // far past: the first reduction is never rate-limited
     private long _expiriesThisLossWindow;
+    private bool _collapsePending;             // a loss collapse is awaiting its duplicate verdict
+    private long _collapseExpiries;            // expiries the pending collapse consumed
+    private long _preCollapseWindow;
+    private long _preCollapseSsthresh;
+    private long _spuriousVerdicts;            // +1 per dup-after-retransmit, -1 per fresh-after-retransmit
     private long _dupWindowStartMs;
     private long _lastDupMs;
     private long _dupWindowBytes;
@@ -186,7 +193,7 @@ internal sealed class BlobController
         return TimeSpan.FromMilliseconds(Math.Min(pto, PtoCeilingMs * 8));
     }
 
-    public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, long nowMs)
+    public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, bool retransmitted, long nowMs)
     {
         if (hadReservation)
         {
@@ -199,6 +206,17 @@ internal sealed class BlobController
             if (_stats is not null)
             {
                 _stats.DuplicateBytes += chunkBytes;
+            }
+
+            // A duplicate of a chunk we re-requested is a verdict on the expiry that
+            // re-requested it: the original was in flight the whole time — the timer
+            // fired on queueing delay (or a runner stall), not loss. Count it toward
+            // undoing the collapse those expiries caused; the retransmission served
+            // below is the wire cost already paid.
+            if (retransmitted && _collapsePending)
+            {
+                _spuriousVerdicts++;
+                TryRestoreSpuriousCollapse();
             }
 
             if (_dupWindowStartMs == 0)
@@ -221,6 +239,13 @@ internal sealed class BlobController
             }
 
             return;
+        }
+
+        // The retransmission delivered what the original never did: a real-loss vote
+        // against restoring the collapse those expiries caused.
+        if (retransmitted && _collapsePending)
+        {
+            _spuriousVerdicts--;
         }
 
         if (_stats is not null)
@@ -314,7 +339,12 @@ internal sealed class BlobController
 
         _expiriesThisLossWindow++;
         bool delayStanding = _haveRtt && _srttMs * 5 >= _minRttMs * 8; // ≥ 1.6× base delay
-        if (_expiriesThisLossWindow < 3 && !delayStanding)
+        // A standing queue is exactly what a deep buffer builds, so under delayStanding
+        // a PTO expiry is weaker loss evidence than on a clean path: it may be queueing
+        // delay (or a slow runner's scheduling stall) rather than a dropped frame. Two
+        // expiries still collapse — real overflow drops clusters, not single frames.
+        long collapseQuorum = delayStanding ? 2 : 3;
+        if (_expiriesThisLossWindow < collapseQuorum)
         {
             return; // scattered loss: heal it, the window stands
         }
@@ -325,6 +355,11 @@ internal sealed class BlobController
         }
 
         _lastLossMs = nowMs;
+        _preCollapseWindow = _window;
+        _preCollapseSsthresh = _ssthresh;
+        _collapseExpiries = _expiriesThisLossWindow;
+        _spuriousVerdicts = 0;
+        _collapsePending = true;
         _expiriesThisLossWindow = 0;
         if (_stats is not null)
         {
@@ -340,6 +375,37 @@ internal sealed class BlobController
         {
             _stats.WindowBytes = _window;
         }
+
+        BlobTestHooks.Trace?.Invoke(
+            $"ctrl collapse window={_window} from={_preCollapseWindow} expiries={_collapseExpiries} " +
+            $"standing={delayStanding} srtt={_srttMs} minRtt={_minRttMs} ptoInflate={_ptoInflation:0.0}");
+    }
+
+    // Half the expiries behind a collapse arriving as duplicates overturns it: the
+    // flight those expiries buried was moving, and the window's dip (a quarter of
+    // what it was) plus the linear congestion-avoidance climb back is pure
+    // self-inflicted under-utilization on a path that never lost anything.
+    private void TryRestoreSpuriousCollapse()
+    {
+        if (_spuriousVerdicts < Math.Max(_collapseExpiries / 2, 1))
+        {
+            return;
+        }
+
+        _window = Math.Min(_preCollapseWindow, _maxWindow);
+        _ssthresh = _preCollapseSsthresh;
+        _collapsePending = false;
+        long verdicts = _spuriousVerdicts;
+        _spuriousVerdicts = 0;
+        if (_stats is not null)
+        {
+            _stats.RestoredWindows++;
+            _stats.WindowBytes = _window;
+        }
+
+        BlobTestHooks.Trace?.Invoke(
+            $"ctrl restore window={_window} expiries={_collapseExpiries} verdicts={verdicts} " +
+            $"ptoInflate={_ptoInflation:0.0}");
     }
 
     public void OnPathChanged()
@@ -364,6 +430,9 @@ internal sealed class BlobController
         _lastPacerMs = long.MinValue;
         _lossWindowStartMs = 0;
         _expiriesThisLossWindow = 0;
+        _collapsePending = false;
+        _collapseExpiries = 0;
+        _spuriousVerdicts = 0;
         _lastLossMs = -long.MaxValue / 2;
         if (_stats is not null)
         {
