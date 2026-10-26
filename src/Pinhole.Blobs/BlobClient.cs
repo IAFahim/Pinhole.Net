@@ -347,7 +347,7 @@ public static class BlobClient
         private readonly byte[] _expectedRoot;
         private readonly ulong _stream;
         private readonly BlobController _controller;
-        private readonly Dictionary<long, (long SentAtMs, int Retransmits, bool SampleRtt)> _outstanding = new();
+        private readonly Dictionary<long, (long SentAtMs, int Retransmits, bool SampleRtt, bool HoldReleased)> _outstanding = new();
         private readonly SendCounter _send;
         private readonly RecoveryBudget _recovery;
         private readonly BlobNegotiation _negotiation;
@@ -617,10 +617,13 @@ public static class BlobClient
 
                 // Every reservation the budget still holds for this stream must come back:
                 // a stalled or cancelled download must not leak its share of the
-                // process-wide pie.
-                foreach (long idx in _outstanding.Keys)
+                // process-wide pie. Holds released at a PTO expiry are already back.
+                foreach ((long idx, (long _, int _, bool _, bool holdReleased)) in _outstanding)
                 {
-                    _controller.ReleaseReservation(ChunkLength(idx));
+                    if (!holdReleased)
+                    {
+                        _controller.ReleaseReservation(ChunkLength(idx));
+                    }
                 }
 
                 _outstanding.Clear();
@@ -751,7 +754,9 @@ public static class BlobClient
                     // Backoff measured the old route. Carrying it into a freshly
                     // proved route can delay the first request by 8× the new PTO
                     // and exhaust recovery while that route is already healthy.
-                    _outstanding[idx] = (now, 0, false);
+                    // A hold already released at a PTO expiry stays released: the
+                    // flag says the flight is healing traffic, route or no route.
+                    _outstanding[idx] = (now, 0, false, _outstanding[idx].HoldReleased);
                 }
 
                 foreach (RunStage stage in _staging.Values)
@@ -793,7 +798,7 @@ public static class BlobClient
                 throw new InvalidDataException($"chunk {f.Index} failed verification");
             }
 
-            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, bool SampleRtt) entry);
+            bool hadReservation = _outstanding.Remove(f.Index, out (long SentAtMs, int Retransmits, bool SampleRtt, bool HoldReleased) entry);
             if (hadReservation && entry.SampleRtt)
             {
                 // Karn's rule: only a first-attempt arrival measures the path's RTT — a
@@ -801,10 +806,14 @@ public static class BlobClient
                 _controller.ObserveRtt(TimeSpan.FromMilliseconds(Math.Max(arrivedAtMs - entry.SentAtMs, 1)));
             }
 
+            // A hold released at the chunk's first PTO expiry must not release again
+            // here: the arrival's bytes stopped counting against window and budget
+            // the moment their lost flight was reclassified as healing traffic.
+            bool liveHold = hadReservation && !entry.HoldReleased;
             if (!_v4)
             {
                 bool fresh = _sink.Apply(f.Index, f.ChunkData);
-                _controller.OnChunkArrived(len, hadReservation, fresh, now);
+                _controller.OnChunkArrived(len, liveHold, fresh, now);
                 if (fresh)
                 {
                     _verified += len;
@@ -825,7 +834,7 @@ public static class BlobClient
                     throw new InvalidDataException("chunk 0 failed root verification");
                 }
 
-                _controller.OnChunkArrived(len, hadReservation, true, now);
+                _controller.OnChunkArrived(len, liveHold, true, now);
                 _sink.ApplyRun(0, 1, [f.ChunkData], Blake3.ChunkCv(f.ChunkData, 0, root: true));
                 _verified += len;
                 _lastVerifiedTicks = now;
@@ -833,7 +842,7 @@ public static class BlobClient
                 return;
             }
 
-            ReceiveRunChunk(f, len, hadReservation, now);
+            ReceiveRunChunk(f, len, liveHold, now);
         }
 
         private void ReceiveRunChunk(BlobWire.Frame f, int len, bool hadReservation, long now)
@@ -1033,7 +1042,7 @@ public static class BlobClient
 
                 for (long idx = start; idx < start + count; idx++)
                 {
-                    _outstanding[idx] = (now, 0, true);
+                    _outstanding[idx] = (now, 0, true, false);
                 }
 
                 Send(BlobWire.Request(_stream, start, count));
@@ -1057,23 +1066,37 @@ public static class BlobClient
 
         private void SweepStale(long now)
         {
-            foreach ((long idx, (long sentAt, int retransmits, _)) in _outstanding)
+            foreach ((long idx, (long sentAt, int retransmits, _, bool holdReleased)) in _outstanding)
             {
                 if (now - sentAt < (long)_controller.PtoFor(retransmits).TotalMilliseconds)
                 {
                     continue;
                 }
 
+                if (!holdReleased)
+                {
+                    // The hold's flight is dead — this expiry is the proof. A hold
+                    // that outlives its flight pins inFlight above the window the
+                    // same expiries just collapsed, and the march can never admit
+                    // work again: a withheld 64-chunk run froze a CI transfer with
+                    // 64 KiB of zombie reservations against the 4 KiB floor while
+                    // the runs behind the hole were never even requested. Re-requests
+                    // are unbudgeted healing traffic (below), so the stale hold
+                    // converts to that status instead of stacking on the window.
+                    _controller.ReleaseReservation(ChunkLength(idx));
+                }
+
                 // Re-requesting a chunk needs no fresh budget reservation — the
-                // outstanding entry already holds one. Charging again per retry
-                // stacked N+1 reservations on a single chunk: sustained loss could
-                // fill the aggregate pie with retry debt and deny the very
-                // re-requests that would repay it. Pacer credit is NOT drawn here
-                // either — the bucket models admission of NEW work; healing traffic
-                // must not be throttled by a collapsed window or recovery livelocks
-                // at the floor rate. The honest bounds on re-request rate are the
-                // per-chunk PTO and the reorder horizon.
-                _outstanding[idx] = (now, retransmits + 1, false);
+                // re-request is healing traffic and draws neither budget nor pacer
+                // credit. Charging again per retry stacked N+1 reservations on a
+                // single chunk: sustained loss could fill the aggregate pie with
+                // retry debt and deny the very re-requests that would repay it.
+                // Pacer credit is NOT drawn here either — the bucket models
+                // admission of NEW work; healing traffic must not be throttled by a
+                // collapsed window or recovery livelocks at the floor rate. The
+                // honest bounds on re-request rate are the per-chunk PTO and the
+                // reorder horizon.
+                _outstanding[idx] = (now, retransmits + 1, false, true);
                 if (Send(BlobWire.Request(_stream, idx, 1))) _controller.OnRetransmit(now);
             }
 
@@ -1140,7 +1163,7 @@ public static class BlobClient
 
             _lastTraceTicks = now;
             int maxRtx = 0;
-            foreach ((_, (long _, int retransmits, _)) in _outstanding)
+            foreach ((_, (long _, int retransmits, _, _)) in _outstanding)
             {
                 maxRtx = Math.Max(maxRtx, retransmits);
             }
