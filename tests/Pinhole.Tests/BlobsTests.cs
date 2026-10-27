@@ -854,6 +854,47 @@ public sealed class BlobsTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task LegacyHello_PlaintextProvider_RefusesByHangingUp(int version)
+    {
+        string dir = TempDir();
+        try
+        {
+            byte[] data = RandomBytes(4096);
+            string src = Path.Combine(dir, "legacy-plain.bin");
+            await File.WriteAllBytesAsync(src, data);
+            await using var server = await BlobServer.ServeAsync(src,
+                new BlobServeOptions { Encrypt = false, NodeOptions = Offline() });
+            BlobTicket ticket = server.Ticket;
+
+            // No PSK means no legacy key to seal under; the version posture is uniform
+            // regardless — the bare v1/v2 Hello shapes are refused, never answered.
+            await using var node = await PinholeNode.BindAsync(Offline() with { Listen = false, ReceiveBufferCapacity = 64 });
+            await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString);
+
+            var legacyHello = new byte[version == 1 ? 9 : 41];
+            legacyHello[0] = BlobWire.TypeHello;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(legacyHello.AsSpan(1), BlobWire.StreamId(ticket.Root));
+
+            conn.Send(legacyHello);
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed);
+            Assert.Equal(0, server.ChunksServed);
+
+            // Failure isolation: the next (current) downloader of the same ticket completes.
+            string outDir = Path.Combine(dir, "out");
+            BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir,
+                options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
+            Assert.Equal(data.Length, result.Bytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(outDir, "legacy-plain.bin")));
+        }
+        finally
+        {
+            DeleteDir(dir);
+        }
+    }
+
     [Fact]
     public void Ticket_Roundtrips_AndRejectsGarbage()
     {

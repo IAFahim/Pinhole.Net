@@ -380,10 +380,15 @@ one stream per entry root).
 | 6 | Welcome | 123 | `version u8 (3 or 4) @9 | sessionId[32] @10 | providerNonce[32] @42 | sealedHead[49] @74` |
 | 7 | Proof | 18..2066 | `runIndex i64 LE @9 | count u8 @17 | count × 32 sibling CVs @18`; count ≤ 64 and the frame length must equal 18 + count×32 exactly |
 
-Hello is sent unsealed at the blob layer; v1/v2 shapes remain parseable for
-explicit refusal, and an encrypted provider closes on them. The largest
-plaintext frame (Chunk, 1073 bytes) stays under the session layer's 1200-byte
-datagram budget.
+Hello is sent unsealed at the blob layer. **Wire v1/v2 are refused by design**
+(decision, issue #49): they sealed under a fixed per-ticket key with no
+per-connection nonces, so (key, nonce) pairs repeated across connections — no
+provider of this protocol may ever answer or seal under them again. The v1/v2
+Hello shapes are parseable *only so a provider can refuse them explicitly*:
+every provider, encrypted or plaintext, closes the connection without
+answering, and the open-only `LegacyDetector` hangs up pre-2.0 sealed traffic
+without sealing so much as a Bye. The largest plaintext frame (Chunk, 1073
+bytes) stays under the session layer's 1200-byte datagram budget.
 
 **Version negotiation.** v4 is layout-identical to v3 — only the Hello/Welcome
 version byte (`4`) and the HKDF info string differ. An encrypted ticket's
@@ -392,7 +397,10 @@ connection without answering, and the downloader falls back to version 3 for
 the rest of the call (the fallback persists across re-dials). A provider
 accepts Hello version 3 or 4, answers a Welcome with the negotiated version,
 ignores session/version swaps mid-connection, and on v4 activates
-verified-run serving. Plaintext tickets negotiate v3.
+verified-run serving. Plaintext tickets negotiate v3. **v3 is the supported
+compatibility bridge** — the v4 fallback and the deployed 1.9.0 interop
+floor; its removal is scheduled for the next minor release boundary (changelog:
+"blob v4 required; v3 interop removed"), once the interop target speaks v4.
 
 **The sealed session.** With a PSK in the ticket (the default), all frames
 after the Welcome exchange are sealed:

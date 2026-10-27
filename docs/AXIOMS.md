@@ -182,6 +182,12 @@ machinery is real:
 - The provider side, `RunTree`, retains the run tree to emit O(depth) proofs.
 - The wire carries it: `BlobWire.Proof` frame and protocol v4 (see
   [WIRE.md](WIRE.md)).
+- The support window is decided (issue #49): wire v1/v2 are refused by design
+  — no provider, encrypted or plaintext, answers their Hello shapes, and the
+  open-only `LegacyDetector` hangs up pre-2.0 sealed traffic so nothing is
+  ever sealed under the nonce-reusing fixed key; v3 remains the bridge (the
+  v4 fallback and the deployed 1.9.0 interop floor), with removal scheduled
+  for the next minor release boundary.
 
 `BlobServer`/`BlobClient` are wiring this into the transfer loop as this
 document is written (the v4 Hello negotiation, run staging and
@@ -246,7 +252,7 @@ of 2026-10-26:
 | # | Item | Status |
 |---|---|---|
 | 1 | `PeerSocket`/`PeerEngine` (after `NatDetector` moves to `IUdpSocket` + `StunBindingMessage`) | not started — src/Pinhole/PeerSocket.cs still stands, used by `NatDetector` and `RendezvousLookup` |
-| 2 | Blob protocol v1/v2/v3 hello paths and `LegacyDetector` (after v4) | pending rollout — v4 just landed; both parsers still accept v1/v2 Hello shapes, v3 is the compatibility floor (`BlobWire.ProtocolVersion`), the fixed-key v1 `LegacyDetector` is still in `BlobWire.Cipher` |
+| 2 | Blob wire v3 bridge: Hello/Welcome version 3, the `"pinhole-blobs-v3"` HKDF info, the v4→v3 fallback | decided (#49) — v1/v2 have no support path to delete: parser recognition of their Hello shapes plus the fixed-key v1 `LegacyDetector` in `BlobWire.Cipher` are refusal posture (nothing is ever sealed under the nonce-reusing key, not even a Bye) and stay permanently; v3 stays as the v4 fallback bridge and the deployed 1.9.0 interop floor — remove at the next minor release boundary, once the interop target speaks v4 |
 | 3 | Plaintext handshake variants and `PinholeEncryption.Optional/Disabled` | not started — the enum and both handshake modes are still in src/Pinhole/SessionCrypto.cs |
 | 4 | BouncyCastle `Blake3Digest` use (relay auth moves to the own hash) | not started — still linked by src/Pinhole/IrohRelay.cs |
 | 5 | BouncyCastle AEAD/HKDF in blobs | not started — `BlobWire.Cipher` still constructs BouncyCastle `ChaCha20Poly1305` per call and `HkdfBytesGenerator` per session; the BCL-backed `Pinhole.Crypto.Aead` landed but is unwired here |

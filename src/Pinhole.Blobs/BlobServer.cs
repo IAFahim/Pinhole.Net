@@ -207,10 +207,19 @@ public sealed class BlobServer : IAsyncDisposable
                 BlobWire.Frame f;
                 if (_psk is null)
                 {
-                    // Plaintext serving: any Hello body is fine — there is no cipher to bind.
+                    // Plaintext serving has no cipher to bind, but the version posture is
+                    // uniform: the v1/v2 Hello shapes are parseable precisely so a
+                    // provider can refuse them — no server of this protocol answers them.
                     if (!BlobWire.Frame.TryParse(payload.Span, out f))
                     {
                         continue;
+                    }
+
+                    if (f.Type == BlobWire.TypeHello
+                        && f.Version is not (BlobWire.ProtocolVersion or BlobWire.CurrentVersion))
+                    {
+                        await conn.CloseAsync().ConfigureAwait(false);
+                        return;
                     }
                 }
                 else

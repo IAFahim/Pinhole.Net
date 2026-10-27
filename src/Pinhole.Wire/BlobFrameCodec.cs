@@ -142,9 +142,10 @@ public readonly ref struct BlobFrameView
 //   Proof    body exactly 9 + count*32; runIndex >= 0 and count <= 64
 //   anything else (short frames, unknown types) rejects
 // The Write side defaults to the legacy v3 Hello/Welcome and emits the v4
-// forms when asked; the v1/v2 Hello forms are receive-compat for old peers
-// and have no writer. Unlike BlobWire.Head and BlobWire.Request, the writers
-// refuse to emit what the parser would reject.
+// forms when asked. The v1/v2 Hello forms are recognized receive-side only so
+// callers can refuse them explicitly (wire v1/v2 are refused by design, issue
+// #49) and have no writer. Unlike BlobWire.Head and BlobWire.Request, the
+// writers refuse to emit what the parser would reject.
 public static class BlobFrameCodec
 {
     public const byte TypeHello = 1;
