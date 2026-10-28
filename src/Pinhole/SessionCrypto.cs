@@ -32,6 +32,40 @@ internal static class CryptoWire
     public const int PackLegacyBody = 2 * TokenLength;                              // 8  → frame 17
     public const int PackCryptoBody = 2 * TokenLength + EphemeralLength + StaticKeyLength + ConfirmLength; // 88 → frame 97
     public const int HsckBody = TokenLength + ConfirmLength;                        // 20 → frame 29
+
+    // Handshake v4 (R5 phase 1): a version marker + mac1 appended to the v3 crypto body.
+    // A v3 reader rejects both lengths on their length class alone (94/114 are neither
+    // the legacy nor the crypto shapes its handlers admit), so the extension is additive:
+    // old peers silently ignore the frames, new peers gate key agreement on the MAC.
+    public const byte HandshakeV4Marker = 0x04;
+    public const int Mac1Length = 16; // WireGuard's mac1 size; keyed BLAKE3 truncated to 16
+    public const int Mac1ExtLength = 1 + Mac1Length;
+    public const int PuncCryptoBodyV4 = PuncCryptoBody + Mac1ExtLength;   // 85  → frame 94
+    public const int PackCryptoBodyV4 = PackCryptoBody + Mac1ExtLength;   // 105 → frame 114
+
+    // mac1 = BLAKE3-Keyed(responderStaticPub32, frame[0..^16])[..16] — the whole frame
+    // including the marker byte, excluding the 16 MAC bytes themselves. The key is the
+    // answering node's static public key: public material by design, so mac1 filters
+    // random-source and port-scan floods, not attackers who hold the target's key.
+    public static void WriteMac1Ext(Span<byte> frame, ReadOnlySpan<byte> responderStaticPub)
+    {
+        frame[^Mac1ExtLength] = HandshakeV4Marker;
+        Span<byte> digest = stackalloc byte[Blake3.DigestLength];
+        Blake3.HashKeyed(responderStaticPub, frame[..^Mac1Length], digest);
+        digest[..Mac1Length].CopyTo(frame[^Mac1Length..]);
+    }
+
+    public static bool VerifyMac1(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> responderStaticPub)
+    {
+        if (frame.Length < HeaderLength + Mac1ExtLength || frame[^Mac1ExtLength] != HandshakeV4Marker)
+        {
+            return false;
+        }
+
+        Span<byte> digest = stackalloc byte[Blake3.DigestLength];
+        Blake3.HashKeyed(responderStaticPub, frame[..^Mac1Length], digest);
+        return CryptographicOperations.FixedTimeEquals(frame[^Mac1Length..], digest[..Mac1Length]);
+    }
 }
 
 internal sealed class NodeIdentity

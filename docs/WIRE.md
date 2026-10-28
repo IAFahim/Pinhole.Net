@@ -454,6 +454,30 @@ in O(depth). Note this is Pinhole's own frame-level construction; it is not
 byte-compatible with iroh-blobs' pre-order Bao encoding (roadmap §10 records
 that interop decision as open).
 
+## Engine handshake frames, v3/v4 — `NodeEngine.cs` + `CryptoWire`
+
+Datagram frames on the engine's direct path (`HeaderSize` header + body; frame types
+`Punc`, `Pack`, `Hsck`; bodies sized by `CryptoWire`):
+
+- PUNC v3 crypto body: ephemeral(32) + static(32) + token(4) + confirm(16). PACK v3
+  crypto body: two tokens(8) + ephemeral(32) + static(32) + confirm(16). HSCK body:
+  token(4) + confirm(16).
+- **v4 (R5 phase 1):** the v3 crypto body plus a 17-byte extension — marker byte
+  `0x04` followed by `mac1[16]` = `BLAKE3-Keyed(responderStaticPub32, frame[0..^16])[..16]`,
+  the whole frame including the marker, excluding the MAC bytes themselves. Sizes 94
+  (PUNC) and 114 (PACK) fall outside both length classes a v3 reader admits, so old
+  peers silently ignore v4 frames — the extension is purely additive.
+- The mac1 key is the answering node's static public key (or a pinned key when the
+  dialer knows one): public material by design. mac1 filters random-source and
+  port-scan floods, not attackers holding the target's key; mac2/cookie is the later
+  phase for that. A frame that carries the extension but fails verification is
+  refused silently — no PACK, no HSCK, no state, and no key agreement — counted only
+  in the `Mac1Refused` counter. Unversioned v3 initiations behave exactly as before;
+  mac1 becomes mandatory only after the support window (same policy as blob wire v4).
+- Dialer side: a v4 dialer sends versioned frames and, when a peer never answers
+  (a v3-only responder ignoring the unknown shape), retries unversioned exactly once
+  per connection attempt.
+
 ## Canonical vs legacy divergences (normative list)
 
 The canonical rule is normative in each case; the note records what the

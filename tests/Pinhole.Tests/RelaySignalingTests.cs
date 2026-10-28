@@ -217,9 +217,11 @@ public sealed class RelaySignalingTests
         var ack = new byte[8192];
         var from = new System.Net.SocketAddress(System.Net.Sockets.AddressFamily.InterNetworkV6);
         // Receiving the reply proves that the replay was processed, rather than dropped
-        // by the virtual network. The attacker cannot produce an encrypted response.
+        // by the virtual network. The attacker cannot produce an encrypted response. The
+        // dialer's PUNC carries the v4 mac1 extension and the reply mirrors its shape
+        // (mac1 has no source binding in phase 1 — that is mac2/cookie's job).
         int count = await Task.Run(() => attacker.ReceiveFrom(ack, from)).WaitAsync(Budget);
-        Assert.Equal(0x51, ack[0]); Assert.Equal(97, count);
+        Assert.Equal(0x51, ack[0]); Assert.Equal(9 + CryptoWire.PackCryptoBodyV4, count);
         Assert.True(Interlocked.Read(ref lab.Net.Delivered) > deliveredBefore);
         Assert.Equal(PathKind.None, b.Connections[0].Path.Kind);
         Assert.False(dial.IsCompleted); Assert.False(accept.IsCompleted);

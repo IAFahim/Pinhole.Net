@@ -17,6 +17,8 @@ public struct HandshakeInput
     public bool PinMatches;  // PuncBegin/PackBegin: the static key matches the pin (true when unpinned)
     public bool BodyPlausible; // PackBegin: length at least a legacy PACK body
     public bool LengthClassOk; // PackBegin: length is exactly legacy or exactly crypto
+    public bool Mac1Present; // PuncBegin/PackBegin: the frame carried the v4 mac1 extension
+    public bool Mac1Ok;      // PuncBegin/PackBegin: the shell verified the keyed MAC (v3 frames pass vacuously)
     public bool Accepted;   // PuncKeys/PackKeys: key agreement (fresh, repeat, or supersede) verdict
     public bool ConfirmOk;  // PackKeys: the confirm MAC verified under the agreed keys
     public uint FrameToken; // PuncBegin/PuncKeys: the PUNC's token; PackBegin/PackKeys: the echo of ours
@@ -64,6 +66,10 @@ public static class HandshakeMachine
     public const long RejectMixedMode = 6;
     public const long RejectPackConfirm = 7;
     public const long RejectPackPeerToken = 8;
+    // SILENT refusal: a frame that carried the v4 mac1 extension but failed its keyed
+    // MAC. The shell answers this kind with no output frame, no state change, and no
+    // key agreement — it counts the refusal and drops the frame.
+    public const long RejectMac1 = 9;
 
     public const long NeedKeys = 63;       // the shell runs key agreement, then steps *Keys
     public const long PeerConfirmed = 64;  // the shell marks the crypto object confirmed
@@ -87,6 +93,14 @@ public static class HandshakeMachine
 
     private static int StepPuncBegin(ref HandshakeState s, in HandshakeInput input, Span<Effect> effects)
     {
+        // The DoS armor gate runs before every other check: an extension frame whose
+        // keyed MAC failed earns nothing — no pin verdict, no token verdict, no key
+        // agreement sequencing. Unversioned (v3) frames skip it during the support window.
+        if (input.Mac1Present && !input.Mac1Ok)
+        {
+            return Reject(effects, RejectMac1);
+        }
+
         if (input.CryptoBody && !input.PinMatches)
         {
             return Reject(effects, RejectPin);
@@ -135,6 +149,13 @@ public static class HandshakeMachine
 
     private static int StepPackBegin(ref HandshakeState s, in HandshakeInput input, Span<Effect> effects)
     {
+        // Same gate, same position: a bad mac1 answers nothing, least of all the echo
+        // check that would tell the sender which token we hold.
+        if (input.Mac1Present && !input.Mac1Ok)
+        {
+            return Reject(effects, RejectMac1);
+        }
+
         if (!input.BodyPlausible)
         {
             return Reject(effects, RejectPackLength);

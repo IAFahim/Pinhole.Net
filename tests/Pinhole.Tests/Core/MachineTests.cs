@@ -785,6 +785,71 @@ public sealed class MachineTests
     }
 
     [Fact]
+    public void Handshake_Mac1Gate_RefusesSilentlyBeforeEveryOtherVerdict()
+    {
+        Span<Effect> effects = stackalloc Effect[2];
+
+        // PUNC with a failed mac1: silent refusal, and it wins over every other check —
+        // feed it a bad pin AND a stale token AND crossed modes to prove ordering.
+        HandshakeState s = Handshake(offeredCrypto: true);
+        s.RemoteToken = 0x1111_2222;
+        s.RemoteTokenKnown = true;
+        s.RemoteTokenAuthenticated = true;
+        HandshakeInput badPunc = default;
+        badPunc.Kind = HandshakeInputKind.PuncBegin;
+        badPunc.CryptoBody = true;
+        badPunc.PinMatches = false;
+        badPunc.Mac1Present = true;
+        badPunc.Mac1Ok = false;
+        badPunc.FrameToken = 0x9999_9999; // not the latched token
+        (long kind, long reply, long fail) = HandshakeStep(ref s, in badPunc, effects);
+        Assert.Equal(HandshakeMachine.RejectMac1, kind);
+        Assert.Equal(-1, reply);       // no PACK
+        Assert.Equal(0, fail);         // no Close — the frame simply did not exist
+        Assert.Equal(0x1111_2222u, s.RemoteToken); // no state moved
+
+        // PACK with a failed mac1: silent before the echo verdict too — a forger must not
+        // even learn whether the echoed token was right.
+        HandshakeState dialer = Handshake(offeredCrypto: true);
+        HandshakeInput badPack = default;
+        badPack.Kind = HandshakeInputKind.PackBegin;
+        badPack.BodyPlausible = true;
+        badPack.LengthClassOk = true;
+        badPack.CryptoBody = true;
+        badPack.PinMatches = false;
+        badPack.Mac1Present = true;
+        badPack.Mac1Ok = false;
+        badPack.FrameToken = 0xDEAD_BEEF; // wrong echo
+        (kind, reply, fail) = HandshakeStep(ref dialer, in badPack, effects);
+        Assert.Equal(HandshakeMachine.RejectMac1, kind);
+        Assert.Equal(-1, reply);
+        Assert.Equal(0, fail);
+        Assert.False(dialer.RemoteTokenKnown);
+
+        // Present and verified: the frame proceeds exactly as its v3 twin would.
+        HandshakeState ok = Handshake(offeredCrypto: true);
+        HandshakeInput goodPunc = default;
+        goodPunc.Kind = HandshakeInputKind.PuncBegin;
+        goodPunc.CryptoBody = true;
+        goodPunc.PinMatches = true;
+        goodPunc.Mac1Present = true;
+        goodPunc.Mac1Ok = true;
+        goodPunc.FrameToken = 0x0BAD_C0DE;
+        (kind, reply, _) = HandshakeStep(ref ok, in goodPunc, effects);
+        Assert.Equal(HandshakeMachine.NeedKeys, kind);
+        Assert.Equal(-1, reply);
+
+        // Absent (v3 during the support window): nothing changes for today's shapes.
+        HandshakeState v3 = Handshake(offeredCrypto: true);
+        HandshakeInput plain = default;
+        plain.Kind = HandshakeInputKind.PuncBegin;
+        plain.CryptoBody = true;
+        plain.PinMatches = true;
+        plain.FrameToken = 0x0BAD_C0DE;
+        Assert.Equal(HandshakeMachine.NeedKeys, HandshakeStep(ref v3, in plain, effects).Kind);
+    }
+
+    [Fact]
     public void Handshake_CryptoPackFailsClosed_AndSendsTheThirdFlightOnce()
     {
         HandshakeState s = Handshake(offeredCrypto: true);
