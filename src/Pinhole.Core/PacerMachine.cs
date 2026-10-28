@@ -163,9 +163,21 @@ public static class PacerMachine
         s.PacerCreditBytes = Math.Min(s.PacerCreditBytes + rateBytesPerMs * elapsed, maxRunBytes);
     }
 
-    private static long PtoBaseMs(in PacerState s) => !s.HaveRtt
-        ? InitialPtoMs
-        : Math.Clamp(s.SrttMs + Math.Max(4 * s.RttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
+    private static long PtoBaseMs(in PacerState s)
+    {
+        if (!s.HaveRtt)
+        {
+            return InitialPtoMs;
+        }
+
+        // Jacobson/Karels variance term, doubled under the same standing-queue
+        // signal the collapse quorum uses: queue-delay spikes fire PTOs before
+        // anything is lost (the re-served originals land as duplicates), so where
+        // an expiry is weak loss evidence the timer widens pre-emptively instead
+        // of waiting for duplicate pressure to inflate it after the fact.
+        long varMultiplier = StandingQueue(in s) ? 8 : 4;
+        return Math.Clamp(s.SrttMs + Math.Max(varMultiplier * s.RttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
+    }
 
     public static long PtoMs(in PacerState s, int retransmits)
     {
@@ -325,10 +337,30 @@ public static class PacerMachine
         s.ExpiriesThisLossWindow = 0;
 
         s.Ssthresh = Math.Max(s.Window / 2, 2 * MinimumWindow(in s));
-        // Halve INTO the reduction (window below the new threshold) so slow start
-        // rebounds exponentially to the threshold instead of crawling linearly from
-        // it — a lossy path collapses shallower and recovers faster.
-        s.Window = Math.Max(s.Ssthresh / 2, MinimumWindow(in s));
+        if (delayStanding)
+        {
+            // Standing-queue evidence is the queue itself, not a confirmed drop:
+            // at collapse the buffer holds most of the window, and ssthresh ≈ half
+            // of (BDP + queue) is still a full pipe's worth. Landing AT the
+            // threshold keeps the link fed while the excess bleeds off at the
+            // deficit rate; landing a quarter down (halve-INTO) drains the queue
+            // to empty first, idles the link for the drain, and hands slow start
+            // an empty pipe it re-overshoots within two RTTs — the ⅓-BDP sawtooth.
+            // The shallower wrong response is also the cheaper one: delay evidence
+            // can be spurious in a way a drop cluster is not, and the spurious
+            // case still has the duplicate-restore to undo it.
+            s.Window = s.Ssthresh;
+        }
+        else
+        {
+            // Clean-path evidence is a drop cluster the wire confirmed. Halve INTO
+            // the reduction (window below the new threshold) so slow start rebounds
+            // exponentially to the threshold instead of crawling linearly from it —
+            // the queue behind a real drop already drained, so the rebound costs
+            // nothing and a lossy path recovers faster.
+            s.Window = Math.Max(s.Ssthresh / 2, MinimumWindow(in s));
+        }
+
         return new PacerEvent { Kind = PacerEventKind.Collapsed };
     }
 

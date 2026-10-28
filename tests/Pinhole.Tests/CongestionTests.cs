@@ -169,7 +169,10 @@ public sealed class CongestionTests(ITestOutputHelper output)
         // A second collapse one loss window later; this time the "lost" originals land
         // as duplicates — the timer fired on queue delay, and the verdict undoes it.
         controller.OnRetransmit(10_600);
-        Assert.Equal(collapsed + 3 * 1024, controller.WindowBytes); // still the first collapse's shape
+        // A standing collapse lands AT the threshold, so the three arrivals since grew
+        // it in congestion avoidance: 64 bytes each into the fractional accumulator,
+        // 192 total — under one chunk, and the window has not yet earned a step.
+        Assert.Equal(collapsed, controller.WindowBytes); // still the first collapse's shape
         controller.OnRetransmit(10_601);
         Assert.Equal(2, stats.LossEvents);
         long beforeSpuriousVerdict = controller.WindowBytes;
@@ -177,7 +180,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
 
         controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: true, 10_700);
         Assert.Equal(1, stats.RestoredWindows);
-        Assert.Equal(collapsed + 3 * 1024, controller.WindowBytes); // restored to the pre-collapse window
+        Assert.Equal(collapsed, controller.WindowBytes); // restored to the pre-collapse window
     }
 
     [Theory]
