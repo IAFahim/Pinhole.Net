@@ -29,6 +29,14 @@ Nine scenario tests in `BlobResumeTests.cs` (30 s blackout, direct→relay cut,
 rebind+blackout, provider restart, directory restart, refusal, tamper, cancellation,
 nonce freshness).
 
+`DownloadAsync` is now idempotent at a completed destination (R3/P5): a File-kind
+destination that already hashes to the ticket root is the finished transfer, so a
+re-call returns it without binding a node, dialing the provider, or requesting a byte
+(directory re-downloads skip root-verified entries the same way). Identity is proven
+by hashing — a tampered, foreign, or locked file falls through to a normal download,
+and the lying-provider gate stands: adversary output still yields exact content or a
+typed failure, never a partial publish.
+
 
 ## 1.10.0 (unreleased) — bounded resources: the first ledgers (#34, partial)
 
