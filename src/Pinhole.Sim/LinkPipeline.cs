@@ -57,8 +57,14 @@ internal sealed class LinkPipeline
     // Post-NAT crossing of one datagram: match the first rule, let its loss model
     // speak, and either park it in the rule's shaper FIFO or report the crossing
     // delay the caller must wait out. Counters match the fixture's old inline
-    // pipeline: lost datagrams bump the rule's Lost and DroppedByPolicy.
-    public LinkDecision Cross(IPEndPoint source, IPEndPoint dest, byte[] payload)
+    // pipeline: lost datagrams bump the rule's Lost and DroppedByPolicy. The
+    // payload may be corrupted in place (the array belongs to this crossing), and
+    // duplicated crossings — fresh clones with their own corruption draw and their
+    // own delay draw, so a copy can overtake its original — land in `duplicates`
+    // for the delivery vehicle to carry; a shaped rule enqueues copies into the
+    // same FIFO instead. Pass null to decline carrying duplicates at all.
+    public LinkDecision Cross(IPEndPoint source, IPEndPoint dest, byte[] payload,
+        List<(byte[] Payload, TimeSpan Delay)>? duplicates = null)
     {
         LinkRule? rule;
         lock (_gate)
@@ -87,6 +93,21 @@ internal sealed class LinkPipeline
             Interlocked.Increment(ref rule.Passed);
         }
 
+        // The duplicate is a copy of what the sender put on the wire; the original
+        // and the copy then corrupt (or pass) independently.
+        byte[]? copy = null;
+        if (rule?.DuplicateFor(source, dest)?.DuplicateNext() == true && duplicates is not null)
+        {
+            copy = (byte[])payload.Clone();
+            Interlocked.Increment(ref rule!.Duplicated);
+        }
+
+        CorruptInPlace(rule, source, dest, payload);
+        if (copy is not null)
+        {
+            CorruptInPlace(rule, source, dest, copy);
+        }
+
         // A finite-bandwidth rule parks the packet in its shared FIFO instead of
         // crossing now; the caller drains it at the configured rate and applies
         // the rule's propagation delay as the packet leaves the queue.
@@ -103,13 +124,46 @@ internal sealed class LinkPipeline
             }
 
             shaper.Enqueue(source, dest, payload);
+            if (copy is not null)
+            {
+                shaper.Enqueue(source, dest, copy);
+            }
+
             return new LinkDecision(LinkDecisionKind.Shaped, TimeSpan.Zero);
         }
 
         TimeSpan delay = PropagationDelay(rule);
+        if (copy is not null)
+        {
+            duplicates!.Add((copy, PropagationDelay(rule))); // fresh draw: copies reorder
+        }
+
         return delay <= TimeSpan.Zero
             ? LinkDecision.DeliverNow
             : new LinkDecision(LinkDecisionKind.Schedule, delay);
+    }
+
+    private static void CorruptInPlace(LinkRule? rule, IPEndPoint source, IPEndPoint dest, byte[] payload)
+    {
+        int offset = rule?.CorruptFor(source, dest)?.FlipOffset(payload.Length) ?? -1;
+        if (offset >= 0)
+        {
+            payload[offset] ^= 0x80;
+            Interlocked.Increment(ref rule!.Corrupted);
+        }
+    }
+
+    // True when any installed rule can emit duplicates — the delivery vehicle uses
+    // this to skip the per-crossing duplicates list on ordinary networks.
+    public bool AnyDuplication
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _rules.Any(r => r.DuplicatesAnything);
+            }
+        }
     }
 
     // The rule's propagation delay plus jitter drawn from the injected stream.

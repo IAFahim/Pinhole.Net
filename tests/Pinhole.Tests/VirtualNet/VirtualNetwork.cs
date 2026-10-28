@@ -13,7 +13,7 @@ internal sealed class VirtualNetwork : IDisposable
     private readonly Dictionary<IPEndPoint, VirtualUdpSocket> _internet = new();
     private readonly List<VirtualNat> _nats = [];
     private readonly Dictionary<IPEndPoint, VirtualUdpSocket> _behindNat = new();
-    private readonly LinkPipeline _links = new(new Random());
+    private readonly LinkPipeline _links;
     private readonly List<ScheduledPacket> _inflight = [];
     private readonly Thread _scheduler;
     private readonly AutoResetEvent _wake = new(false);
@@ -28,8 +28,12 @@ internal sealed class VirtualNetwork : IDisposable
     internal void SocketAttached() => Interlocked.Increment(ref _liveSockets);
     internal void SocketDetached() => Interlocked.Decrement(ref _liveSockets);
 
-    public VirtualNetwork()
+    // The jitter stream is seeded (default 0): a hostile-network run that draws
+    // reorder delays is reproducible by rerunning it. The pre-elevation fixture
+    // drew from Random.Shared, which no seed could pin.
+    public VirtualNetwork(int seed = 0)
     {
+        _links = new LinkPipeline(new Random(seed));
         _scheduler = new Thread(RunScheduler) { IsBackground = true, Name = "virtual-net" };
         _scheduler.Start();
     }
@@ -85,10 +89,25 @@ internal sealed class VirtualNetwork : IDisposable
         Continue(source, dest, payload);
     }
 
-    // Post-NAT routing: the Sim pipeline decides loss/shape/delay, this class delivers.
+    // Post-NAT routing: the Sim pipeline decides loss/shape/delay (and may corrupt
+    // the payload or emit duplicates), this class delivers.
     private void Continue(IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
-        LinkDecision decision = _links.Cross(source, dest, payload);
+        List<(byte[] Payload, TimeSpan Delay)>? duplicates = _links.AnyDuplication ? [] : null;
+        LinkDecision decision = _links.Cross(source, dest, payload, duplicates);
+        Apply(decision, source, dest, payload);
+        if (duplicates is not null)
+        {
+            foreach ((byte[] copy, TimeSpan delay) in duplicates)
+            {
+                Apply(delay <= TimeSpan.Zero ? LinkDecision.DeliverNow
+                    : new LinkDecision(LinkDecisionKind.Schedule, delay), source, dest, copy);
+            }
+        }
+    }
+
+    private void Apply(LinkDecision decision, IPEndPoint source, IPEndPoint dest, byte[] payload)
+    {
         switch (decision.Kind)
         {
             case LinkDecisionKind.Deliver:

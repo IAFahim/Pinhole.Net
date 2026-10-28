@@ -75,6 +75,14 @@ internal sealed class BlobController
 
     public long WindowBytes => _pacer.Window;
 
+    // R3/P3 observability: the two halves of the reservation ledger. They move in
+    // lockstep by construction (every budget hold is mirrored into the pacer and
+    // every release hits both); the property gate exists to catch the one code
+    // path that ever forgets a half.
+    internal long BudgetReservedBytes => _budget.UsedBytes;
+
+    internal long PacerInFlightBytes => _pacer.InFlight;
+
     public void OnRequestSent()
     {
         if (_stats is not null) _stats.RequestsSent++;
@@ -227,5 +235,17 @@ internal static class BlobTestHooks
     {
         get => TraceSink.Value;
         set => TraceSink.Value = value;
+    }
+
+    // R3/P3 ledger conservation probe: once per control-loop tick with (budget
+    // holds, pacer in-flight, live outstanding holds) — the three faces of the same
+    // reservation that must agree at every observed step and drain to zero when a
+    // stream unwinds. AsyncLocal so parallel transfers never cross-observe.
+    private static readonly AsyncLocal<Action<long, long, long>?> LedgerSink = new();
+
+    public static Action<long, long, long>? Ledger
+    {
+        get => LedgerSink.Value;
+        set => LedgerSink.Value = value;
     }
 }

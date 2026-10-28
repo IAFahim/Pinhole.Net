@@ -1250,15 +1250,32 @@ public sealed class BlobsTests
             string outDir = Path.Combine(dir, "out");
             Directory.CreateDirectory(outDir);
             string target = Path.Combine(outDir, ticket.Name);
-            if (existingTarget) await File.WriteAllBytesAsync(target, trusted);
             using var deadline = new CancellationTokenSource(Timeout);
+            if (existingTarget)
+            {
+                // R3/P5 idempotent resume: a destination already holding the ticket's
+                // root-verified content is the completed transfer. The lying provider
+                // is never consulted — the call succeeds with zero wire traffic and
+                // the verified file stays byte-identical (the adversary publishes
+                // nothing either way; the no-existing-target branch below is the
+                // pure adversarial gate).
+                await File.WriteAllBytesAsync(target, trusted);
+                BlobDownloadResult done = await BlobClient.DownloadAsync(
+                    ticket, outDir, options: new BlobDownloadOptions { NodeOptions = Offline() with { EnablePathValidation = false } },
+                    ct: deadline.Token);
+                Assert.Equal(trusted.Length, done.Bytes);
+                Assert.Equal(trusted, await File.ReadAllBytesAsync(target));
+                Assert.False(Directory.Exists(target + ".pinhole-part"));
+                deadline.Cancel();
+                return;
+            }
+
             Task serve = oracle.ServeAdversariallyAsync(psk, root, untrusted, deadline.Token);
             InvalidDataException error = await Assert.ThrowsAsync<InvalidDataException>(() => BlobClient.DownloadAsync(
                 ticket, outDir, options: new BlobDownloadOptions { NodeOptions = Offline() with { EnablePathValidation = false } },
                 ct: deadline.Token));
             Assert.Contains("root check", error.Message);
-            if (existingTarget) Assert.Equal(trusted, await File.ReadAllBytesAsync(target));
-            else Assert.False(File.Exists(target), "A failed root check must not publish the part file.");
+            Assert.False(File.Exists(target), "A failed root check must not publish the part file.");
             Assert.False(Directory.Exists(target + ".pinhole-part"));
             deadline.Cancel();
         }

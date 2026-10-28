@@ -56,8 +56,12 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             string outDir = Path.Combine(dir, "out");
 
             // One full download first: JIT, pools, and one-time allocations belong to the
-            // process, not the loop — the slope check starts after the warmup.
-            BlobDownloadResult warm = await BlobClient.DownloadAsync(server.Ticket, outDir,
+            // process, not the loop — the slope check starts after the warmup. Its own
+            // destination: since resume became idempotent at a completed destination
+            // (R3/P5), a warmup that finished inside outDir would make every cycle
+            // below a correct wire no-op instead of a mid-flight cancel. The warmup
+            // warms the process, not the destination the cycles chain on.
+            BlobDownloadResult warm = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "warm"),
                 options: DownOptions(lab, 34020) with { FlowBudget = budget }).WaitAsync(Budget);
             Assert.Equal(FlowBytes, warm.Bytes);
 
