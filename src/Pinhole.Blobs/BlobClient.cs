@@ -569,6 +569,7 @@ public static class BlobClient
                     lastLoopTicks = now;
                     bool pathPresent = WatchPath(now);
                     TraceState(now, pathPresent);
+                    ObserveLedger();
                     _recovery.Check();
                     if (!pathPresent)
                     {
@@ -1258,6 +1259,31 @@ public static class BlobClient
         // BlobTestHooks.Trace: enough timeline to see which clock froze on a CI
         // runner without flooding the log. Null in production, and AsyncLocal so
         // parallel transfers never interleave into one timeline.
+        // R3/P3 conservation probe (BlobTestHooks.Ledger): one snapshot per control
+        // tick of the three reservation faces. Every mutation of the ledger happens
+        // synchronously on this thread between ticks, so a snapshot is never torn.
+        // The final drain (the finally block below) is observed by the caller as the
+        // budget resting at zero once the stream has unwound.
+        private void ObserveLedger()
+        {
+            Action<long, long, long>? ledger = BlobTestHooks.Ledger;
+            if (ledger is null)
+            {
+                return;
+            }
+
+            long holds = 0;
+            foreach ((long idx, (long _, int _, bool _, bool holdReleased)) in _outstanding)
+            {
+                if (!holdReleased)
+                {
+                    holds += ChunkLength(idx);
+                }
+            }
+
+            ledger(_controller.BudgetReservedBytes, _controller.PacerInFlightBytes, holds);
+        }
+
         private void TraceState(long now, bool pathPresent)
         {
             Action<string>? trace = BlobTestHooks.Trace;
