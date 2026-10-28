@@ -28,6 +28,13 @@ public sealed class FakeStunServer : IDisposable
 
     public IPEndPoint? ReportMappedOverride { get; set; }
 
+    // The first N well-formed binding requests are dropped on the floor: the client
+    // must retransmit the same transaction to get through. Seen counts every
+    // well-formed request, dropped or not.
+    public int DropFirstRequests { get; set; }
+
+    public int RequestsSeen;
+
     private async Task RunAsync()
     {
         IPEndPoint any = new(_udp.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
@@ -44,6 +51,12 @@ public sealed class FakeStunServer : IDisposable
             }
 
             if (res.ReceivedBytes < 20 || BinaryPrimitives.ReadUInt32BigEndian(_buf.AsSpan(4)) != Cookie)
+            {
+                continue;
+            }
+
+            if (BinaryPrimitives.ReadUInt16BigEndian(_buf) == 0x0001
+                && Interlocked.Increment(ref RequestsSeen) <= DropFirstRequests)
             {
                 continue;
             }
@@ -133,6 +146,42 @@ public sealed class StunTests
 
         IPEndPoint mapped = await peer.ProbeStunAsync(server.LocalEndPoint).WaitAsync(DefaultTimeout);
         Assert.Equal(peer.LocalPort, mapped.Port);
+    }
+
+    [Fact]
+    public async Task Probe_RetransmitsTheSameTransaction_AfterDatagramLoss()
+    {
+        using FakeStunServer server = new() { DropFirstRequests = 3 };
+        using var peer = new PeerSocket(0x55);
+
+        IPEndPoint mapped = await peer.ProbeStunAsync(server.LocalEndPoint).WaitAsync(DefaultTimeout);
+
+        Assert.Equal(peer.LocalPort, mapped.Port);
+        // Three losses survived: the original transmission plus at least three
+        // retransmits of the same transaction id.
+        Assert.True(server.RequestsSeen >= 4, $"saw only {server.RequestsSeen} requests");
+    }
+
+    [Fact]
+    public async Task Probe_ConcurrentCalls_SurviveLossOnEveryFirstTransmission()
+    {
+        // The hunter signature: concurrent probes serialize on the shared
+        // transaction slot, so a lost datagram must cost one retransmit
+        // interval, never the whole serialized chain's budget.
+        using FakeStunServer server = new() { DropFirstRequests = 2 };
+        using var peer = new PeerSocket(0x56);
+
+        Task<IPEndPoint>[] probes =
+        [
+            peer.ProbeStunAsync(server.LocalEndPoint),
+            peer.ProbeStunAsync(server.LocalEndPoint),
+            peer.ProbeStunAsync(server.LocalEndPoint),
+            peer.ProbeStunAsync(server.LocalEndPoint),
+        ];
+
+        IPEndPoint[] results = await Task.WhenAll(probes).WaitAsync(DefaultTimeout);
+        Assert.All(results, r => Assert.Equal(peer.LocalPort, r.Port));
+        Assert.Single(results.Select(r => r.ToString()).Distinct());
     }
 
     [Fact]

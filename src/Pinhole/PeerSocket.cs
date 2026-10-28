@@ -263,8 +263,29 @@ internal static class PeerEngine
             RandomNumberGenerator.Fill(req.AsSpan(8));
             s.StunTxid = req.AsSpan(8).ToArray();
             s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-            s.Udp.SendTo(req, SocketFlags.None, ToWire(server));
-            return await s.StunResult.Task.WaitAsync(SignalTimeout, ct).ConfigureAwait(false);
+            // UDP binding transactions retransmit the same bytes at doubling intervals
+            // inside the one deadline (RFC 8489 pacing): a datagram lost in either
+            // direction costs one interval, not the serialized queue's whole budget
+            // behind this gate.
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(SignalTimeout);
+            TimeSpan interval = TimeSpan.FromMilliseconds(500);
+            while (true)
+            {
+                s.Udp.SendTo(req, SocketFlags.None, ToWire(server));
+                try
+                {
+                    return await s.StunResult.Task.WaitAsync(interval, deadline.Token).ConfigureAwait(false);
+                }
+                catch (TimeoutException) when (!deadline.IsCancellationRequested)
+                {
+                    interval = TimeSpan.FromMilliseconds(Math.Min(interval.TotalMilliseconds * 2, 2_000));
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"STUN server {server} did not answer within {SignalTimeout.TotalSeconds:0.#}s");
+                }
+            }
         }
         finally
         {

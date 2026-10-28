@@ -125,6 +125,26 @@ public sealed class OptionsResolutionTests
     }
 
     [Fact]
+    public async Task BindTimeProbe_RetransmitsThroughDatagramLoss()
+    {
+        // The bind-time reflexive probe is a UDP transaction too: losing the
+        // first exchanges must cost retransmit intervals, not the node's whole
+        // candidate budget (the EmptyLists flake's mechanism under load).
+        using FakeStunServer stun = new() { DropFirstRequests = 2 };
+        await using var node = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [stun.LocalEndPoint],
+            Relays = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
+        });
+
+        await TestPoll.UntilAsync(Timeout, () => node.PublicEndpoints.Count > 0);
+    }
+
+    [Fact]
     public async Task EmptyLists_IndependentlyDisableTheirProviders()
     {
         using FakeStunServer stun = new();

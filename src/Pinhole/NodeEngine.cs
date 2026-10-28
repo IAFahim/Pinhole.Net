@@ -725,20 +725,32 @@ internal sealed partial class NodeEngine : IDisposable
         try
         {
             TrackPredictionContact(source, server);
-            source.SendTo(req, ToWire(server));
             // Two expiry sources on one WaitAsync race each other: on a stalled runner both
             // fire before either is observed and the timeout can mask the caller's token.
             // The probe's own deadline is a linked source instead, translated back — so an
             // externally canceled probe always surfaces as cancellation, never as timeout.
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(ProbeTimeout);
-            try
+            // UDP binding transactions retransmit the same bytes at doubling intervals
+            // inside the one deadline (RFC 8489 pacing): a datagram lost in either
+            // direction — or a reply stranded behind a stalled pump — costs one
+            // interval, not the entire classification attempt.
+            TimeSpan interval = TimeSpan.FromMilliseconds(500);
+            while (true)
             {
-                return await tcs.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                throw new TimeoutException($"STUN server {server} did not answer within {ProbeTimeout.TotalSeconds:0.#}s");
+                source.SendTo(req, ToWire(server));
+                try
+                {
+                    return await tcs.Task.WaitAsync(interval, deadline.Token).ConfigureAwait(false);
+                }
+                catch (TimeoutException) when (!deadline.IsCancellationRequested)
+                {
+                    interval = TimeSpan.FromMilliseconds(Math.Min(interval.TotalMilliseconds * 2, 1_000));
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"STUN server {server} did not answer within {ProbeTimeout.TotalSeconds:0.#}s");
+                }
             }
         }
         finally
