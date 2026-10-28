@@ -26,6 +26,7 @@
 		  <PrivateAssets>all</PrivateAssets>
 		</PackageReference>
 		<ProjectReference Include="..\Pinhole\Pinhole.csproj" />
+		<ProjectReference Include="..\Pinhole.Core\Pinhole.Core.csproj" />
 		<ProjectReference Include="..\Pinhole.Crypto\Pinhole.Crypto.csproj" />
 	</ItemGroup>
 
