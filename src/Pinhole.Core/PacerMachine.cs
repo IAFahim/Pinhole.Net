@@ -163,9 +163,21 @@ public static class PacerMachine
         s.PacerCreditBytes = Math.Min(s.PacerCreditBytes + rateBytesPerMs * elapsed, maxRunBytes);
     }
 
-    private static long PtoBaseMs(in PacerState s) => !s.HaveRtt
-        ? InitialPtoMs
-        : Math.Clamp(s.SrttMs + Math.Max(4 * s.RttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
+    private static long PtoBaseMs(in PacerState s)
+    {
+        if (!s.HaveRtt)
+        {
+            return InitialPtoMs;
+        }
+
+        // Jacobson/Karels variance term, doubled under the same standing-queue
+        // signal the collapse quorum uses: queue-delay spikes fire PTOs before
+        // anything is lost (the re-served originals land as duplicates), so where
+        // an expiry is weak loss evidence the timer widens pre-emptively instead
+        // of waiting for duplicate pressure to inflate it after the fact.
+        long varMultiplier = StandingQueue(in s) ? 8 : 4;
+        return Math.Clamp(s.SrttMs + Math.Max(varMultiplier * s.RttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
+    }
 
     public static long PtoMs(in PacerState s, int retransmits)
     {

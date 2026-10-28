@@ -66,6 +66,31 @@ public sealed class PacerMachineTests
         Assert.Equal(900, PacerMachine.PtoMs(in fixedWindow, 5));
     }
 
+    // ------------------------------------------------------------------ PTO under standing delay (deep-queue H4)
+
+    [Fact]
+    public void Pacer_StandingQueueDoublesThePtoVarianceTerm_CleanPathsKeepJacobsonKarels()
+    {
+        // Deep-queue shape: samples 40/200/200 leave srtt 77, rttvar 76, min 40 —
+        // standing (77*5 >= 40*8). The variance term doubles to 8x there: a
+        // queue-delay spike is weak loss evidence, and waiting it out is cheaper
+        // than re-serving the originals as duplicates.
+        PacerState standing = Pacer();
+        DeepQueueShape(ref standing);
+        Assert.True(PacerMachine.StandingQueue(in standing));
+        Assert.Equal(77 + 8 * 76, PacerMachine.PtoMs(in standing, 0));
+
+        // A clean path keeps the classic 4x term: single 77 ms sample, min == srtt.
+        PacerState clean = Pacer();
+        PacerMachine.ObserveRtt(ref clean, TimeSpan.FromMilliseconds(77));
+        Assert.False(PacerMachine.StandingQueue(in clean));
+        Assert.Equal(77 + 4 * 38, PacerMachine.PtoMs(in clean, 0));
+
+        // The widening rides the whole ladder: backoff and the hard ceiling apply
+        // on top of it exactly as before.
+        Assert.Equal(2 * (77 + 8 * 76), PacerMachine.PtoMs(in standing, 1));
+    }
+
     [Fact]
     public void Pacer_DuplicatePressureInflatesThePto_UntilACleanLossWindowRelaxesIt()
     {
