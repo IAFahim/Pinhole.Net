@@ -51,3 +51,52 @@ internal sealed class ToggleLoss : LossModel
 
     protected override bool LoseNextCore() => _dropping;
 }
+
+// The hostile-net companions to loss (R3/P1): seeded duplication and corruption.
+// Same discipline as LossModel — every draw comes from a handed-in seed so a
+// hostile-network run is reproducible by rerunning it.
+internal abstract class DuplicationModel
+{
+    private readonly object _gate = new();
+
+    public bool DuplicateNext()
+    {
+        lock (_gate)
+        {
+            return DuplicateNextCore();
+        }
+    }
+
+    protected abstract bool DuplicateNextCore();
+}
+
+internal sealed class IndependentDuplication(double probability, int seed) : DuplicationModel
+{
+    private readonly Random _rng = new(seed);
+
+    protected override bool DuplicateNextCore() => _rng.NextDouble() < probability;
+}
+
+// Returns the byte offset to flip on this crossing, or -1 to pass it clean.
+internal abstract class CorruptionModel
+{
+    private readonly object _gate = new();
+
+    public int FlipOffset(int length)
+    {
+        lock (_gate)
+        {
+            return FlipOffsetCore(length);
+        }
+    }
+
+    protected abstract int FlipOffsetCore(int length);
+}
+
+internal sealed class IndependentCorruption(double probability, int seed) : CorruptionModel
+{
+    private readonly Random _rng = new(seed);
+
+    protected override int FlipOffsetCore(int length) =>
+        _rng.NextDouble() < probability ? _rng.Next(length) : -1;
+}

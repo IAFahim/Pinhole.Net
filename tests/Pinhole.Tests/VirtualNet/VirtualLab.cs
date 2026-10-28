@@ -13,7 +13,7 @@ internal sealed class VirtualLab : IDisposable
 
     private static int _nextHostPort = 30000;
 
-    public readonly VirtualNetwork Net = new();
+    public readonly VirtualNetwork Net;
     private readonly List<VirtualStunServer> _stun = [];
     private readonly List<(FakeTurnServer Server, TurnServerConfig Config)> _turns = [];
 
@@ -21,8 +21,10 @@ internal sealed class VirtualLab : IDisposable
     public TurnServerConfig? TurnConfig => _turns.Count > 0 ? _turns[0].Config : null;
     public IReadOnlyList<FakeTurnServer> Turns => _turns.Select(t => t.Server).ToArray();
 
-    public VirtualLab(bool withTurn = false, bool withV6Stun = false, int turnPort = 0, int turnLifetimeSeconds = 600)
+    public VirtualLab(bool withTurn = false, bool withV6Stun = false, int turnPort = 0, int turnLifetimeSeconds = 600,
+        int seed = 0)
     {
+        Net = new VirtualNetwork(seed);
         AddStun(new IPEndPoint(IPAddress.Parse("192.0.2.53"), 3478));
         AddStun(new IPEndPoint(IPAddress.Parse("192.0.2.54"), 3478));
         if (withV6Stun)
