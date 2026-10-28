@@ -68,6 +68,21 @@ public static class BlobClient
         var verifiedFileByRoot = new Dictionary<string, string>(StringComparer.Ordinal);
         bool anyResumed = false;
 
+        if (ticket.Kind == BlobKind.File)
+        {
+            // Idempotent resume (R3/P5): a destination that already holds the ticket's
+            // exact content IS the completed transfer — the checkpoint's fixed point.
+            // Re-calling on a finished download mints no node, dials no provider, and
+            // requests no bytes; content identity is proven by hashing, so a tampered
+            // or foreign file falls through to a normal re-download.
+            string fileName = string.IsNullOrWhiteSpace(ticket.Name) ? "pinhole-download" : ticket.Name;
+            string target = SafeJoin(destinationDirectory, fileName);
+            if (TryReadRootVerifiedFile(target, ticket.Root, out long existingBytes))
+            {
+                return new BlobDownloadResult(target, existingBytes, Resumed: true);
+            }
+        }
+
         await using var node = await PinholeNode.BindAsync(nodeOptions, ct).ConfigureAwait(false);
         while (true)
         {
@@ -166,6 +181,19 @@ public static class BlobClient
                     }
 
                     string target = SafeJoin(rootDir, entry.Path);
+                    if (TryReadRootVerifiedFile(target, entry.Root, out _))
+                    {
+                        // A file that finished stays finished — including across calls:
+                        // a re-download of a completed directory skips root-verified
+                        // entries wholesale instead of re-fetching them (R3/P5).
+                        completedPaths.Add(entry.Path);
+                        verifiedFileByRoot[Convert.ToHexString(entry.Root)] = target;
+                        verified += entry.Size;
+                        filesDone++;
+                        progress?.Report(new BlobProgress(verified, total, filesDone, entries.Count));
+                        continue;
+                    }
+
                     if (verifiedFileByRoot.TryGetValue(Convert.ToHexString(entry.Root), out string? written))
                     {
                         // Identical content is already on disk under another path and was
@@ -235,6 +263,44 @@ public static class BlobClient
     private static bool IsTransportLoss(Exception ex, bool dialing) =>
         ex is BlobTransportLostException or TimeoutException or ObjectDisposedException
         || (ex is InvalidOperationException && !dialing);
+
+    // True when the file at path exists and hashes to the ticket root — the
+    // download's own definition of "already complete". Only local bytes are read:
+    // zero wire traffic. The empty file's root is the hash of no input, matching
+    // FileSink.Complete; a file that is locked or unreadable is simply not
+    // verified, and the normal download path decides its fate.
+    private static bool TryReadRootVerifiedFile(string path, byte[] root, out long bytes)
+    {
+        bytes = 0;
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            using FileStream stream = File.OpenRead(path);
+            bytes = stream.Length;
+            if (bytes == 0)
+            {
+                return Blake3.Hash([]).AsSpan().SequenceEqual(root);
+            }
+
+            var tree = new Blake3.Tree(retainOutboard: false);
+            var buffer = new byte[64 * 1024];
+            int read;
+            while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                tree.Update(buffer.AsSpan(0, read));
+            }
+
+            return tree.RootHash().AsSpan().SequenceEqual(root);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     // Per-transfer negotiation state. The Hello version persists across re-dials (once
     // a provider proved itself v3-only, the whole transfer stays at v3); the Welcome
