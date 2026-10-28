@@ -363,7 +363,12 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with
                 {
-                    RecoveryTimeout = TimeSpan.FromSeconds(16),
+                    // 16s was calibrated before the handshake's v4 mac1 armor: each
+                    // re-dial under total silence now spends the 3s v4 fallback window
+                    // (v4 PUNCs into the dark, then the one-shot unversioned retry)
+                    // before the handshake can complete — a bounded, documented
+                    // protocol cost the allowance must have room for.
+                    RecoveryTimeout = TimeSpan.FromSeconds(20),
                     NodeOptions = ClientOptions(lab) with
                     {
                         PathValidationIdle = TimeSpan.FromSeconds(2),
