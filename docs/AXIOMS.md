@@ -202,7 +202,7 @@ roadmap plans:
 
 | Machine | Owns | Today |
 |---|---|---|
-| Pacer / `BlobController` | receiver-driven wire load: window, slow start/AIMD, RTT/PTO, token-bucket pacing, the shared flow budget | **current** (src/Pinhole.Blobs/BlobController.cs) — a class, not a `Step` machine; the first extraction target |
+| Pacer / `PacerMachine` | receiver-driven wire load: window, slow start/AIMD, RTT/PTO, token-bucket pacing | **extracted** (src/Pinhole.Core/PacerMachine.cs, sans-IO); `BlobController` (src/Pinhole.Blobs) remains as the stats/trace/budget shell |
 | Replay window | which counters may still commit: `Admits`/`Mark` over a 64-deep window | **current as a primitive** (src/Pinhole.Crypto/ReplayWindow.cs), unwired; `FrameSealer` still carries its own copy |
 | `FrameSealer` | one direction's seal/open: AES-GCM, epoch rekey, replay bitmap | **current** (src/Pinhole/SessionCrypto.cs) — the session layer's working sealer, awaiting decomposition |
 | `RunVerify` / `RunTree` | the verified-run fold: leaf CVs → run CV → root, proofs both ways | **current** (src/Pinhole.Blobs/RunVerify.cs) — pure functions; receiver state machine still forming around them |
