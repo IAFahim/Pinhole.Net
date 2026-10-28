@@ -1,6 +1,75 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — blob wire v4: verified runs, proofs before disk (#49 R2)
+
+A v4 transfer now proves every run before it touches the disk. Chunks still carry
+their BLAKE3 leaf CV; a new `Proof` frame carries the sibling CVs from each 64-chunk
+run's root up to the nearest verified node, and the receiver folds the run, compares
+against the ticket-anchored tree, and only then `pwrite`s — corruption in a chunk is
+caught by its CV, a lying CV is caught at run completion, and the disk only ever holds
+verified data. First proof for a 1 TiB tree is ~24 siblings (768 B); sequential runs
+need ~2 amortized. Resume persists the applied-run bitmap (PBPART02 checkpoints), so
+a restart costs O(1) — no prefix rehash — and unsolicited chunk indices are dropped.
+Wire v1/v2 Hello shapes are now refused uniformly (encrypted and plaintext branches
+alike; the refusal machinery stays for nonce-reuse hang-ups), and v3 remains served
+as the compatibility bridge until the next minor release. Two recovery deadlocks the
+verified-run march exposed were fixed from CI forensics: a chunk's window hold now
+releases at its first PTO expiry (zombie reservations once pinned inFlight above a
+collapsed window and froze the march), and control-loop scheduling gaps below the
+50 ms threshold are credited back to the wire clocks (Windows' ~16 ms timer
+granularity once stretched the PTO to ~3× against phantom loss). Scenario gates:
+`BlobRunTransferTests` (out-of-order runs, multi-run marches, restart).
+
+## 1.10.0 (unreleased) — handshake armor: keyed mac1 on versioned frames (#49 R5 phase 1)
+
+The engine handshake grows a v4 shape: PUNC/PACK carry a 17-byte extension — marker
+`0x04` plus a keyed BLAKE3 `mac1` over the whole frame, keyed to the responder's
+static public key (or the dialer's pinned key). A frame that carries the extension
+but fails verification is refused with total silence: no PACK, no HSCK, no state, no
+key agreement — counted only in the `Mac1Refused` counter, so a forged-mac1 flood
+earns nothing while an honest v4 dial completes on the same listener. The frame
+sizes (94/114) fall outside every length class a v3 reader admits, so v3 peers
+ignore v4 frames untouched; a v4 dialer retries unversioned exactly once after 3 s
+of total silence (`HandshakeV4FallbackMs`), and a late v4 PACK still parses after
+the fallback latch. Wire and refusal semantics: `docs/WIRE.md` §"Engine handshake
+frames, v3/v4"; gates: `HandshakeArmorTests` (byte-exact mac1 pins, forged-flood
+silence, fallback both directions).
+
+## 1.10.0 (unreleased) — deep-buffer utilization: collapse depth follows the evidence (#27)
+
+Under a deep buffer (256-packet queue) the controller's window sawtoothed around ⅓
+of the bandwidth-delay product on slow runners. The loss-window collapse now reads
+its evidence before choosing a depth, and the timer reads the same evidence before
+firing: under standing queue delay (srtt ≥ 1.6× min) a collapse needs a two-expiry
+cluster, lands AT the new threshold instead of a quarter below it (the queue keeps
+the link fed while the excess bleeds off — the dip and the slow-start re-overshoot
+were self-inflicted), duplicates of the "lost" originals overturn a spurious
+collapse and restore the window, and the PTO's variance term doubles from 4× to 8×
+rttvar pre-emptively (queue-delay spikes once fired re-requests that landed as
+duplicates). Clean paths keep the classic halve-INTO reduction and Jacobson/Karels
+4× timer, byte-identical. Evidence: the macOS deep-queue matrix held 1.9–2.8× the
+floor across three consecutive matrices after the quorum and restore changes
+(loss-windows 6–14 → 2–3, duplicate pressure 85–226 KiB → ≤5 KiB); the depth/timer
+split is pinned by deterministic machine tests (`PacerMachineTests`,
+`CongestionTests`) and the macOS verdict for it accumulates per matrix. The
+decision core now lives in a sans-IO `PacerMachine` (`Pinhole.Core`) with
+`BlobController` as the I/O shell.
+
+## 1.10.0 (unreleased) — STUN binding retransmission
+
+Both STUN probe paths (the node's bind-time classification and `PeerSocket`'s
+explicit probe) were single-shot UDP transactions: one lost datagram — or a reply
+stranded behind a momentarily starved pump — burned the entire probe budget, and
+concurrent probes on a `PeerSocket` serialize on the shared transaction slot, so
+one stall starved the whole chain. Both paths now retransmit the same transaction
+bytes at doubling intervals inside their existing deadlines (RFC 8489 pacing);
+timeout and cancellation surfaces are unchanged. `FakeStunServer` can drop the
+first N binding requests, and regression tests pin single-probe survival through
+three losses, the serialized chain surviving loss on every first transmission, and
+the bind-time reflexive probe populating `PublicEndpoints` through two losses.
+
+
 ## 1.10.0 (unreleased) — automatic transfer recovery (#32)
 
 One `DownloadAsync` call now rides out recoverable disruption on its own. While the
