@@ -106,6 +106,50 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
         }
     }
 
+    [Fact]
+    public async Task P5_TamperedDestination_IsNotTrusted_AndIsOverwrittenByAHonestDownload()
+    {
+        // The safety valve of the idempotence fix: a destination that exists but does
+        // not hash to the ticket root is NOT the fixed point. The call must fall
+        // through to a full wire download and overwrite the tampered bytes.
+        string dir = TempDir();
+        try
+        {
+            using VirtualLab lab = new();
+            byte[] data = new byte[FlowBytes];
+            RandomNumberGenerator.Fill(data);
+            string src = Path.Combine(dir, "tamper.bin");
+            await File.WriteAllBytesAsync(src, data);
+            Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
+            lab.Net.AddRule(LinkRule.Bottleneck(region, region, 8_000_000, queuePackets: 128,
+                delay: TimeSpan.FromMilliseconds(20)));
+            await using BlobServer server = await BlobServer.ServeAsync(src, new BlobServeOptions
+            {
+                NodeOptions = lab.BaseOptions(o => o with
+                {
+                    UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 34310)),
+                }),
+            });
+
+            string dest = Path.Combine(dir, "out");
+            Directory.CreateDirectory(dest);
+            byte[] tampered = (byte[])data.Clone();
+            tampered[^1] ^= 0xFF;
+            await File.WriteAllBytesAsync(Path.Combine(dest, "tamper.bin"), tampered);
+
+            BlobDownloadResult result = await DownloadAsync(lab, server, dest, new BlobFlowBudget(2 * 1024 * 1024))
+                .WaitAsync(Budget);
+
+            Assert.Equal(FlowBytes, result.Bytes);
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dest, "tamper.bin"))); // healed, not trusted
+            Assert.True(server.ChunksServed > 0, "the tampered destination was trusted without a wire download");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     private static string TempDir()
