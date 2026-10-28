@@ -154,7 +154,7 @@ public sealed class PacerMachineTests
         Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref s, 10_001).Kind); // a cluster is
         Assert.Equal(2, s.CollapseExpiries);
         long collapsed = s.Window;
-        Assert.Equal(Math.Max(window / 2 / 2, 4 * Chunk), collapsed);
+        Assert.Equal(Math.Max(window / 2, 4 * Chunk), collapsed); // standing: land AT the threshold
 
         // More expiries inside the same loss window are rate-limited: one reduction each.
         Assert.Equal(PacerEventKind.None, PacerMachine.OnRetransmit(ref s, 10_002).Kind);
@@ -164,6 +164,54 @@ public sealed class PacerMachineTests
         // A full loss window later the counter and the rate limit both open again.
         Assert.Equal(PacerEventKind.None, PacerMachine.OnRetransmit(ref s, 10_260).Kind); // fresh window, one expiry
         Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref s, 10_261).Kind);
+        Assert.Equal(collapsed / 2, s.Window); // each standing collapse halves to its threshold
+    }
+
+    // The depth split #27 H2 pins: identical windows, different evidence. Standing
+    // delay lands AT the threshold (halve once — the queue keeps the link fed while
+    // the excess bleeds off); a clean-path drop cluster lands INTO it (halve twice —
+    // slow start rebounds exponentially to the threshold).
+    [Fact]
+    public void Pacer_StandingCollapseHalvesToTheThreshold_CleanPathStillHalvesIntoIt()
+    {
+        PacerState standing = Pacer();
+        DeepQueueShape(ref standing); // srtt 77 on a 40 ms base: standing
+        Assert.Equal(32 * Chunk, standing.Window);
+        PacerMachine.OnRetransmit(ref standing, 10_000);
+        Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref standing, 10_001).Kind);
+        Assert.Equal(16 * Chunk, standing.Ssthresh); // max(32768/2, 8192)
+        Assert.Equal(16 * Chunk, standing.Window);   // AT the threshold, not ssthresh/2
+
+        PacerState clean = Pacer();
+        Assert.Equal(32 * Chunk, clean.Window);
+        PacerMachine.OnRetransmit(ref clean, 1000);
+        PacerMachine.OnRetransmit(ref clean, 1001);
+        Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref clean, 1002).Kind);
+        Assert.Equal(16 * Chunk, clean.Ssthresh);
+        Assert.Equal(8 * Chunk, clean.Window);       // INTO the threshold: ssthresh/2
+
+        // At the ssthresh floor (window 8 KiB halves to 4, floored to 2x the 4 KiB
+        // minimum) the standing response holds the window where it stands — the
+        // floor exists so a collapse cannot refuse all work, and standing evidence
+        // is too weak to take the last headroom away. The clean path still drops
+        // to the minimum window.
+        PacerState small = Pacer(maxWindowBytes: 8 * Chunk);
+        small.Window = 8 * Chunk;
+        PacerMachine.ObserveRtt(ref small, TimeSpan.FromMilliseconds(40));
+        PacerMachine.ObserveRtt(ref small, TimeSpan.FromMilliseconds(200));
+        PacerMachine.ObserveRtt(ref small, TimeSpan.FromMilliseconds(200));
+        PacerMachine.OnRetransmit(ref small, 10_000);
+        Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref small, 10_001).Kind);
+        Assert.Equal(8 * Chunk, small.Ssthresh); // max(4096, 2*4096)
+        Assert.Equal(8 * Chunk, small.Window);
+
+        PacerState smallClean = Pacer(maxWindowBytes: 8 * Chunk);
+        smallClean.Window = 8 * Chunk;
+        PacerMachine.OnRetransmit(ref smallClean, 1000);
+        PacerMachine.OnRetransmit(ref smallClean, 1001);
+        Assert.Equal(PacerEventKind.Collapsed, PacerMachine.OnRetransmit(ref smallClean, 1002).Kind);
+        Assert.Equal(8 * Chunk, smallClean.Ssthresh);
+        Assert.Equal(4 * Chunk, smallClean.Window); // max(ssthresh/2, minimum) = the floor
     }
 
     // ------------------------------------------------------------------ spurious-restore verdicts
