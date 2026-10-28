@@ -78,6 +78,9 @@ internal sealed class ConnState
     public byte[]? PacketRelayPeerKey;
     public bool PacketRelayConfirmed;
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
+    public bool PuncFrameV4;         // PuncFrame carries the v4 mac1 extension
+    public bool PuncFrameDowngraded; // punch loop: the one-shot fallback to the v3 shape fired
+    public long FirstPuncTicks;      // Volatile; first PUNC transmission — the fallback clock's zero
     public DatagramBuffer? Buffer;      // non-null only with ReceiveBufferCapacity > 0
 
     public readonly TaskCompletionSource Connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -231,6 +234,22 @@ internal sealed partial class NodeEngine : IDisposable
     private readonly object _closedHandshakeGate = new();
     private readonly Queue<ulong> _closedHandshakeOrder = new();
     internal long StaleHandshakeDrops;
+    // Handshake v4 armor counters (Interlocked). Mac1Refused counts extension frames the
+    // keyed-MAC gate dropped silently; HandshakeKeyAgreements brackets every key agreement
+    // an inbound PUNC/PACK triggers — the no-DH-before-mac1 proof pins that it stays at
+    // zero while a flood of forged extension frames is refused.
+    private long _mac1Refused;
+    private long _handshakeKeyAgreements;
+    // Test seam mirroring the blob layer's LegacyV3Only: the node never emits or accepts
+    // the v4 handshake shapes, emulating a pre-v4 peer for fallback tests.
+    internal bool LegacyHandshakeV3Only;
+    internal long Mac1Refused => Volatile.Read(ref _mac1Refused);
+    internal long HandshakeKeyAgreements => Volatile.Read(ref _handshakeKeyAgreements);
+    internal bool HandshakeV4Active => !LegacyHandshakeV3Only && _identity is not null;
+    // A v4 dialer that has sent PUNCs and heard nothing for this long assumes a v3-only
+    // responder (which ignores the unknown frame shape) and falls back to unversioned
+    // retries, exactly once — the blob layer's first-answer-timeout fallback discipline.
+    internal const long HandshakeV4FallbackMs = 3000;
     private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
     private int _relayEnsuring;          // single-flight guard for that retry
     private int _stunRefreshing; // single-flight guard for reflexive refreshes
@@ -914,7 +933,10 @@ internal sealed partial class NodeEngine : IDisposable
                     PinholeCandidate[] targets;
                     lock (_gate) targets = c.PeerCandidates.ToArray();
                     foreach (PinholeCandidate target in targets.Where(t => t.Kind == relay.Kind && t.RelayUrl == relay.Url))
+                    {
+                        NotePuncSent(c);
                         SendViaKeyedRelay(c.PuncFrame, target);
+                    }
                     KickPunch(c);
                 }
             }
@@ -949,9 +971,13 @@ internal sealed partial class NodeEngine : IDisposable
             // the Ed25519 endpoint ID. Bind every DERP source to the handshake's static
             // key; an unrelated authenticated relay client cannot spoof a peer ID.
             ReadOnlySpan<byte> staticKey;
-            if (frame[0] == (byte)FrameType.Punc && frame.Length == HeaderSize + CryptoWire.PuncCryptoBody)
+            if (frame[0] == (byte)FrameType.Punc
+                && (frame.Length == HeaderSize + CryptoWire.PuncCryptoBody
+                    || HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4))
                 staticKey = frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, 32);
-            else if (frame[0] == (byte)FrameType.Pack && frame.Length == HeaderSize + CryptoWire.PackCryptoBody)
+            else if (frame[0] == (byte)FrameType.Pack
+                && (frame.Length == HeaderSize + CryptoWire.PackCryptoBody
+                    || HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PackCryptoBodyV4))
                 staticKey = frame.AsSpan(HeaderSize + 2 * CryptoWire.TokenLength + CryptoWire.EphemeralLength, 32);
             else
             {
@@ -1485,7 +1511,7 @@ internal sealed partial class NodeEngine : IDisposable
         c.Keepalive = NewKeepaliveState();
         c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
         c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
-        c.PuncFrame = BuildPunc(c);
+        SetPuncFrame(c);
         c.Public = new PinholeConnection(this, c);
         // Before publication: no other thread can see c through the table, so seeding the
         // peer candidates needs no lock.
@@ -1639,7 +1665,7 @@ internal sealed partial class NodeEngine : IDisposable
         c.Buffer = CreateBuffer();
         c.Pmtu = NewPmtuState();
         c.Keepalive = NewKeepaliveState();
-        c.PuncFrame = BuildPunc(c);
+        SetPuncFrame(c);
         c.Public = new PinholeConnection(this, c);
         // Two PUNCs raced: the first entry wins, the second becomes nothing.
         if (!_conns.TryAdd(peerId, c))
@@ -1781,6 +1807,29 @@ internal sealed partial class NodeEngine : IDisposable
                 long now = Environment.TickCount64;
                 MaybeStartPortPrediction(c);
                 PinholeConnectionState state = c.State;
+
+                // Handshake v4 fallback, the blob layer's discipline: a v4 dialer that has
+                // sent PUNCs and heard no handshake frame back for the fallback window
+                // assumes a v3-only responder silently dropping the unknown shape, and
+                // downgrades to the unversioned frame. Exactly once per connection — the
+                // latch persists, like BlobNegotiation's v4→v3 fallback.
+                if (c.PuncFrameV4 && !c.PuncFrameDowngraded && state == PinholeConnectionState.Punching)
+                {
+                    long first = Volatile.Read(ref c.FirstPuncTicks);
+                    if (first != 0 && now - first > HandshakeV4FallbackMs
+                        && Volatile.Read(ref c.PuncsReceived) == 0
+                        && Volatile.Read(ref c.PacksReceived) == 0
+                        && Volatile.Read(ref c.HscksReceived) == 0)
+                    {
+                        c.PuncFrameDowngraded = true;
+                        c.PuncFrame = BuildPunc(c, v4: false);
+                        c.PuncFrameV4 = false;
+                        if (TraceEnabled)
+                        {
+                            TraceLine($"handshake v4 unanswered by {c.PeerId:x16} for {HandshakeV4FallbackMs}ms; falling back to unversioned puncs");
+                        }
+                    }
+                }
                 PunchInput input = default;
                 input.Kind = PunchInputKind.Tick;
                 input.Phase = (byte)state;
@@ -1902,15 +1951,18 @@ internal sealed partial class NodeEngine : IDisposable
                     {
                         if (candidate.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
                         {
+                            NotePuncSent(c);
                             SendViaKeyedRelay(c.PuncFrame, candidate);
                         }
                         else if (candidate.Kind == CandidateKind.Relay)
                         {
+                            NotePuncSent(c);
                             SendViaRelayTo(c.PuncFrame, candidate.Address, candidate.RelayServer?.Address);
                         }
                         else
                         {
                             if (TraceEnabled) TraceLine($"punch direct {c.PeerId:x16} -> {candidate.Address}");
+                            NotePuncSent(c);
                             SendToWire(candidate.Address, c.PuncFrame);
                             Interlocked.Increment(ref c.PuncsSent);
                         }
@@ -2512,7 +2564,9 @@ internal sealed partial class NodeEngine : IDisposable
             (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Ping or FrameType.Pong)) return;
         // The TCP sidecar offers only authenticated sessions, even when the UDP node
         // permits legacy plaintext. Never create a TCP stranger from a legacy probe.
-        if (frame.Span[0] == (byte)FrameType.Punc && frame.Length != HeaderSize + CryptoWire.PuncCryptoBody) { tcp.Dispose(); return; }
+        if (frame.Span[0] == (byte)FrameType.Punc
+            && frame.Length != HeaderSize + CryptoWire.PuncCryptoBody
+            && !(HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4)) { tcp.Dispose(); return; }
         Dispatch(frame.Span, new Arrival(tcp));
     }
 
@@ -2566,6 +2620,7 @@ internal sealed partial class NodeEngine : IDisposable
                 if (link is null || !link.BindPeer(c.PeerId)) return;
                 if (c.State == PinholeConnectionState.Closed || c.Dead.IsCancellationRequested) { link.Dispose(); return; }
                 if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct && c.DirectTcp is null) return;
+                NotePuncSent(c);
                 link.Send(c.PuncFrame);
                 if (c.Crypto is { Established: true, PeerConfirmed: true })
                     SendTcpProof(c, link);
@@ -2819,12 +2874,14 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             // Exact-length stranger gate: the punch probe is either legacy (13 B) or carries
-            // the crypto handshake (77 B) — anything else is malformed. The encryption policy
-            // decides which kinds of strangers may materialize a connection at all, so a
-            // Required node never creates state for a plaintext scan, and no negotiation
-            // happens after creation — there is no downgrade window to strip.
+            // the crypto handshake (77 B, or 94 B with the v4 mac1 extension) — anything
+            // else is malformed. The encryption policy decides which kinds of strangers may
+            // materialize a connection at all, so a Required node never creates state for a
+            // plaintext scan, and no negotiation happens after creation — there is no
+            // downgrade window to strip.
             bool legacy = frame.Length == HeaderSize + CryptoWire.PuncLegacyBody;
-            bool crypto = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
+            bool v4 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4;
+            bool crypto = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody || v4;
             if (!legacy && !crypto)
             {
                 return;
@@ -2833,6 +2890,16 @@ internal sealed partial class NodeEngine : IDisposable
             if ((legacy && _options.Encryption == PinholeEncryption.Required)
                 || (crypto && _options.Encryption == PinholeEncryption.Disabled))
             {
+                return;
+            }
+
+            // The armor gate for strangers: an extension frame must prove mac1 (keyed with
+            // our own static public key — no lookup, no state) BEFORE any connection is
+            // created and before any key agreement could run. Failure is silence.
+            if (v4 && !CryptoWire.VerifyMac1(frame, _identity!.PublicKey))
+            {
+                Interlocked.Increment(ref _mac1Refused);
+                Telemetry.FrameRejected("handshake", "mac1");
                 return;
             }
 
@@ -2950,8 +3017,17 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static bool TokenOk(ConnState c, ReadOnlySpan<byte> frame) =>
         c.Handshake.RemoteTokenKnown
-        && frame.Length >= HeaderSize + 4
-        && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.Handshake.RemoteToken;
+            && frame.Length >= HeaderSize + 4
+            && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.Handshake.RemoteToken;
+
+    // The mac1 key is the answering node's static public key. When we dialed, that is the
+    // pinned key from the connection string; when we answer, it is our own. The own-key
+    // fallback also admits the crossed shape a simultaneous dial produces (each side's
+    // outgoing connection keying with its peer's pin) — both keys are public material, so
+    // widening to "either endpoint's key" still filters everything random.
+    private bool Mac1OkForConn(ConnState c, ReadOnlySpan<byte> frame) =>
+        c.PinnedStaticKey is { } pin && CryptoWire.VerifyMac1(frame, pin)
+            || CryptoWire.VerifyMac1(frame, _identity!.PublicKey);
 
     // One HandshakeMachine step, flattened: kind = the reject/progress Notify (0 when
     // none), reply = the Transmit selection (-1 when none); returns the Close kind (0
@@ -2984,19 +3060,26 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void OnPunc(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        if (frame.Length is not (HeaderSize + CryptoWire.PuncLegacyBody or HeaderSize + CryptoWire.PuncCryptoBody))
+        bool v4Punc = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4;
+        if (frame.Length is not (HeaderSize + CryptoWire.PuncLegacyBody or HeaderSize + CryptoWire.PuncCryptoBody)
+            && !v4Punc)
         {
             return;
         }
 
-        Interlocked.Increment(ref c.PuncsReceived);
-        bool cryptoPunc = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
+        bool cryptoPunc = v4Punc || frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
 
         ConnectionCrypto? crypto;
         long reply;
         lock (c.Gate)
         {
+            // The mac1 verdict is a pure keyed hash over the frame (the answering node's
+            // static key — the pin when we dialed, our own when we answer, with our own as
+            // the fallback so simultaneous-dial cross-conn frames still verify); the
+            // machine turns it into the silent gate before anything else runs.
+            bool mac1Ok = !v4Punc || Mac1OkForConn(c, frame);
+
             // The pin verdict is a pure compare; key agreement is the one side effect
             // the machine sequences around, so it runs between the two input kinds.
             bool pinMatches = true;
@@ -3009,8 +3092,21 @@ internal sealed partial class NodeEngine : IDisposable
             input.Kind = HandshakeInputKind.PuncBegin;
             input.CryptoBody = cryptoPunc;
             input.PinMatches = pinMatches;
+            input.Mac1Present = v4Punc;
+            input.Mac1Ok = mac1Ok;
             input.FrameToken = token;
             StepHandshake(ref c.Handshake, in input, out long kind, out reply);
+            if (kind == HandshakeMachine.RejectMac1)
+            {
+                // Silence: no PACK, no announce, no state change, no key agreement — and
+                // not even a PuncsReceived tick, so forged frames cannot look like answers
+                // to the dialer-side fallback clock.
+                Interlocked.Increment(ref _mac1Refused);
+                Telemetry.FrameRejected("handshake", "mac1");
+                return;
+            }
+
+            Interlocked.Increment(ref c.PuncsReceived);
             if (kind == HandshakeMachine.RejectPin)
             {
                 Reject(c, 5);
@@ -3033,8 +3129,13 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // First-seen keys derive the session; a retried PUNC must repeat them exactly —
                 // different keys for the same token is a stale or substituted handshake.
+                // The counter brackets the agreement below: it can only move after the
+                // mac1 gate above, which is what the armor tests pin against floods.
+                Interlocked.Increment(ref _handshakeKeyAgreements);
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
-                bool accepted = c.Crypto!.TryPeerKeys(body[..CryptoWire.EphemeralLength], body[CryptoWire.EphemeralLength..]);
+                bool accepted = c.Crypto!.TryPeerKeys(
+                    body[..CryptoWire.EphemeralLength],
+                    body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength));
                 HandshakeInput keys = default;
                 keys.Kind = HandshakeInputKind.PuncKeys;
                 keys.Accepted = accepted;
@@ -3053,15 +3154,23 @@ internal sealed partial class NodeEngine : IDisposable
 
         // The PACK doubles as the handshake's second flight. Crypto bodies answer crypto
         // PUNCs deterministically — same keys, same confirm MAC, on every retransmission.
+        // The reply mirrors the inbound shape: a v4 PUNC earns a v4 PACK (mac1 keyed with
+        // our own static key), a v3 PUNC the v3 shape it can parse — the support window.
         if (reply == HandshakeMachine.ReplyPackCrypto)
         {
-            Span<byte> pack = stackalloc byte[HeaderSize + CryptoWire.PackCryptoBody];
+            int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4Punc ? CryptoWire.Mac1ExtLength : 0);
+            Span<byte> pack = stackalloc byte[packLength];
             WriteHeader(pack, FrameType.Pack);
             BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
             BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
             crypto!.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
             crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
+            if (v4Punc)
+            {
+                CryptoWire.WriteMac1Ext(pack, _identity!.PublicKey);
+            }
+
             SendOnArrival(arrival, pack);
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
             else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
@@ -3111,7 +3220,8 @@ internal sealed partial class NodeEngine : IDisposable
 
         uint echo = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
         uint peerToken = BinaryPrimitives.ReadUInt32LittleEndian(frame[(HeaderSize + CryptoWire.TokenLength)..]);
-        bool cryptoPack = frame.Length == HeaderSize + CryptoWire.PackCryptoBody;
+        bool v4Pack = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PackCryptoBodyV4;
+        bool cryptoPack = v4Pack || frame.Length == HeaderSize + CryptoWire.PackCryptoBody;
         bool lengthOk = cryptoPack || frame.Length == HeaderSize + CryptoWire.PackLegacyBody;
 
         if (cryptoPack && c.Crypto is null)
@@ -3123,6 +3233,10 @@ internal sealed partial class NodeEngine : IDisposable
         bool legacyLatched = false;
         lock (c.Gate)
         {
+            // Same gate as OnPunc, same position: the shell computes the keyed-MAC
+            // verdict, the machine refuses silently before the echo is even examined.
+            bool mac1Ok = !v4Pack || Mac1OkForConn(c, frame);
+
             bool pinMatches = true;
             if (cryptoPack && c.PinnedStaticKey is { } pinned)
             {
@@ -3135,9 +3249,19 @@ internal sealed partial class NodeEngine : IDisposable
             input.PinMatches = pinMatches;
             input.BodyPlausible = true; // the length floor check above already returned
             input.LengthClassOk = lengthOk;
+            input.Mac1Present = v4Pack;
+            input.Mac1Ok = mac1Ok;
             input.FrameToken = echo;
             input.PeerToken = peerToken;
             StepHandshake(ref c.Handshake, in input, out long kind, out _);
+            if (kind == HandshakeMachine.RejectMac1)
+            {
+                // Silence: no HSCK, no path confirmation, no key agreement.
+                Interlocked.Increment(ref _mac1Refused);
+                Telemetry.FrameRejected("handshake", "mac1");
+                return;
+            }
+
             if (kind == HandshakeMachine.RejectPackEcho)
             {
                 Reject(c, 1, c.Token, echo, arrival);
@@ -3191,6 +3315,8 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (kind == HandshakeMachine.NeedKeys)
             {
+                // Bracketed like OnPunc's agreement: reachable only past the mac1 gate.
+                Interlocked.Increment(ref _handshakeKeyAgreements);
                 ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
                 ReadOnlySpan<byte> eph = body[..CryptoWire.EphemeralLength];
                 ConnectionCrypto crypto = c.Crypto!;
@@ -4487,12 +4613,13 @@ internal sealed partial class NodeEngine : IDisposable
 
     // ------------------------------------------------------------------ helpers
 
-    private byte[] BuildPunc(ConnState c)
+    private byte[] BuildPunc(ConnState c, bool v4)
     {
         // The punch probe doubles as the crypto handshake's first flight: a crypto dial
         // carries this connection's ephemeral and static public keys, deterministically, in
         // every retransmission — key agreement must not depend on which probe lands.
-        byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody : CryptoWire.PuncCryptoBody)];
+        byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody
+            : CryptoWire.PuncCryptoBody + (v4 ? CryptoWire.Mac1ExtLength : 0))];
         frame[0] = (byte)FrameType.Punc;
         BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), _peerId);
         BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(HeaderSize), c.Token);
@@ -4500,9 +4627,32 @@ internal sealed partial class NodeEngine : IDisposable
         {
             crypto.MyEphPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength));
             crypto.MyStaticPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength));
+            if (v4)
+            {
+                // The answering node's static key keys mac1: the pin when we dialed, our
+                // own when we answer (this connection was born from the peer's PUNC).
+                CryptoWire.WriteMac1Ext(frame, c.PinnedStaticKey ?? _identity!.PublicKey);
+            }
         }
 
         return frame;
+    }
+
+    private void SetPuncFrame(ConnState c)
+    {
+        c.PuncFrame = BuildPunc(c, v4: HandshakeV4Active && c.Crypto is not null);
+        c.PuncFrameV4 = HandshakeV4Active && c.Crypto is not null;
+        Volatile.Write(ref c.FirstPuncTicks, 0);
+    }
+
+    // The v4 fallback clock starts at the first PUNC actually handed to a transport —
+    // an unanswered window with no sends is routelessness, not a version refusal.
+    private static void NotePuncSent(ConnState c)
+    {
+        if (Volatile.Read(ref c.FirstPuncTicks) == 0)
+        {
+            Volatile.Write(ref c.FirstPuncTicks, Environment.TickCount64);
+        }
     }
 
     private int BuildFrame(ConnState c, FrameType type, ReadOnlySpan<byte> body, Span<byte> dst)

@@ -713,8 +713,11 @@ public class CryptoTests
             {
                 SocketReceiveFromResult r = await Sock.ReceiveFromAsync(buf, any, ct);
                 // The PUNC carries no recipient field — the header's peer id is the sender,
-                // which for a dial we initiated is always the node we dialed.
-                if (r.ReceivedBytes == 9 + CryptoWire.PuncCryptoBody && buf[0] == 0x50
+                // which for a dial we initiated is always the node we dialed. The node sends
+                // the v4 shape (94 B, marker + mac1); this oracle stays a v3 responder and
+                // answers the unversioned PACK the support window still admits.
+                if (r.ReceivedBytes is 9 + CryptoWire.PuncCryptoBody or 9 + CryptoWire.PuncCryptoBodyV4
+                    && buf[0] == 0x50
                     && BinaryPrimitives.ReadUInt64LittleEndian(buf.AsSpan(1)) == node.PeerId)
                 {
                     break;

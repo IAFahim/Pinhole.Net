@@ -203,14 +203,14 @@ roadmap plans:
 | Machine | Owns | Today |
 |---|---|---|
 | Pacer / `PacerMachine` | receiver-driven wire load: window, slow start/AIMD, RTT/PTO, token-bucket pacing | **extracted** (src/Pinhole.Core/PacerMachine.cs, sans-IO); `BlobController` (src/Pinhole.Blobs) remains as the stats/trace/budget shell |
-| Replay window | which counters may still commit: `Admits`/`Mark` over a 64-deep window | **current as a primitive** (src/Pinhole.Crypto/ReplayWindow.cs), unwired; `FrameSealer` still carries its own copy |
+| Replay window | which counters may still commit: `Admits`/`Mark` over a 64-deep window | **wired** (src/Pinhole.Crypto/ReplayWindow.cs inside `FrameSealer` — the hand-rolled copy was folded away) |
 | `FrameSealer` | one direction's seal/open: AES-GCM, epoch rekey, replay bitmap | **current** (src/Pinhole/SessionCrypto.cs) — the session layer's working sealer, awaiting decomposition |
 | `RunVerify` / `RunTree` | the verified-run fold: leaf CVs → run CV → root, proofs both ways | **current** (src/Pinhole.Blobs/RunVerify.cs) — pure functions; receiver state machine still forming around them |
-| Handshake | tokens, ephemeral/static keys, confirm flags, reject counters | planned (R5) — today inside `NodeEngine`'s PUNC/PACK/HSCK paths |
-| Path | path state and selection, roam adoption, probe deadlines | planned (R3) — today `ConnState` path fields plus `CandidateSelection` |
-| Punch | hole-punch scheduling per candidate | planned (R3) — today `NodeEngine.PunchLoop` |
-| Pmtu | confirmed wire size, probe tries, next probe tick | planned (R3) — today `PmtuWire`/`PmtuProbeSize` fields and the maintenance tick |
-| Keepalive | keepalive interval and deadline | planned (R3) — today `MaybeKeepalive` on the maintenance tick |
+| Handshake | tokens, ephemeral/static keys, confirm flags, reject counters, mac1 gate | **extracted** (src/Pinhole.Core/HandshakeMachine.cs) + **armored** (R5 phase 1): versioned PUNC/PACK carry a 16-byte mac1, keyed-BLAKE3 under the responder's static key; a carried-but-failed mac1 refuses silently with no key agreement — `NodeEngine` remains the shell |
+| Path | path state and selection, roam adoption, probe deadlines | **extracted** (src/Pinhole.Core/PathSelectorMachine.cs); `NodeEngine` remains the shell |
+| Punch | hole-punch scheduling per candidate | **extracted** (src/Pinhole.Core/PunchSchedulerMachine.cs); `NodeEngine.PunchLoop` remains the shell |
+| Pmtu | confirmed wire size, probe tries, next probe tick | **extracted** (src/Pinhole.Core/PmtuMachine.cs) |
+| Keepalive | keepalive interval and deadline | **extracted** (src/Pinhole.Core/KeepaliveMachine.cs) |
 | BaoVerify | receiver run staging, verified-node cache, fold-before-write | planned shape, landing now — `RunVerify` is its landed core; the staging state lives in `BlobClient`'s v4 path |
 
 ## The dependency rule and project layout
