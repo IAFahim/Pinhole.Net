@@ -50,20 +50,25 @@ public readonly record struct ConnectionStringData(
     WireNatHint NatHint,
     CandidateData[]? Candidates,
     byte[]? StaticKey,
-    byte[]? EndpointKey)
+    byte[]? EndpointKey,
+    byte[]? Knock = null)
 {
-    public byte Version => EndpointKey is not null ? ConnectionStringCodec.BodyVersion3
+    public byte Version => Knock is not null ? ConnectionStringCodec.BodyVersion4
+        : EndpointKey is not null ? ConnectionStringCodec.BodyVersion3
         : StaticKey is not null ? ConnectionStringCodec.BodyVersion2
         : ConnectionStringCodec.BodyVersion1;
 }
 
 // Canonical codec for the "pinhole1:<base64url>" connection string:
-//   body[0]  version (1 = bare, 2 = +static key, 3 = +static+endpoint keys)
-//   body[1]  flags: exactly the key-presence bits for that version
+//   body[0]  version (1 = bare, 2 = +static key, 3 = +static+endpoint keys,
+//            4 = +knock, optionally with the endpoint key too)
+//   body[1]  flags: exactly the key-presence bits for that version (v4 takes
+//            static+knock or static+endpoint+knock — nothing else)
 //   body[2]  peer id, u64 LE
 //   body[10] NAT hint (0..2)
 //   body[11] candidate count (1..32; zero is not canonical)
-//   candidates, then the v2/v3 key tail(s). No trailing bytes.
+//   candidates, then the v2/v3/v4 key tail(s); a v4 body ends with a u8 knock
+//   length and 1..64 raw knock bytes. No trailing bytes.
 // Candidate: endpoint (family byte 4|16, raw address bytes, u16 BE port),
 // kind byte, then per-kind extras (relay: server endpoint + two short ASCII
 // texts; https relays: short ASCII URL + 32-byte key).
@@ -84,16 +89,20 @@ public static class ConnectionStringCodec
 
     public const int RelayKeyLength = 32;
 
+    public const int MaxKnockLength = 64;
+
     public const int MaxShortTextBytes = 64;
 
     public const int HeaderLength = 12;
 
-    public const int MaxBodyLength = HeaderLength + MaxCandidates * MaxCandidateLength + StaticKeyLength + EndpointKeyLength;
+    public const int MaxBodyLength = HeaderLength + MaxCandidates * MaxCandidateLength
+        + StaticKeyLength + EndpointKeyLength + 1 + MaxKnockLength;
 
     public const int MaxEncodedLength = MaxBodyLength;
 
-    // "pinhole1:" (9 chars) plus one base64 character per 3 payload bytes, unpadded
-    public const int MaxStringLength = 9 + 4 * (MaxBodyLength / 3);
+    // "pinhole1:" (9 chars) plus 4 base64 characters per full 3-byte quantum and 2 or 3
+    // for a 1- or 2-byte tail — the exact unpadded worst case, no slack
+    public const int MaxStringLength = 9 + 4 * (MaxBodyLength / 3) + (MaxBodyLength % 3 == 0 ? 0 : MaxBodyLength % 3 + 1);
 
     internal const byte BodyVersion1 = 1;
 
@@ -101,9 +110,13 @@ public static class ConnectionStringCodec
 
     internal const byte BodyVersion3 = 3;
 
+    internal const byte BodyVersion4 = 4;
+
     private const byte FlagsHasStaticKey = 1;
 
     private const byte FlagsHasEndpointKey = 2;
+
+    private const byte FlagsHasKnock = 4;
 
     private const int AddressLengthV4 = 4;
 
@@ -125,17 +138,27 @@ public static class ConnectionStringCodec
         }
 
         byte version = body[0];
-        if (version is not (BodyVersion1 or BodyVersion2 or BodyVersion3))
+        if (version is not (BodyVersion1 or BodyVersion2 or BodyVersion3 or BodyVersion4))
         {
             return false;
         }
 
         bool hasStaticKey = version >= BodyVersion2;
         bool hasEndpointKey = version == BodyVersion3;
-        byte wantedFlags = (byte)((hasStaticKey ? FlagsHasStaticKey : 0) | (hasEndpointKey ? FlagsHasEndpointKey : 0));
-        if (body[1] != wantedFlags)
+        bool hasKnock = version == BodyVersion4;
+        byte wantedFlags = (byte)((hasStaticKey ? FlagsHasStaticKey : 0) | (hasEndpointKey ? FlagsHasEndpointKey : 0)
+            | (hasKnock ? FlagsHasKnock : 0));
+        // v1..v3 pin the flags to the version exactly; v4 additionally allows the
+        // endpoint bit to be either way, so both knock shapes are checked by mask.
+        if (body[1] != wantedFlags && (version != BodyVersion4
+                || (body[1] & ~FlagsHasEndpointKey) != (FlagsHasStaticKey | FlagsHasKnock)))
         {
             return false;
+        }
+
+        if (version == BodyVersion4)
+        {
+            hasEndpointKey = (body[1] & FlagsHasEndpointKey) != 0;
         }
 
         if (!WirePrimitives.TryReadU64Le(body.Slice(2, 8), out ulong peerId))
@@ -182,6 +205,7 @@ public static class ConnectionStringCodec
 
         byte[]? staticKey = null;
         byte[]? endpointKey = null;
+        byte[]? knock = null;
         int remaining = body.Length - pos;
         if (version == BodyVersion2)
         {
@@ -202,12 +226,35 @@ public static class ConnectionStringCodec
             staticKey = body.Slice(body.Length - StaticKeyLength - EndpointKeyLength, StaticKeyLength).ToArray();
             endpointKey = body[^EndpointKeyLength..].ToArray();
         }
+        else if (version == BodyVersion4)
+        {
+            // keys, then u8 knock length, then exactly that many knock bytes
+            int keyTail = StaticKeyLength + (hasEndpointKey ? EndpointKeyLength : 0);
+            if (remaining < keyTail + 2)
+            {
+                return false;
+            }
+
+            int knockLength = body[pos + keyTail];
+            if (knockLength is < 1 or > MaxKnockLength || remaining != keyTail + 1 + knockLength)
+            {
+                return false;
+            }
+
+            staticKey = body.Slice(pos, StaticKeyLength).ToArray();
+            if (hasEndpointKey)
+            {
+                endpointKey = body.Slice(pos + StaticKeyLength, EndpointKeyLength).ToArray();
+            }
+
+            knock = body.Slice(pos + keyTail + 1, knockLength).ToArray();
+        }
         else if (remaining != 0)
         {
             return false;
         }
 
-        value = new ConnectionStringData(peerId, (WireNatHint)hint, candidates, staticKey, endpointKey);
+        value = new ConnectionStringData(peerId, (WireNatHint)hint, candidates, staticKey, endpointKey, knock);
         consumed = body.Length;
         return true;
     }
@@ -222,8 +269,11 @@ public static class ConnectionStringCodec
 
         byte[]? staticKey = value.StaticKey;
         byte[]? endpointKey = value.EndpointKey;
-        destination[0] = (byte)(endpointKey is not null ? BodyVersion3 : staticKey is not null ? BodyVersion2 : BodyVersion1);
-        destination[1] = (byte)((staticKey is not null ? FlagsHasStaticKey : 0) | (endpointKey is not null ? FlagsHasEndpointKey : 0));
+        byte[]? knock = value.Knock;
+        destination[0] = (byte)(knock is not null ? BodyVersion4
+            : endpointKey is not null ? BodyVersion3 : staticKey is not null ? BodyVersion2 : BodyVersion1);
+        destination[1] = (byte)((staticKey is not null ? FlagsHasStaticKey : 0)
+            | (endpointKey is not null ? FlagsHasEndpointKey : 0) | (knock is not null ? FlagsHasKnock : 0));
         WirePrimitives.WriteU64Le(destination.Slice(2, 8), value.PeerId);
         destination[10] = (byte)value.NatHint;
         destination[11] = (byte)value.Candidates!.Length;
@@ -243,6 +293,13 @@ public static class ConnectionStringCodec
         if (endpointKey is not null)
         {
             endpointKey.AsSpan().CopyTo(destination.Slice(pos, EndpointKeyLength));
+            pos += EndpointKeyLength;
+        }
+
+        if (knock is not null)
+        {
+            destination[pos++] = (byte)knock.Length;
+            knock.AsSpan().CopyTo(destination.Slice(pos, knock.Length));
         }
 
         return needed;
@@ -301,7 +358,8 @@ public static class ConnectionStringCodec
 
         Span<byte> body = stackalloc byte[MaxBodyLength];
         int bodyLength = Write(value, body);
-        int total = Scheme.Length + 1 + 4 * ((bodyLength + 2) / 3);
+        // the exact unpadded char count: 4 per full quantum, 2 or 3 for the tail
+        int total = Scheme.Length + 1 + 4 * (bodyLength / 3) + (bodyLength % 3 == 0 ? 0 : bodyLength % 3 + 1);
         if (destination.Length < total)
         {
             return false;
@@ -417,7 +475,10 @@ public static class ConnectionStringCodec
     public static bool TryEncodeBase64Url(ReadOnlySpan<byte> data, Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
-        int full = data.Length / 3 * 4 + (data.Length % 3 == 0 ? 0 : 4);
+        // 4 chars per full quantum, 2 or 3 for a 1- or 2-byte tail: the exact unpadded
+        // length this method writes (the old +4-for-any-tail form demanded one slot too
+        // many and refused an exactly-sized destination for 2-byte tails)
+        int full = data.Length / 3 * 4 + (data.Length % 3 == 0 ? 0 : data.Length % 3 + 1);
         if (destination.Length < full)
         {
             return false;
@@ -643,7 +704,19 @@ public static class ConnectionStringCodec
             throw new ArgumentException("an endpoint key requires the static key it is published with", nameof(value));
         }
 
-        int length = HeaderLength + (staticKey is not null ? StaticKeyLength : 0) + (endpointKey is not null ? EndpointKeyLength : 0);
+        byte[]? knock = value.Knock;
+        if (knock is not null && (knock.Length == 0 || knock.Length > MaxKnockLength))
+        {
+            throw new ArgumentOutOfRangeException(nameof(value), $"knocks are 1..{MaxKnockLength} bytes");
+        }
+
+        if (knock is not null && staticKey is null)
+        {
+            throw new ArgumentException("a knock requires the static key it is published with", nameof(value));
+        }
+
+        int length = HeaderLength + (staticKey is not null ? StaticKeyLength : 0)
+            + (endpointKey is not null ? EndpointKeyLength : 0) + (knock is not null ? 1 + knock.Length : 0);
         for (int i = 0; i < candidates.Length; i++)
         {
             length += MeasureCandidate(candidates[i]);

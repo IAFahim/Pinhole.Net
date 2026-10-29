@@ -23,10 +23,17 @@ public sealed class ConnectionStringCodecTests
     private const string GoldenCHex = "0303ffffffffffffffff020104080808080d960304010203040d9701750370773911111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222";
     private const string GoldenDHex = "01002a2a2a2a2a2a2a2a0001047f0000010001041368747470733a2f2f722e6578616d706c652f78cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
+    // v4 knock shapes: flags 5 = static+knock, flags 7 = static+endpoint+knock. The tail
+    // is the key(s), a u8 knock length, then that many raw knock bytes.
+    private const string GoldenEHex = "040588776655443322110001047f0000019c4001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f10abababababababababababababababab";
+    private const string GoldenFHex = "040788776655443322110001047f0000019c4001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f222222222222222222222222222222222222222222222222222222222222222208cdcdcdcdcdcdcdcd";
+
     private const string GoldenAText = "pinhole1:AQCId2ZVRDMiEQABBH8AAAGcQAE";
     private const string GoldenBText = "pinhole1:AgEAAAAAAAAAAAEBEAAAAAAAAAAAAAAAAAAAAAEANQIAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHw";
     private const string GoldenCText = "pinhole1:AwP__________wIBBAgICAgNlgMEAQIDBA2XAXUDcHc5EREREREREREREREREREREREREREREREREREREREREREiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg";
     private const string GoldenDText = "pinhole1:AQAqKioqKioqKgABBH8AAAEAAQQTaHR0cHM6Ly9yLmV4YW1wbGUveM3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3N";
+    private const string GoldenEText = "pinhole1:BAWId2ZVRDMiEQABBH8AAAGcQAEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHxCrq6urq6urq6urq6urq6ur";
+    private const string GoldenFText = "pinhole1:BAeId2ZVRDMiEQABBH8AAAGcQAEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiCM3Nzc3Nzc3N";
 
     // ---------- shape (a): fixed vectors + boundaries ----------
 
@@ -37,6 +44,8 @@ public sealed class ConnectionStringCodecTests
         CheckGolden(GoldenB(), GoldenBHex, GoldenBText);
         CheckGolden(GoldenC(), GoldenCHex, GoldenCText);
         CheckGolden(GoldenD(), GoldenDHex, GoldenDText);
+        CheckGolden(GoldenE(), GoldenEHex, GoldenEText);
+        CheckGolden(GoldenF(), GoldenFHex, GoldenFText);
     }
 
     [Fact]
@@ -64,6 +73,10 @@ public sealed class ConnectionStringCodecTests
                         "http://127.0.0.1:99/k", new byte[32]),
                 ],
                 key, (byte[])[.. key]),
+            // v4 knock boundaries: 1-byte and 64-byte knocks, with and without endpoint key
+            new(0x5566778899AABBCCUL, WireNatHint.Unknown, [Direct(IPAddress.Loopback, 7)], key, null, [0x5A]),
+            new(0x5566778899AABBCDUL, WireNatHint.Cone, [Direct(IPAddress.Loopback, 8)], key, (byte[])[.. key],
+                new byte[64]),
             AllFiveKinds(),
             MaxBodyValue(),
         ];
@@ -142,6 +155,14 @@ public sealed class ConnectionStringCodecTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.Relay, Endpoint(IPAddress.Loopback, 1), Endpoint(IPAddress.Loopback, 2), "u\u00E9", "p", null, null)], null, null), buffer));
+        // knocks: zero-length and over-length are programmer errors, and a knock always
+        // requires the static key it is published with
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], new byte[32], null, []), buffer));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], new byte[32], null, new byte[65]), buffer));
+        Assert.Throws<ArgumentException>(() =>
+            ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], null, null, new byte[16]), buffer));
         // destination too small is a programmer error for Write
         var value = new ConnectionStringData(1, WireNatHint.Unknown, [good, good2], null, null);
         int needed = ConnectionStringCodec.Write(value, buffer);
@@ -162,6 +183,8 @@ public sealed class ConnectionStringCodecTests
         [
             Convert.FromHexString(GoldenCHex),
             Convert.FromHexString(GoldenDHex),
+            Convert.FromHexString(GoldenEHex),
+            Convert.FromHexString(GoldenFHex),
             .. Enumerable.Range(0, 8).Select(i => WriteValue(RandomValue(new Random(1000 + i)))),
         ];
 
@@ -302,14 +325,19 @@ public sealed class ConnectionStringCodecTests
         byte[] b = Convert.FromHexString(GoldenBHex);
         byte[] c = Convert.FromHexString(GoldenCHex);
         byte[] d = Convert.FromHexString(GoldenDHex);
+        byte[] e = Convert.FromHexString(GoldenEHex);
+        byte[] f = Convert.FromHexString(GoldenFHex);
         Assert.True(ConnectionStringCodec.TryRead(a, out _, out _));
         Assert.True(ConnectionStringCodec.TryRead(b, out _, out _));
         Assert.True(ConnectionStringCodec.TryRead(c, out _, out _));
         Assert.True(ConnectionStringCodec.TryRead(d, out _, out _));
+        Assert.True(ConnectionStringCodec.TryRead(e, out _, out _));
+        Assert.True(ConnectionStringCodec.TryRead(f, out _, out _));
 
         // unknown versions
         Reject(Patch(a, 0, 0));
         Reject(Patch(a, 0, 4));
+        Reject(Patch(a, 0, 5));
         Reject(Patch(a, 0, 0xFF));
 
         // flags must be exactly the key-presence bits of the version
@@ -319,6 +347,20 @@ public sealed class ConnectionStringCodecTests
         Reject(Patch(b, 1, 3));
         Reject(Patch(c, 1, 1));
         Reject(Patch(c, 1, 2));
+
+        // v4 flags: only static+knock (5) and static+endpoint+knock (7) are canonical
+        Reject(Patch(e, 1, 0));
+        Reject(Patch(e, 1, 1));
+        Reject(Patch(e, 1, 3)); // static+endpoint without the knock — that is a v3 body
+        Reject(Patch(e, 1, 4)); // knock without the static key it requires
+        Reject(Patch(e, 1, 6)); // endpoint+knock without static
+        Reject(Patch(e, 1, 7)); // claims an endpoint key the tail does not carry
+
+        // v4 knock tail: length 0 is non-canonical, 65 exceeds the bound, and the tail
+        // must tile exactly (no trailing bytes after the knock)
+        Reject(Patch(e, e.Length - 17, 0));  // knock length byte claims zero
+        Reject(Patch(e, e.Length - 17, 65)); // claims 65, tail carries 16
+        Reject([.. e, 0]);                   // one byte past the knock
 
         // unknown NAT hints
         Reject(Patch(a, 10, 3));
@@ -353,7 +395,7 @@ public sealed class ConnectionStringCodecTests
         Reject([.. c, 0]);    // 65-byte tail
 
         // every truncation of a valid body fails
-        foreach (byte[] body in new[] { a, b, c, d })
+        foreach (byte[] body in new[] { a, b, c, d, e, f })
         {
             for (int keep = 0; keep < body.Length; keep++)
             {
@@ -571,6 +613,22 @@ public sealed class ConnectionStringCodecTests
         ],
         null, null);
 
+    private static ConnectionStringData GoldenE() => new(
+        0x1122334455667788UL,
+        WireNatHint.Unknown,
+        [Direct(IPAddress.Loopback, 40000)],
+        Enumerable.Range(0, 32).Select(i => (byte)i).ToArray(),
+        null,
+        Repeat(0xAB, 16));
+
+    private static ConnectionStringData GoldenF() => new(
+        0x1122334455667788UL,
+        WireNatHint.Unknown,
+        [Direct(IPAddress.Loopback, 40000)],
+        Enumerable.Range(0, 32).Select(i => (byte)i).ToArray(),
+        Repeat(0x22, 32),
+        Repeat(0xCD, 8));
+
     private static void CheckGolden(ConnectionStringData value, string hex, string text)
     {
         byte[] body = Convert.FromHexString(hex);
@@ -643,7 +701,8 @@ public sealed class ConnectionStringCodecTests
                 filler, filler, null, null);
         }
 
-        return new ConnectionStringData(ulong.MaxValue, WireNatHint.Symmetric, candidates, Repeat(3, 32), Repeat(4, 32));
+        return new ConnectionStringData(ulong.MaxValue, WireNatHint.Symmetric, candidates, Repeat(3, 32), Repeat(4, 32),
+            Repeat(5, ConnectionStringCodec.MaxKnockLength));
     }
 
     private static byte[] WriteValue(ConnectionStringData value)
@@ -748,7 +807,8 @@ public sealed class ConnectionStringCodecTests
 
         byte[]? staticKey = null;
         byte[]? endpointKey = null;
-        switch (rng.Next(3))
+        byte[]? knock = null;
+        switch (rng.Next(4))
         {
             case 1:
                 staticKey = RandomBytes(rng, 32);
@@ -757,9 +817,19 @@ public sealed class ConnectionStringCodecTests
                 staticKey = RandomBytes(rng, 32);
                 endpointKey = RandomBytes(rng, 32);
                 break;
+            case 3:
+                staticKey = RandomBytes(rng, 32);
+                // both v4 shapes, and the full knock length range
+                if (rng.Next(2) == 0)
+                {
+                    endpointKey = RandomBytes(rng, 32);
+                }
+
+                knock = RandomBytes(rng, rng.Next(1, 65));
+                break;
         }
 
-        return new ConnectionStringData((ulong)rng.NextInt64(), (WireNatHint)rng.Next(3), candidates, staticKey, endpointKey);
+        return new ConnectionStringData((ulong)rng.NextInt64(), (WireNatHint)rng.Next(3), candidates, staticKey, endpointKey, knock);
     }
 
     private static CandidateData RandomCandidate(Random rng, ref int unique)
@@ -836,7 +906,8 @@ public sealed class ConnectionStringCodecTests
 
         byte[]? staticKey = null;
         byte[]? endpointKey = null;
-        switch (rng.Next(3))
+        byte[]? knock = null;
+        switch (rng.Next(4))
         {
             case 1:
                 staticKey = RandomBytes(rng, 32);
@@ -845,9 +916,18 @@ public sealed class ConnectionStringCodecTests
                 staticKey = RandomBytes(rng, 32);
                 endpointKey = RandomBytes(rng, 32);
                 break;
+            case 3:
+                staticKey = RandomBytes(rng, 32);
+                if (rng.Next(2) == 0)
+                {
+                    endpointKey = RandomBytes(rng, 32);
+                }
+
+                knock = RandomBytes(rng, rng.Next(1, 65));
+                break;
         }
 
-        return new ConnectionString((ulong)rng.NextInt64(), candidates, (NatHint)rng.Next(3), staticKey, endpointKey);
+        return new ConnectionString((ulong)rng.NextInt64(), candidates, (NatHint)rng.Next(3), staticKey, endpointKey, knock);
     }
 
     private static byte[] RandomBytes(Random rng, int length)
@@ -878,6 +958,7 @@ public sealed class ConnectionStringCodecTests
         if (value.StaticKey is null)
         {
             Assert.Null(value.EndpointKey);
+            Assert.Null(value.Knock);
         }
         else
         {
@@ -885,6 +966,11 @@ public sealed class ConnectionStringCodecTests
             if (value.EndpointKey is not null)
             {
                 Assert.Equal(ConnectionStringCodec.EndpointKeyLength, value.EndpointKey.Length);
+            }
+
+            if (value.Knock is not null)
+            {
+                Assert.InRange(value.Knock.Length, 1, ConnectionStringCodec.MaxKnockLength);
             }
         }
 
@@ -930,6 +1016,7 @@ public sealed class ConnectionStringCodecTests
         Assert.Equal(expected.NatHint, actual.NatHint);
         Assert.True(BytesEqual(expected.StaticKey, actual.StaticKey));
         Assert.True(BytesEqual(expected.EndpointKey, actual.EndpointKey));
+        Assert.True(BytesEqual(expected.Knock, actual.Knock));
         Assert.Equal(expected.Candidates!.Length, actual.Candidates!.Length);
         for (int i = 0; i < expected.Candidates.Length; i++)
         {
@@ -960,6 +1047,7 @@ public sealed class ConnectionStringCodecTests
         Assert.Equal((byte)reference.NatHint, (byte)mine.NatHint);
         Assert.True(BytesEqual(mine.StaticKey, reference.StaticKey));
         Assert.True(BytesEqual(mine.EndpointKey, reference.EndpointKey));
+        Assert.True(BytesEqual(mine.Knock, reference.Knock));
         Assert.Equal(reference.Candidates.Count, mine.Candidates!.Length);
         for (int i = 0; i < reference.Candidates.Count; i++)
         {
