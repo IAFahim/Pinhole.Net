@@ -1,6 +1,30 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — handshake armor: mac2/cookie under initiation load (#49 R5 phase 2)
+
+A responder under initiation load stops answering PUNCs directly and demands a
+cookie bound to the packet's source address. The load gates are a per-source
+window (64 PUNCs / 10 s, fixed 64-entry table, coldest-window eviction) plus a
+global window (512 / 10 s) for floods that wear a fresh address per frame; relay
+(key-bound) and TCP (handshake-proven) arrivals are exempt, because the cookie
+prices an address only the direct UDP path can spoof. Under load, a mac1-valid
+PUNC without a valid `mac2` earns a 30-byte `COOKIE` frame (token echo, epoch
+tag, `BLAKE3-Keyed(rotatingSecret, sourceAddress)[..16]`) — never a PACK, never
+state, never key agreement. An honest dialer echoes the cookie as `mac2`
+(marker `0x05`, keyed BLAKE3 over the frame including mac1, 111-byte PUNC —
+a fresh length class); the cookie restarts the dialer's silence-fallback clock,
+so the extra round trip cannot bounce an honest v4 dial into the v3 fallback.
+The rotating secret turns over every 120 s with the previous epoch still valid,
+so in-flight handshakes survive rotation. A spoofed-source flood earns only
+16-byte COOKIE replies (smaller than the PUNC they answer — no amplification)
+while an honest dialer completes on the same listener; both are pinned in
+`HandshakeCookieTests` alongside the machine gate and epoch arithmetic. The
+cookie value is receivable by the spoofed victim or an on-path observer, but a
+forged mac2 only earns a PACK sent to that same address — WireGuard-style
+encryption of the cookie to the dialer's static key is documented as follow-up
+hardening in `docs/WIRE.md`.
+
 ## 1.10.0 (unreleased) — blob wire v4: verified runs, proofs before disk (#49 R2)
 
 A v4 transfer now proves every run before it touches the disk. Chunks still carry
