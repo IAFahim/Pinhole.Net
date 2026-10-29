@@ -457,26 +457,111 @@ that interop decision as open).
 ## Engine handshake frames, v3/v4 — `NodeEngine.cs` + `CryptoWire`
 
 Datagram frames on the engine's direct path (`HeaderSize` header + body; frame types
-`Punc`, `Pack`, `Hsck`; bodies sized by `CryptoWire`):
+`Punc`, `Pack`, `Hsck`, `Cookie`; bodies sized by `CryptoWire`). Frame lengths by class:
+
+| Frame | v3 legacy | v3 crypto | v4 (mac1) | v4 (mac1+mac2) |
+|---|---|---|---|---|
+| PUNC  | 13 | 77 | 94 | 111 |
+| PACK  | 17 | 97 | 114 | — |
+| HSCK  | 29 | 29 | 29 | — |
+| COOKIE | — | — | 30 | — |
+
+Every v4 length class is distinct from every v3 class, so a v3 reader silently ignores
+v4 frames on length alone and the extensions are purely additive.
 
 - PUNC v3 crypto body: ephemeral(32) + static(32) + token(4) + confirm(16). PACK v3
   crypto body: two tokens(8) + ephemeral(32) + static(32) + confirm(16). HSCK body:
   token(4) + confirm(16).
 - **v4 (R5 phase 1):** the v3 crypto body plus a 17-byte extension — marker byte
   `0x04` followed by `mac1[16]` = `BLAKE3-Keyed(responderStaticPub32, frame[0..^16])[..16]`,
-  the whole frame including the marker, excluding the MAC bytes themselves. Sizes 94
-  (PUNC) and 114 (PACK) fall outside both length classes a v3 reader admits, so old
-  peers silently ignore v4 frames — the extension is purely additive.
+  the whole frame including the marker, excluding the MAC bytes themselves.
 - The mac1 key is the answering node's static public key (or a pinned key when the
   dialer knows one): public material by design. mac1 filters random-source and
-  port-scan floods, not attackers holding the target's key; mac2/cookie is the later
-  phase for that. A frame that carries the extension but fails verification is
-  refused silently — no PACK, no HSCK, no state, and no key agreement — counted only
-  in the `Mac1Refused` counter. Unversioned v3 initiations behave exactly as before;
-  mac1 becomes mandatory only after the support window (same policy as blob wire v4).
-- Dialer side: a v4 dialer sends versioned frames and, when a peer never answers
-  (a v3-only responder ignoring the unknown shape), retries unversioned exactly once
-  per connection attempt.
+  port-scan floods, not attackers holding the target's key; that is mac2's job.
+  A frame that carries the extension but fails verification is refused silently — no
+  PACK, no HSCK, no state, and no key agreement — counted only in the `Mac1Refused`
+  counter. Unversioned v3 initiations behave exactly as before; mac1 becomes
+  mandatory only after the support window (same policy as blob wire v4).
+- **v4 + mac2 (R5 phase 2):** under initiation load a v4 PUNC may carry a second
+  17-byte extension — marker `0x05` + `mac2[16]` =
+  `BLAKE3-Keyed(cookie16 zero-extended to 32, frame[0..^16])[..16]`, the whole frame
+  including mac1 and both markers, excluding the mac2 bytes themselves. mac1 covers
+  exactly the bytes it always did (a mac2-carrying frame is read through its mac1
+  view, the frame truncated at mac2's marker), so a mac1 verdict never depends on
+  whether mac2 rode along.
+- **COOKIE frame (type `0x59`):** the under-load reply instead of PACK —
+  `type(1) | sender peerId(8) | echo of the PUNC's token(4) | epoch tag u8(1) |
+  cookieValue[16]`, 30 bytes. The echo binds the cookie to one dial attempt (the
+  token is random per connection and never on the wire except in that attempt's own
+  PUNCs). The epoch tag names the minting epoch for diagnostics; verification never
+  trusts it. No DH, no state — the cheapest frame the engine can answer with, and
+  smaller than the PUNC it answers (no amplification).
+- **The cookie:** `cookieValue = BLAKE3-Keyed(rotatingSecret32, sourceAddress)[..16]`,
+  where `sourceAddress` is the arrival's source endpoint in SocketAddress wire form,
+  exactly as the responder saw it. The secret rotates every 120 s and the previous
+  epoch stays valid, so a cookie minted in epoch N-1 still answers in epoch N
+  (in-flight handshakes survive rotation); epoch N-2 is refused — that secret is gone.
+  The binding is the source address: a cookie minted for one source never validates a
+  frame from another, so a replayed or foreign cookie is just a wrong key.
+
+**mac2/cookie load policy.** The responder counts mac1-valid PUNCs that have earned no
+completed session (a confirmed peer's retransmissions are not load), direct-UDP arrivals
+only — relay datagrams are bound to the sender's static key and a TCP peer completed a
+three-way handshake, so neither path can spoof a source and neither is gated. Two arms:
+
+- **Per source:** ≥64 counted PUNCs within a 10 s window from one source address. An
+  honest dialer punches at one PUNC per candidate per 200 ms (5/s per candidate), so
+  even a several-candidate dial that completes inside the window stays far below 64
+  from its single mapped address.
+- **Global:** ≥512 counted PUNCs within 10 s engine-wide. This arm exists because a
+  spoofed-source flood wears a fresh address on every PUNC — no per-source count can
+  ever trip. 512 in 10 s is ~51 PUNCs/s sustained; honest concurrent dials do not
+  reach it, floods exceed it by orders of magnitude.
+
+Both windows are tumbling and bounded in memory: one global counter plus a fixed
+64-entry source table that evicts the coldest window when full. The threshold-crossing
+PUNC trips the gate for itself: the first 63 (or 511) are admitted by design, exactly as
+WireGuard's cookie answers nothing until the responder is under load. The gate cools by
+window expiry — one quiet 10 s window and the same source is admitted again.
+
+**The gate.** Under load for the arrival's source: a PUNC without a valid mac2 earns a
+COOKIE reply only — never PACK, no state, no key agreement (a stranger earns it before
+any connection object exists, mirroring the stranger mac1 gate; a conn'd arrival earns
+it from `HandshakeMachine`, which sequences the decision as `CookieRequired`/`CookieOk`
+→ `ReplyCookie` before every other check). With a valid mac2: the normal PACK path. Not
+under load: mac2 is ignored, present or absent. mac1-invalid frames remain silent
+refusals even under load. v3 frames are unchanged while the responder is not under
+load; under load a v3 PUNC earns COOKIE replies it cannot answer — a v3 dialer cannot
+complete against a loaded responder. That is the documented cost of the armor and one
+more reason the support window is scheduled to close.
+
+**Dialer side.** A v4 dialer that receives a COOKIE stores the cookie for that
+connection, rebuilds its PUNC frame with mac2 appended, and retries immediately (the
+extra round trip must not wait out a punch pace tick). Receiving a COOKIE also proves
+the responder speaks v4, so the v3 fallback clock restarts — the cookie exchange can
+never bounce an honest dialer into the unversioned fallback (that fallback fires only
+on total silence: no PUNC/PACK/HSCK received for the whole window). If the dialer's
+source address changed between PUNCs (a NAT rebind), the recomputed cookie differs,
+mac2 fails, and the responder's fresh COOKIE for the new source heals the exchange.
+Counters: `CookieDemanded` (COOKIE replies sent) and `CookieAccepted` (under-load PUNCs
+whose mac2 verified) sit beside `Mac1Refused` and `HandshakeKeyAgreements`.
+
+**Threat model of the plaintext cookieValue.** WireGuard encrypts its cookie to the
+initiator's static public key; this phase sends the value in the clear, and the
+consequence is deliberate: anyone who *receives* a COOKIE — the spoofed victim whose
+address was forged, an on-path observer, or the dialer itself — holds a cookie valid
+only for PUNCs *from that source address*. They can compute valid mac2 frames and
+extract a PACK — but the PACK travels to that same source address, so an attacker
+gains nothing beyond what already having a receive path at that address gives (and a
+real socket can simply dial honestly). The demand stage stays un-amplified (a 30-byte
+reply to a ≥94-byte mac1-valid PUNC) and a spoofed source, which never sees the
+COOKIE, remains unable to move the responder at all. Encrypting the cookie to the
+dialer's static key remains available as a later hardening if on-path cookie theft
+ever matters in practice.
+
+- Dialer side, versioning: a v4 dialer sends versioned frames and, when a peer never
+  answers (a v3-only responder ignoring the unknown shape), retries unversioned
+  exactly once per connection attempt.
 
 ## Canonical vs legacy divergences (normative list)
 

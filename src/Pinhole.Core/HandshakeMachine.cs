@@ -19,6 +19,8 @@ public struct HandshakeInput
     public bool LengthClassOk; // PackBegin: length is exactly legacy or exactly crypto
     public bool Mac1Present; // PuncBegin/PackBegin: the frame carried the v4 mac1 extension
     public bool Mac1Ok;      // PuncBegin/PackBegin: the shell verified the keyed MAC (v3 frames pass vacuously)
+    public bool CookieRequired; // PuncBegin: the shell reports this source as under initiation load
+    public bool CookieOk;       // PuncBegin: the frame's mac2 verified under the source's cookie (vacuously true when not under load)
     public bool Accepted;   // PuncKeys/PackKeys: key agreement (fresh, repeat, or supersede) verdict
     public bool ConfirmOk;  // PackKeys: the confirm MAC verified under the agreed keys
     public uint FrameToken; // PuncBegin/PuncKeys: the PUNC's token; PackBegin/PackKeys: the echo of ours
@@ -57,6 +59,7 @@ public static class HandshakeMachine
     public const long ReplyPackLegacy = 0;
     public const long ReplyPackCrypto = 1;
     public const long ReplyHsck = 2;
+    public const long ReplyCookie = 3;
 
     public const long RejectPackEcho = 1;
     public const long RejectPackLength = 2;
@@ -99,6 +102,18 @@ public static class HandshakeMachine
         if (input.Mac1Present && !input.Mac1Ok)
         {
             return Reject(effects, RejectMac1);
+        }
+
+        // The mac2/cookie gate (R5 phase 2): when the shell reports the source as under
+        // initiation load, a PUNC that cannot prove the cookie earns only a COOKIE reply —
+        // before the pin, token, and mode checks, and before any key-agreement sequencing.
+        // An honest dialer echoes the cookie in mac2 and takes the normal path below; a
+        // spoofed source cannot, because it never sees the COOKIE it would have to echo.
+        if (input.CookieRequired && !input.CookieOk)
+        {
+            int written = 0;
+            Effects.Add(effects, ref written, EffectKind.Transmit, 0, 0, ReplyCookie);
+            return written;
         }
 
         if (input.CryptoBody && !input.PinMatches)

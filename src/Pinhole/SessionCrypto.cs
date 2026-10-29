@@ -43,6 +43,23 @@ internal static class CryptoWire
     public const int PuncCryptoBodyV4 = PuncCryptoBody + Mac1ExtLength;   // 85  → frame 94
     public const int PackCryptoBodyV4 = PackCryptoBody + Mac1ExtLength;   // 105 → frame 114
 
+    // Handshake v4 (R5 phase 2): under initiation load a PUNC may carry a second
+    // extension — marker 0x05 + mac2, keyed with the cookie the responder minted for the
+    // PUNC's source address. mac1 still covers the same bytes it always did (the frame up
+    // to and including mac1); mac2 covers the whole frame including mac1, excluding the
+    // mac2 bytes themselves — so a mac1 verdict never depends on whether mac2 rode along.
+    public const byte Mac2Marker = 0x05;
+    public const int Mac2Length = 16;
+    public const int Mac2ExtLength = 1 + Mac2Length;
+    public const int PuncCryptoBodyV4Mac2 = PuncCryptoBodyV4 + Mac2ExtLength; // 102 → frame 111
+
+    // The COOKIE reply a loaded responder sends instead of PACK: echo of the PUNC's token
+    // (binds the cookie to one dial attempt), the minting epoch tag, and the 16-byte
+    // cookie value. No keys, no state — the cheapest frame the engine can answer with.
+    public const int CookieLength = 16;
+    public const int CookieBody = TokenLength + 1 + CookieLength; // 21 → frame 30
+    public const int CookieFrameLength = HeaderLength + CookieBody;
+
     // mac1 = BLAKE3-Keyed(responderStaticPub32, frame[0..^16])[..16] — the whole frame
     // including the marker byte, excluding the 16 MAC bytes themselves. The key is the
     // answering node's static public key: public material by design, so mac1 filters
@@ -65,6 +82,58 @@ internal static class CryptoWire
         Span<byte> digest = stackalloc byte[Blake3.DigestLength];
         Blake3.HashKeyed(responderStaticPub, frame[..^Mac1Length], digest);
         return CryptographicOperations.FixedTimeEquals(frame[^Mac1Length..], digest[..Mac1Length]);
+    }
+
+    // A mac2-carrying frame ends marker(0x05) + mac2[16]; mac1 lives exactly where it did
+    // in the extension-free v4 shape, so every mac1 call sites reads this view of it.
+    public static bool HasMac2(ReadOnlySpan<byte> frame) =>
+        frame.Length >= HeaderLength + Mac1ExtLength + Mac2ExtLength && frame[^Mac2ExtLength] == Mac2Marker;
+
+    public static ReadOnlySpan<byte> Mac1View(ReadOnlySpan<byte> frame) =>
+        HasMac2(frame) ? frame[..^Mac2ExtLength] : frame;
+
+    // mac2 = BLAKE3-Keyed(cookie16, frame[0..^16])[..16] — the whole frame including the
+    // mac1 bytes and both markers, excluding the mac2 bytes themselves. The key is the
+    // cookie the responder minted for this source address; the dialer cannot compute it,
+    // only echo what it was handed. BLAKE3's keyed mode takes a 32-byte key, so the
+    // 16-byte cookie is zero-extended — the entropy is the cookie's 128 bits either way.
+    public static void WriteMac2Ext(Span<byte> frame, ReadOnlySpan<byte> cookie)
+    {
+        frame[^Mac2ExtLength] = Mac2Marker;
+        Span<byte> digest = stackalloc byte[Blake3.DigestLength];
+        Blake3.HashKeyed(CookieKey(stackalloc byte[CookieKeyLength], cookie), frame[..^Mac2Length], digest);
+        digest[..Mac2Length].CopyTo(frame[^Mac2Length..]);
+    }
+
+    public static bool VerifyMac2(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> cookie)
+    {
+        if (frame.Length < HeaderLength + Mac1ExtLength + Mac2ExtLength || frame[^Mac2ExtLength] != Mac2Marker)
+        {
+            return false;
+        }
+
+        Span<byte> digest = stackalloc byte[Blake3.DigestLength];
+        Blake3.HashKeyed(CookieKey(stackalloc byte[CookieKeyLength], cookie), frame[..^Mac2Length], digest);
+        return CryptographicOperations.FixedTimeEquals(frame[^Mac2Length..], digest[..Mac2Length]);
+    }
+
+    private static Span<byte> CookieKey(Span<byte> destination, ReadOnlySpan<byte> cookie)
+    {
+        cookie.CopyTo(destination);
+        destination[CookieLength..].Clear();
+        return destination;
+    }
+
+    public const int CookieKeyLength = 32; // BLAKE3 keyed mode's key size; the 16-byte cookie zero-extends into it
+
+    // cookie = BLAKE3-Keyed(rotatingSecret32, sourceAddress)[..16]. The preimage is the
+    // arrival's source address exactly as the responder saw it (the SocketAddress wire
+    // form), so a cookie minted for one source can never validate for another.
+    public static void CookieFor(Span<byte> destination, ReadOnlySpan<byte> rotatingSecret, ReadOnlySpan<byte> sourceAddress)
+    {
+        Span<byte> digest = stackalloc byte[Blake3.DigestLength];
+        Blake3.HashKeyed(rotatingSecret, sourceAddress, digest);
+        digest[..CookieLength].CopyTo(destination);
     }
 }
 

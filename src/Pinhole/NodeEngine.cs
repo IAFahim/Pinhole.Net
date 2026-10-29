@@ -23,6 +23,7 @@ internal enum FrameType : byte
     Bye = 0x56,   // body = [sender's token]
     Hsck = 0x57,  // handshake confirm; body = [sender's token][confirm MAC:16] — the dialer's proof after a verified PACK
     Predict = 0x58, // sealed, negotiated, bounded prediction control; never a reflexive candidate
+    Cookie = 0x59, // mac2/cookie armor (R5 phase 2); body = [echo of the PUNC's token][epoch tag u8][cookieValue 16] — the under-load reply instead of PACK
 }
 
 // Wire authentication model: every frame carries the sender's per-connection token at
@@ -80,6 +81,10 @@ internal sealed class ConnState
     public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
     public bool PuncFrameV4;         // PuncFrame carries the v4 mac1 extension
     public bool PuncFrameDowngraded; // punch loop: the one-shot fallback to the v3 shape fired
+    public byte[]? Cookie;           // Gate, dial side; the responder's mac2 key after a COOKIE reply
+    public bool StrangerAdmitted;    // Gate; the PUNC that created this husk already passed the stranger cookie
+                                     // gate in Dispatch — OnPunc consumes it so that same frame is neither
+                                     // re-counted in the load windows nor re-verified against the jar
     public long FirstPuncTicks;      // Volatile; first PUNC transmission — the fallback clock's zero
     public DatagramBuffer? Buffer;      // non-null only with ReceiveBufferCapacity > 0
 
@@ -237,14 +242,23 @@ internal sealed partial class NodeEngine : IDisposable
     // Handshake v4 armor counters (Interlocked). Mac1Refused counts extension frames the
     // keyed-MAC gate dropped silently; HandshakeKeyAgreements brackets every key agreement
     // an inbound PUNC/PACK triggers — the no-DH-before-mac1 proof pins that it stays at
-    // zero while a flood of forged extension frames is refused.
+    // zero while a flood of forged extension frames is refused. CookieDemanded counts
+    // COOKIE replies a load gate sent instead of a PACK; CookieAccepted counts under-load
+    // PUNCs whose mac2 verified — the honest-dialer-completes-under-load proof.
     private long _mac1Refused;
     private long _handshakeKeyAgreements;
+    private long _cookieDemanded;
+    private long _cookieAccepted;
     // Test seam mirroring the blob layer's LegacyV3Only: the node never emits or accepts
     // the v4 handshake shapes, emulating a pre-v4 peer for fallback tests.
     internal bool LegacyHandshakeV3Only;
     internal long Mac1Refused => Volatile.Read(ref _mac1Refused);
     internal long HandshakeKeyAgreements => Volatile.Read(ref _handshakeKeyAgreements);
+    internal long CookieDemanded => Volatile.Read(ref _cookieDemanded);
+    internal long CookieAccepted => Volatile.Read(ref _cookieAccepted);
+    internal CookieArmor CookieArmor => _cookieArmor!;
+    private readonly CookieArmor? _cookieArmor;
+    internal int CookieLoadSources => _cookieArmor?.TrackedSources ?? 0;
     internal bool HandshakeV4Active => !LegacyHandshakeV3Only && _identity is not null;
     // A v4 dialer that has sent PUNCs and heard nothing for this long assumes a v3-only
     // responder (which ignores the unknown frame shape) and falls back to unversioned
@@ -272,6 +286,7 @@ internal sealed partial class NodeEngine : IDisposable
         _options = options;
         _maxConns = options.MaxConnectionsOverride ?? MaxConnections;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
+        _cookieArmor = _identity is not null ? new CookieArmor() : null;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
         if (options.RendezvousEndpoints is { Count: > 0 } || options.LookupProviders is { Count: > 0 })
         {
@@ -985,7 +1000,8 @@ internal sealed partial class NodeEngine : IDisposable
             ReadOnlySpan<byte> staticKey;
             if (frame[0] == (byte)FrameType.Punc
                 && (frame.Length == HeaderSize + CryptoWire.PuncCryptoBody
-                    || HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4))
+                    || HandshakeV4Active && (frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4
+                        || frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4Mac2)))
                 staticKey = frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength, 32);
             else if (frame[0] == (byte)FrameType.Pack
                 && (frame.Length == HeaderSize + CryptoWire.PackCryptoBody
@@ -2773,7 +2789,8 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                 }
             }
-            else if (_options.EnableDirectUdp && buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck && n >= HeaderSize)
+            else if (_options.EnableDirectUdp && n >= HeaderSize
+                && (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck || buf[0] == (byte)FrameType.Cookie))
             {
                 try
                 {
@@ -2803,7 +2820,8 @@ internal sealed partial class NodeEngine : IDisposable
         if (_disposed || _interfaceUdp?.Contains(socket) != true) return;
         if (count >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) == StunCookie)
             OnStunResponse(buffer, count, socket, remote);
-        else if (_options.EnableDirectUdp && count >= HeaderSize && buffer[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck)
+        else if (_options.EnableDirectUdp && count >= HeaderSize
+            && (buffer[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck || buffer[0] == (byte)FrameType.Cookie))
             Dispatch(buffer.AsSpan(0, count), new Arrival(remote, socket));
     }
 
@@ -2886,14 +2904,15 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             // Exact-length stranger gate: the punch probe is either legacy (13 B) or carries
-            // the crypto handshake (77 B, or 94 B with the v4 mac1 extension) — anything
-            // else is malformed. The encryption policy decides which kinds of strangers may
-            // materialize a connection at all, so a Required node never creates state for a
-            // plaintext scan, and no negotiation happens after creation — there is no
-            // downgrade window to strip.
+            // the crypto handshake (77 B, or 94 B with the v4 mac1 extension, or 111 B
+            // with mac2 appended) — anything else is malformed. The encryption policy
+            // decides which kinds of strangers may materialize a connection at all, so a
+            // Required node never creates state for a plaintext scan, and no negotiation
+            // happens after creation — there is no downgrade window to strip.
             bool legacy = frame.Length == HeaderSize + CryptoWire.PuncLegacyBody;
             bool v4 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4;
-            bool crypto = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody || v4;
+            bool v4Mac2 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4Mac2;
+            bool crypto = frame.Length == HeaderSize + CryptoWire.PuncCryptoBody || v4 || v4Mac2;
             if (!legacy && !crypto)
             {
                 return;
@@ -2908,10 +2927,31 @@ internal sealed partial class NodeEngine : IDisposable
             // The armor gate for strangers: an extension frame must prove mac1 (keyed with
             // our own static public key — no lookup, no state) BEFORE any connection is
             // created and before any key agreement could run. Failure is silence.
-            if (v4 && !CryptoWire.VerifyMac1(frame, _identity!.PublicKey))
+            if ((v4 || v4Mac2) && !CryptoWire.VerifyMac1(CryptoWire.Mac1View(frame), _identity!.PublicKey))
             {
                 Interlocked.Increment(ref _mac1Refused);
                 Telemetry.FrameRejected("handshake", "mac1");
+                return;
+            }
+
+            // The mac2/cookie gate for strangers, in the same pre-state position: when the
+            // source is under initiation load, a PUNC that cannot prove the cookie earns
+            // only a COOKIE reply — no husk, no PACK, no key agreement. The machine owns
+            // the identical decision wherever connection state exists (OnPunc); here
+            // there is no state yet, mirroring the stranger mac1 gate above.
+            Span<byte> strangerSourceKey = stackalloc byte[MaxSocketAddressBytes];
+            (bool strangerCookieRequired, bool strangerCookieOk) = CookieVerdict(
+                frame, v4Mac2, mac1Eligible: true, sessionCompleted: false, arrival,
+                strangerSourceKey, out int strangerSourceKeyLength);
+            if (strangerCookieRequired && !strangerCookieOk)
+            {
+                Interlocked.Increment(ref _cookieDemanded);
+                SendCookieReply(BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]),
+                    strangerSourceKey[..strangerSourceKeyLength], arrival);
+                if (TraceEnabled)
+                {
+                    TraceLine($"cookie demanded for stranger punc from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16}");
+                }
                 return;
             }
 
@@ -2939,10 +2979,15 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 return; // connection table full: a stranger flood gets no more objects
             }
+
+            c.StrangerAdmitted = true; // this frame already passed the cookie verdict above; OnPunc must not re-run it
         }
 
-        bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck) && c.Crypto is not null;
-        if (type is not (FrameType.Punc or FrameType.Pack) && !sealedFrame && !TokenOk(c, frame))
+        // Cookie rides plaintext like the handshake frames it answers: the sealed-frame
+        // decrypt below must not claim it (its 21-byte body is not counter+tag+ciphertext).
+        bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Cookie)
+            && c.Crypto is not null;
+        if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Cookie) && !sealedFrame && !TokenOk(c, frame))
         {
             return; // post-handshake frame without the connection token: spoofed, drop it
         }
@@ -3011,6 +3056,9 @@ internal sealed partial class NodeEngine : IDisposable
             case FrameType.Hsck:
                 OnHsck(c, frame, arrival);
                 break;
+            case FrameType.Cookie:
+                OnCookie(c, frame, arrival);
+                break;
             case FrameType.Bye:
                 RememberClosedHandshake(c);
                 // Remove only this connection's entry: a Bye from a replaced husk must not
@@ -3036,10 +3084,81 @@ internal sealed partial class NodeEngine : IDisposable
     // pinned key from the connection string; when we answer, it is our own. The own-key
     // fallback also admits the crossed shape a simultaneous dial produces (each side's
     // outgoing connection keying with its peer's pin) — both keys are public material, so
-    // widening to "either endpoint's key" still filters everything random.
-    private bool Mac1OkForConn(ConnState c, ReadOnlySpan<byte> frame) =>
-        c.PinnedStaticKey is { } pin && CryptoWire.VerifyMac1(frame, pin)
-            || CryptoWire.VerifyMac1(frame, _identity!.PublicKey);
+    // widening to "either endpoint's key" still filters everything random. A mac2-carrying
+    // frame is read through its mac1 view, so the verdict never depends on mac2's presence.
+    private bool Mac1OkForConn(ConnState c, ReadOnlySpan<byte> frame)
+    {
+        ReadOnlySpan<byte> mac1Frame = CryptoWire.Mac1View(frame);
+        return c.PinnedStaticKey is { } pin && CryptoWire.VerifyMac1(mac1Frame, pin)
+            || CryptoWire.VerifyMac1(mac1Frame, _identity!.PublicKey);
+    }
+
+    private const int MaxSocketAddressBytes = 32; // the IPv6 SocketAddress wire form tops out at 28
+
+    // The cookie binds to the source address exactly as the responder saw it — the
+    // SocketAddress wire bytes (family, port, address), no normalization.
+    private static int WriteSourceKey(SocketAddress source, Span<byte> destination)
+    {
+        int size = Math.Min(source.Size, destination.Length);
+        for (int i = 0; i < size; i++)
+        {
+            destination[i] = source[i];
+        }
+
+        return size;
+    }
+
+    // The under-load verdict for one inbound PUNC. Counts it toward the source's and the
+    // global load windows — unless it already failed mac1 (those are refused for free and
+    // must not be able to arm the gate) or the session completed (a confirmed peer's
+    // retransmissions are not load: "completed" is the peer's confirm, HSCK or a sealed
+    // frame — key agreement alone happens at the FIRST PUNC and would stop the count far
+    // too early). Then reports (Required, Ok): Required = the source is under load,
+    // Ok = the frame's mac2 proved the cookie (vacuously true when not under load). The
+    // REPLY decision stays in HandshakeMachine (ReplyCookie) wherever connection state
+    // exists; the stranger gate in Dispatch acts on the same verdict before any state is
+    // created. Relay and TCP arrivals never count and never demand: their sources are
+    // authenticated by the transport (a relay datagram is bound to the sender's static
+    // key, a TCP peer completed a three-way handshake), and the cookie exists to price an
+    // address only the direct UDP path can spoof.
+    private (bool Required, bool Ok) CookieVerdict(ReadOnlySpan<byte> frame, bool mac2Capable, bool mac1Eligible,
+        bool sessionCompleted, in Arrival arrival, Span<byte> sourceKeyBuf, out int sourceKeyLength)
+    {
+        sourceKeyLength = 0;
+        if (!mac1Eligible || sessionCompleted
+            || _cookieArmor is not { } armor || !HandshakeV4Active
+            || arrival.ViaRelay || arrival.Tcp is not null || arrival.Direct is not { } source)
+        {
+            return (false, true);
+        }
+
+        sourceKeyLength = WriteSourceKey(source, sourceKeyBuf);
+        ReadOnlySpan<byte> sourceKey = sourceKeyBuf[..sourceKeyLength];
+        if (!armor.NotePuncAndCheckLoad(sourceKey, Environment.TickCount64))
+        {
+            return (false, true); // the window is cold: mac2 is ignored, present or absent
+        }
+
+        if (mac2Capable && armor.VerifyMac2(frame, sourceKey))
+        {
+            Interlocked.Increment(ref _cookieAccepted);
+            return (true, true);
+        }
+
+        return (true, false);
+    }
+
+    // The under-load answer instead of PACK: echo token, epoch tag, cookie value. No DH,
+    // no state, no path confirmation — the cheapest frame the engine can emit.
+    private void SendCookieReply(uint echoToken, ReadOnlySpan<byte> sourceKey, in Arrival arrival)
+    {
+        Span<byte> cookie = stackalloc byte[CryptoWire.CookieFrameLength];
+        WriteHeader(cookie, FrameType.Cookie);
+        BinaryPrimitives.WriteUInt32LittleEndian(cookie[HeaderSize..], echoToken);
+        cookie[HeaderSize + CryptoWire.TokenLength] = _cookieArmor!.Mint(
+            cookie[(HeaderSize + CryptoWire.TokenLength + 1)..], sourceKey);
+        SendOnArrival(arrival, cookie);
+    }
 
     // One HandshakeMachine step, flattened: kind = the reject/progress Notify (0 when
     // none), reply = the Transmit selection (-1 when none); returns the Close kind (0
@@ -3073,24 +3192,41 @@ internal sealed partial class NodeEngine : IDisposable
     private void OnPunc(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
         bool v4Punc = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4;
+        bool v4PuncMac2 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4Mac2;
         if (frame.Length is not (HeaderSize + CryptoWire.PuncLegacyBody or HeaderSize + CryptoWire.PuncCryptoBody)
-            && !v4Punc)
+            && !v4Punc && !v4PuncMac2)
         {
             return;
         }
 
-        bool cryptoPunc = v4Punc || frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
+        bool cryptoPunc = v4Punc || v4PuncMac2 || frame.Length == HeaderSize + CryptoWire.PuncCryptoBody;
         uint token = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
 
         ConnectionCrypto? crypto;
         long reply;
+        Span<byte> puncSourceKey = stackalloc byte[MaxSocketAddressBytes];
+        int puncSourceKeyLength = 0;
         lock (c.Gate)
         {
             // The mac1 verdict is a pure keyed hash over the frame (the answering node's
             // static key — the pin when we dialed, our own when we answer, with our own as
             // the fallback so simultaneous-dial cross-conn frames still verify); the
             // machine turns it into the silent gate before anything else runs.
-            bool mac1Ok = !v4Punc || Mac1OkForConn(c, frame);
+            bool mac1Ok = !v4Punc && !v4PuncMac2 || Mac1OkForConn(c, frame);
+
+            // The shell's half of the mac2 gate: the load windows and the cookie verdict
+            // (sockets, clocks and the rotating secret live here, not in the machine).
+            // The husk-creating PUNC is the exception: Dispatch's stranger gate already
+            // counted and verified that very frame, so OnPunc admits it without re-running
+            // the verdict (windows count each PUNC once; CookieAccepted ticks once per
+            // accepted mac2, not twice).
+            bool strangerAdmitted = c.StrangerAdmitted;
+            c.StrangerAdmitted = false;
+            (bool cookieRequired, bool cookieOk) = strangerAdmitted ? (false, true)
+                : CookieVerdict(
+                    frame, v4PuncMac2, mac1Eligible: mac1Ok,
+                    sessionCompleted: c.Crypto is { PeerConfirmed: true }, arrival,
+                    puncSourceKey, out puncSourceKeyLength);
 
             // The pin verdict is a pure compare; key agreement is the one side effect
             // the machine sequences around, so it runs between the two input kinds.
@@ -3104,8 +3240,10 @@ internal sealed partial class NodeEngine : IDisposable
             input.Kind = HandshakeInputKind.PuncBegin;
             input.CryptoBody = cryptoPunc;
             input.PinMatches = pinMatches;
-            input.Mac1Present = v4Punc;
+            input.Mac1Present = v4Punc || v4PuncMac2;
             input.Mac1Ok = mac1Ok;
+            input.CookieRequired = cookieRequired;
+            input.CookieOk = cookieOk;
             input.FrameToken = token;
             StepHandshake(ref c.Handshake, in input, out long kind, out reply);
             if (kind == HandshakeMachine.RejectMac1)
@@ -3118,7 +3256,24 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            Interlocked.Increment(ref c.PuncsReceived);
+            if (reply == HandshakeMachine.ReplyCookie)
+            {
+                // Under load for this source with no valid mac2: a COOKIE frame and
+                // nothing else — no PACK, no state change, no key agreement, and no
+                // PuncsReceived tick (a COOKIE is not a handshake answer). With this
+                // reply the machine emits only the Transmit effect (kind stays 0), so
+                // no later branch inside this lock runs; the frame goes out below,
+                // outside the lock, like every other reply.
+                Interlocked.Increment(ref _cookieDemanded);
+                if (TraceEnabled)
+                {
+                    TraceLine($"cookie demanded for punc from {c.PeerId:x16} under load");
+                }
+            }
+            else
+            {
+                Interlocked.Increment(ref c.PuncsReceived);
+            }
             if (kind == HandshakeMachine.RejectPin)
             {
                 Reject(c, 5);
@@ -3166,11 +3321,19 @@ internal sealed partial class NodeEngine : IDisposable
 
         // The PACK doubles as the handshake's second flight. Crypto bodies answer crypto
         // PUNCs deterministically — same keys, same confirm MAC, on every retransmission.
-        // The reply mirrors the inbound shape: a v4 PUNC earns a v4 PACK (mac1 keyed with
-        // our own static key), a v3 PUNC the v3 shape it can parse — the support window.
+        // The reply mirrors the inbound shape: a v4 PUNC (with or without mac2) earns a
+        // v4 PACK (mac1 keyed with our own static key), a v3 PUNC the v3 shape it can
+        // parse — the support window.
+        if (reply == HandshakeMachine.ReplyCookie)
+        {
+            SendCookieReply(token, puncSourceKey[..puncSourceKeyLength], arrival);
+            return;
+        }
+
         if (reply == HandshakeMachine.ReplyPackCrypto)
         {
-            int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4Punc ? CryptoWire.Mac1ExtLength : 0);
+            bool v4Reply = v4Punc || v4PuncMac2;
+            int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4Reply ? CryptoWire.Mac1ExtLength : 0);
             Span<byte> pack = stackalloc byte[packLength];
             WriteHeader(pack, FrameType.Pack);
             BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
@@ -3178,7 +3341,7 @@ internal sealed partial class NodeEngine : IDisposable
             crypto!.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
             crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
-            if (v4Punc)
+            if (v4Reply)
             {
                 CryptoWire.WriteMac1Ext(pack, _identity!.PublicKey);
             }
@@ -3456,6 +3619,39 @@ internal sealed partial class NodeEngine : IDisposable
             Transition(c, PinholeConnectionState.Dead);
             c.Dead.Cancel();
         }
+    }
+
+    // The COOKIE reply (R5 phase 2): the responder is under load and wants the next PUNC
+    // to carry mac2 keyed with this cookie. The echo of our own token binds it to this
+    // dial attempt (our token is random per connection and never on the wire except in
+    // our own PUNCs, so a cookie minted for someone else cannot latch here). Receiving
+    // it is also proof the responder speaks v4, so the v3 fallback clock restarts — the
+    // cookie round trip must never bounce an honest dialer into the unversioned fallback.
+    private void OnCookie(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
+    {
+        if (frame.Length != CryptoWire.CookieFrameLength || c.Crypto is null)
+        {
+            return;
+        }
+
+        uint echo = BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]);
+        lock (c.Gate)
+        {
+            if (echo != c.Token || c.State != PinholeConnectionState.Punching || !c.PuncFrameV4)
+            {
+                return; // not this attempt's cookie, or too late for the PUNC to matter
+            }
+
+            c.Cookie = frame.Slice(HeaderSize + CryptoWire.TokenLength + 1, CryptoWire.CookieLength).ToArray();
+            SetPuncFrame(c); // rebuilds PuncFrame with mac2; FirstPuncTicks re-arms on the next send
+        }
+
+        if (TraceEnabled)
+        {
+            TraceLine($"cookie received from {c.PeerId:x16}; retrying punc with mac2");
+        }
+
+        KickPunch(c); // answer the demand immediately — the retry must not wait out a pace tick
     }
 
     private void OnData(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -4630,8 +4826,12 @@ internal sealed partial class NodeEngine : IDisposable
         // The punch probe doubles as the crypto handshake's first flight: a crypto dial
         // carries this connection's ephemeral and static public keys, deterministically, in
         // every retransmission — key agreement must not depend on which probe lands.
+        // With a stored cookie (the responder's COOKIE reply under load) every
+        // retransmission also carries mac2, so the retry cannot depend on which probe
+        // lands either.
+        byte[]? mac2Key = v4 ? c.Cookie : null;
         byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody
-            : CryptoWire.PuncCryptoBody + (v4 ? CryptoWire.Mac1ExtLength : 0))];
+            : CryptoWire.PuncCryptoBody + (v4 ? CryptoWire.Mac1ExtLength + (mac2Key is null ? 0 : CryptoWire.Mac2ExtLength) : 0))];
         frame[0] = (byte)FrameType.Punc;
         BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), _peerId);
         BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(HeaderSize), c.Token);
@@ -4643,7 +4843,16 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // The answering node's static key keys mac1: the pin when we dialed, our
                 // own when we answer (this connection was born from the peer's PUNC).
-                CryptoWire.WriteMac1Ext(frame, c.PinnedStaticKey ?? _identity!.PublicKey);
+                // With mac2 appended, mac1 is written over its own view of the frame.
+                if (mac2Key is { } cookie)
+                {
+                    CryptoWire.WriteMac1Ext(frame.AsSpan()[..^CryptoWire.Mac2ExtLength], c.PinnedStaticKey ?? _identity!.PublicKey);
+                    CryptoWire.WriteMac2Ext(frame, cookie);
+                }
+                else
+                {
+                    CryptoWire.WriteMac1Ext(frame, c.PinnedStaticKey ?? _identity!.PublicKey);
+                }
             }
         }
 
