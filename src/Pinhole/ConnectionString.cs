@@ -56,10 +56,12 @@ public sealed class ConnectionString
 
     public byte[]? Knock { get; }
 
+    public byte[]? MlKemKey { get; }
+
     public IReadOnlyList<PinholeCandidate> Candidates { get; }
 
     public ConnectionString(ulong peerId, IReadOnlyList<PinholeCandidate> candidates, NatHint natHint = NatHint.Unknown,
-        byte[]? staticKey = null, byte[]? endpointKey = null, byte[]? knock = null)
+        byte[]? staticKey = null, byte[]? endpointKey = null, byte[]? knock = null, byte[]? mlKemKey = null)
     {
         if (candidates.Count > MaxCandidates)
         {
@@ -91,11 +93,22 @@ public sealed class ConnectionString
             throw new ArgumentOutOfRangeException(nameof(knock), "a knock requires the static key it is published with");
         }
 
+        if (mlKemKey is not null && mlKemKey.Length != HybridKem.PublicKeyLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mlKemKey), $"ML-KEM public keys are {HybridKem.PublicKeyLength} bytes");
+        }
+
+        if (mlKemKey is not null && staticKey is null)
+        {
+            throw new ArgumentOutOfRangeException(nameof(mlKemKey), "an ML-KEM key requires the static key it is published with");
+        }
+
         PeerId = peerId;
         NatHint = natHint;
         StaticKey = staticKey;
         EndpointKey = endpointKey;
         Knock = knock;
+        MlKemKey = mlKemKey;
         Candidates = candidates;
     }
 
@@ -104,11 +117,14 @@ public sealed class ConnectionString
         bool keyed = StaticKey is not null;
         bool epKeyed = EndpointKey is not null;
         bool knocked = Knock is not null;
+        bool kemKeyed = MlKemKey is not null;
         var payload = new MemoryStream(64 + Candidates.Count * 32 + (keyed ? NodeIdentity.KeyLength : 0)
-            + (epKeyed ? AddressRecord.EndpointKeyLength : 0) + (knocked ? 1 + Knock!.Length : 0));
-        byte version = knocked ? Version4 : epKeyed ? Version3 : keyed ? Version2 : Version1;
+            + (epKeyed ? AddressRecord.EndpointKeyLength : 0) + (knocked ? 1 + Knock!.Length : 0)
+            + (kemKeyed ? HybridKem.PublicKeyLength : 0));
+        byte version = kemKeyed ? Version5 : knocked ? Version4 : epKeyed ? Version3 : keyed ? Version2 : Version1;
         payload.WriteByte(version);
-        payload.WriteByte((byte)((keyed ? FlagsHasStaticKey : 0) | (epKeyed ? FlagsHasEndpointKey : 0) | (knocked ? FlagsHasKnock : 0)));
+        payload.WriteByte((byte)((keyed ? FlagsHasStaticKey : 0) | (epKeyed ? FlagsHasEndpointKey : 0)
+            | (knocked ? FlagsHasKnock : 0) | (kemKeyed ? FlagsHasMlKemKey : 0)));
         WriteU64(payload, PeerId);
         payload.WriteByte((byte)NatHint);
         payload.WriteByte((byte)Candidates.Count);
@@ -131,6 +147,11 @@ public sealed class ConnectionString
         {
             payload.WriteByte((byte)Knock!.Length);
             payload.Write(Knock);
+        }
+
+        if (kemKeyed)
+        {
+            payload.Write(MlKemKey!);
         }
 
         return Scheme + ":" + Base64Url.Encode(payload.GetBuffer().AsSpan(0, (int)payload.Length));
@@ -165,7 +186,7 @@ public sealed class ConnectionString
         }
 
         byte[] payload = Base64Url.Decode(text[(colon + 1)..]);
-        if (payload.Length < 13 || payload[0] is not (Version1 or Version2 or Version3 or Version4))
+        if (payload.Length < 13 || payload[0] is not (Version1 or Version2 or Version3 or Version4 or Version5))
         {
             throw new FormatException("unsupported connection string version");
         }
@@ -176,7 +197,11 @@ public sealed class ConnectionString
             || (payload[0] == Version1 && flags != 0)
 
             || (payload[0] == Version4 && flags != (FlagsHasStaticKey | FlagsHasKnock)
-                && flags != (FlagsHasStaticKey | FlagsHasEndpointKey | FlagsHasKnock)))
+                && flags != (FlagsHasStaticKey | FlagsHasEndpointKey | FlagsHasKnock))
+            || (payload[0] == Version5
+                && (flags & (FlagsHasStaticKey | FlagsHasMlKemKey)) != (FlagsHasStaticKey | FlagsHasMlKemKey))
+            || (payload[0] == Version5
+                && (flags & ~(FlagsHasStaticKey | FlagsHasEndpointKey | FlagsHasKnock | FlagsHasMlKemKey)) != 0))
         {
             throw new FormatException("unknown connection string flags");
         }
@@ -204,6 +229,7 @@ public sealed class ConnectionString
         byte[]? staticKey = null;
         byte[]? endpointKey = null;
         byte[]? knock = null;
+        byte[]? mlKemKey = null;
         if (payload[0] == Version2)
         {
             if (payload.Length - reader.Position != NodeIdentity.KeyLength)
@@ -242,21 +268,57 @@ public sealed class ConnectionString
 
             knock = payload[(reader.Position + keys + 1)..];
         }
+        else if (payload[0] == Version5)
+        {
+            int keys = NodeIdentity.KeyLength
+                + ((flags & FlagsHasEndpointKey) != 0 ? AddressRecord.EndpointKeyLength : 0);
+            int knockLength = 0;
+            if ((flags & FlagsHasKnock) != 0)
+            {
+                if (payload.Length - reader.Position <= keys)
+                {
+                    throw new FormatException("v5 connection string must end with its keys, an optional knock, and its ML-KEM key");
+                }
+
+                knockLength = payload[reader.Position + keys];
+            }
+
+            if ((flags & FlagsHasKnock) != 0 && knockLength is < 1 or > MaxKnockLength
+                || payload.Length - reader.Position != keys + ((flags & FlagsHasKnock) != 0 ? 1 + knockLength : 0) + HybridKem.PublicKeyLength)
+            {
+                throw new FormatException("v5 connection string must end with its keys, an optional knock, and its ML-KEM key");
+            }
+
+            staticKey = payload[reader.Position..(reader.Position + NodeIdentity.KeyLength)];
+            if ((flags & FlagsHasEndpointKey) != 0)
+            {
+                endpointKey = payload[(reader.Position + NodeIdentity.KeyLength)..(reader.Position + keys)];
+            }
+
+            if ((flags & FlagsHasKnock) != 0)
+            {
+                knock = payload[(reader.Position + keys + 1)..(reader.Position + keys + 1 + knockLength)];
+            }
+
+            mlKemKey = payload[^HybridKem.PublicKeyLength..];
+        }
         else if (!reader.AtEnd)
         {
             throw new FormatException("trailing bytes in connection string");
         }
 
-        return new ConnectionString(peerId, candidates, hint, staticKey, endpointKey, knock);
+        return new ConnectionString(peerId, candidates, hint, staticKey, endpointKey, knock, mlKemKey);
     }
 
     private const byte Version1 = 1;
     private const byte Version2 = 2;
     private const byte Version3 = 3;
     private const byte Version4 = 4;
+    private const byte Version5 = 5;
     private const byte FlagsHasStaticKey = 1;
     private const byte FlagsHasEndpointKey = 2;
     private const byte FlagsHasKnock = 4;
+    private const byte FlagsHasMlKemKey = 8;
 
     private static void WriteU64(MemoryStream payload, ulong value)
     {

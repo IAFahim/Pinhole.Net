@@ -24,6 +24,7 @@ internal enum FrameType : byte
     Hsck = 0x57,
     Predict = 0x58,
     Cookie = 0x59,
+    Kem = 0x5A,
 }
 
 internal sealed class ConnState
@@ -75,6 +76,7 @@ internal sealed class ConnState
     public byte[] PuncFrame = Array.Empty<byte>();
     public bool PuncFrameV4;
     public bool PuncFrameDowngraded;
+    public byte[]? KemFrame;
     public byte[]? Cookie;
     public bool StrangerAdmitted;
 
@@ -106,6 +108,7 @@ internal sealed class ConnState
     public long Sent, ReceivedCount, SendFailed, BytesSent, BytesReceived, PingsSent, PongsReceived;
 
     public long PuncsSent, PuncsReceived, PacksSent, PacksReceived, HscksReceived, HandshakeRejects;
+    public long KemsReceived, HybridHolds;
 
     public uint LastRejectWanted, LastRejectGot;
     public long LastRejectKind;
@@ -222,6 +225,14 @@ internal sealed partial class NodeEngine : IDisposable
     private readonly byte[]? _knock;
     private readonly byte[]? _knockMac1Key;
 
+    private readonly byte[]? _mlkemSeed;
+    private readonly byte[]? _mlkemPublicKey;
+    private long _hybridHandshakes;
+
+    internal byte[]? MlKemPublicKey => _mlkemPublicKey;
+
+    internal long HybridHandshakes => Volatile.Read(ref _hybridHandshakes);
+
     private ReadOnlySpan<byte> OwnMac1Key => _knockMac1Key ?? _identity!.PublicKey;
 
     internal const long HandshakeV4FallbackMs = 3000;
@@ -252,6 +263,12 @@ internal sealed partial class NodeEngine : IDisposable
             Span<byte> key = stackalloc byte[NodeIdentity.KeyLength];
             CryptoWire.KnockMac1Key(key, _identity.PublicKey, _knock);
             _knockMac1Key = key.ToArray();
+        }
+
+        if (options.HybridKeyExchange && HybridKem.IsSupported && _identity is not null)
+        {
+            _mlkemSeed = HybridKem.DerivePrivateSeed(_identity.ExportPrivateSeed());
+            _mlkemPublicKey = HybridKem.PublicKeyFromSeed(_mlkemSeed);
         }
 
         _cookieArmor = _identity is not null ? new CookieArmor() : null;
@@ -895,6 +912,10 @@ internal sealed partial class NodeEngine : IDisposable
                     {
                         NotePuncSent(c);
                         SendViaKeyedRelay(c.PuncFrame, target);
+                        if (c.KemFrame is { } kem)
+                        {
+                            SendViaKeyedRelay(kem, target);
+                        }
                     }
                     KickPunch(c);
                 }
@@ -918,7 +939,7 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
         if (_disposed || frame.Length < HeaderSize + 4
-            || frame[0] is < (byte)FrameType.Punc or > (byte)FrameType.Predict) return;
+            || frame[0] is < (byte)FrameType.Punc or (> (byte)FrameType.Predict and not (byte)FrameType.Kem)) return;
         if (relay.Kind == CandidateKind.IrohRelay)
         {
             ulong sender = BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(source));
@@ -1437,7 +1458,7 @@ internal sealed partial class NodeEngine : IDisposable
             PinnedEndpointKey = cs.EndpointKey,
             PinnedKnock = cs.Knock,
             Crypto = _identity is not null && cs.StaticKey is not null
-                ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId, cs.Knock)
+                ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId, cs.Knock, HybridDialKey(cs))
                 : null,
         };
         c.Buffer = CreateBuffer();
@@ -1446,6 +1467,7 @@ internal sealed partial class NodeEngine : IDisposable
         c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
         c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
         SetPuncFrame(c);
+        SetKemFrame(c);
         c.Public = new PinholeConnection(this, c);
 
         c.PeerCandidates.AddRange(cs.Candidates);
@@ -1561,6 +1583,25 @@ internal sealed partial class NodeEngine : IDisposable
         {
 
         }
+    }
+
+    private ReadOnlySpan<byte> HybridDialKey(ConnectionString cs) =>
+        _options.HybridKeyExchange && HybridKem.IsSupported && cs.MlKemKey is { } key ? key : default;
+
+    private void SetKemFrame(ConnState c)
+    {
+        if (c.Crypto?.MlKemCiphertext is not { } ciphertext)
+        {
+            c.KemFrame = null;
+            return;
+        }
+
+        byte[] frame = new byte[HeaderSize + CryptoWire.KemBody];
+        frame[0] = (byte)FrameType.Kem;
+        BinaryPrimitives.WriteUInt64LittleEndian(frame.AsSpan(1), _peerId);
+        BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(HeaderSize), c.Token);
+        ciphertext.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength));
+        c.KemFrame = frame;
     }
 
     private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival, bool cryptoHandshake)
@@ -1734,6 +1775,8 @@ internal sealed partial class NodeEngine : IDisposable
                         c.PuncFrameDowngraded = true;
                         c.PuncFrame = BuildPunc(c, v4: false);
                         c.PuncFrameV4 = false;
+                        c.KemFrame = null;
+                        c.Crypto?.AbandonHybridHold();
                         if (TraceEnabled)
                         {
                             TraceLine($"handshake v4 unanswered by {c.PeerId:x16} for {HandshakeV4FallbackMs}ms; falling back to unversioned puncs");
@@ -1852,17 +1895,29 @@ internal sealed partial class NodeEngine : IDisposable
                         {
                             NotePuncSent(c);
                             SendViaKeyedRelay(c.PuncFrame, candidate);
+                            if (c.KemFrame is { } kem)
+                            {
+                                SendViaKeyedRelay(kem, candidate);
+                            }
                         }
                         else if (candidate.Kind == CandidateKind.Relay)
                         {
                             NotePuncSent(c);
                             SendViaRelayTo(c.PuncFrame, candidate.Address, candidate.RelayServer?.Address);
+                            if (c.KemFrame is { } kem)
+                            {
+                                SendViaRelayTo(kem, candidate.Address, candidate.RelayServer?.Address);
+                            }
                         }
                         else
                         {
                             if (TraceEnabled) TraceLine($"punch direct {c.PeerId:x16} -> {candidate.Address}");
                             NotePuncSent(c);
                             SendToWire(candidate.Address, c.PuncFrame);
+                            if (c.KemFrame is { } kem)
+                            {
+                                SendToWire(candidate.Address, kem);
+                            }
                             Interlocked.Increment(ref c.PuncsSent);
                         }
                     }
@@ -2424,7 +2479,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (!tcp.BindPeer(id)) { tcp.Dispose(); return; }
         if (Lookup(id) is { Crypto: null }) { tcp.Dispose(); return; }
         if (tcp.AuthenticatedPeer != id && (FrameType)frame.Span[0] is not
-            (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Ping or FrameType.Pong)) return;
+            (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Kem or FrameType.Ping or FrameType.Pong)) return;
 
         if (frame.Span[0] == (byte)FrameType.Punc
             && frame.Length != HeaderSize + CryptoWire.PuncCryptoBody
@@ -2481,6 +2536,10 @@ internal sealed partial class NodeEngine : IDisposable
                 if (c.State == PinholeConnectionState.Open && c.Path == PathKind.Direct && c.DirectTcp is null) return;
                 NotePuncSent(c);
                 link.Send(c.PuncFrame);
+                if (c.KemFrame is { } kem)
+                {
+                    link.Send(kem);
+                }
                 if (c.Crypto is { Established: true, PeerConfirmed: true })
                     SendTcpProof(c, link);
             })).ConfigureAwait(false);
@@ -2611,7 +2670,7 @@ internal sealed partial class NodeEngine : IDisposable
                 }
             }
             else if (_options.EnableDirectUdp && n >= HeaderSize
-                && (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck || buf[0] == (byte)FrameType.Cookie))
+                && (buf[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck or (byte)FrameType.Cookie or (byte)FrameType.Kem))
             {
                 try
                 {
@@ -2642,7 +2701,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (count >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buffer.AsSpan(4)) == StunCookie)
             OnStunResponse(buffer, count, socket, remote);
         else if (_options.EnableDirectUdp && count >= HeaderSize
-            && (buffer[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck || buffer[0] == (byte)FrameType.Cookie))
+            && (buffer[0] is >= (byte)FrameType.Punc and <= (byte)FrameType.Hsck or (byte)FrameType.Cookie or (byte)FrameType.Kem))
             Dispatch(buffer.AsSpan(0, count), new Arrival(remote, socket));
     }
 
@@ -2802,7 +2861,7 @@ internal sealed partial class NodeEngine : IDisposable
             c.StrangerAdmitted = true;
         }
 
-        bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Cookie)
+        bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Cookie or FrameType.Kem)
             && c.Crypto is not null;
         if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Cookie) && !sealedFrame && !TokenOk(c, frame))
         {
@@ -2870,6 +2929,9 @@ internal sealed partial class NodeEngine : IDisposable
                 break;
             case FrameType.Cookie:
                 OnCookie(c, frame, arrival);
+                break;
+            case FrameType.Kem:
+                OnKem(c, frame, arrival);
                 break;
             case FrameType.Bye:
                 RememberClosedHandshake(c);
@@ -3160,21 +3222,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (reply == HandshakeMachine.ReplyPackCrypto)
         {
-            bool v4Reply = v4Punc || v4PuncMac2;
-            int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4Reply ? CryptoWire.Mac1ExtLength : 0);
-            Span<byte> pack = stackalloc byte[packLength];
-            WriteHeader(pack, FrameType.Pack);
-            BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);
-            BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
-            crypto!.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
-            crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
-            crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
-            if (v4Reply)
-            {
-                CryptoWire.WriteMac1Ext(pack, OwnMac1Key);
-            }
-
-            SendOnArrival(arrival, pack);
+            SendCryptoPack(c, token, arrival, v4: v4Punc || v4PuncMac2);
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
             else if (!arrival.ViaRelay && crypto is { PeerConfirmed: true }) SendUdpIntroductionProbe(c, arrival);
         }
@@ -3204,6 +3252,62 @@ internal sealed partial class NodeEngine : IDisposable
         {
             DirectPathConfirmed(c, arrival);
         }
+    }
+
+    private void SendCryptoPack(ConnState c, uint echoToken, in Arrival arrival, bool v4)
+    {
+        ConnectionCrypto crypto = c.Crypto!;
+        int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4 ? CryptoWire.Mac1ExtLength : 0);
+        Span<byte> pack = stackalloc byte[packLength];
+        WriteHeader(pack, FrameType.Pack);
+        BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], echoToken);
+        BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
+        crypto.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
+        crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
+        crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
+        if (v4)
+        {
+            CryptoWire.WriteMac1Ext(pack, OwnMac1Key);
+        }
+
+        SendOnArrival(arrival, pack);
+    }
+
+    private void OnKem(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
+    {
+        if (frame.Length != HeaderSize + CryptoWire.KemBody)
+        {
+            return;
+        }
+
+        lock (c.Gate)
+        {
+            Interlocked.Increment(ref c.KemsReceived);
+            if (c.Crypto is not { Established: true } crypto || crypto.PeerConfirmed || crypto.HybridLatched)
+            {
+                return;
+            }
+
+            if (_mlkemSeed is not { } seed)
+            {
+                return;
+            }
+
+            byte[]? shared = HybridKem.Decapsulate(seed, frame[(HeaderSize + CryptoWire.TokenLength)..]);
+            if (shared is null || !crypto.TryUpgradeHybrid(shared))
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref _hybridHandshakes);
+            if (TraceEnabled)
+            {
+                TraceLine($"hybrid upgrade for {c.PeerId:x16} via {(arrival.ViaRelay ? "relay" : arrival.Tcp is not null ? "tcp" : "direct")}");
+            }
+        }
+
+        SendCryptoPack(c, BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]), arrival, v4: HandshakeV4Active);
+        Interlocked.Increment(ref c.PacksSent);
     }
 
     private void OnPack(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -3314,15 +3418,28 @@ internal sealed partial class NodeEngine : IDisposable
                 Interlocked.Increment(ref _handshakeKeyAgreements);
                 ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
                 ReadOnlySpan<byte> eph = body[..CryptoWire.EphemeralLength];
+                ReadOnlySpan<byte> stat = body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength);
+                ReadOnlySpan<byte> confirm = body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength);
                 ConnectionCrypto crypto = c.Crypto!;
-                bool accepted = crypto.TryPeerKeys(eph, body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength))
+                bool accepted = crypto.TryPeerKeys(eph, stat)
                     || crypto.TrySupersedeUnconfirmed(
                         eph,
-                        body.Slice(CryptoWire.EphemeralLength, CryptoWire.StaticKeyLength),
-                        body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength),
+                        stat,
+                        confirm,
                         allowUnexposedIncoming: c.DialAdoptedIncoming && !c.Handshake.RemoteTokenAuthenticated && !c.Connected.Task.IsCompleted);
-                bool confirmOk = accepted
-                    && crypto.VerifyPeerConfirm(body.Slice(CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength, CryptoWire.ConfirmLength));
+                if (accepted && crypto.HybridPending && !crypto.VerifyPeerConfirm(confirm)
+                    && crypto.ClassicalConfirmMatches(eph, stat, confirm))
+                {
+
+                    Interlocked.Increment(ref c.HybridHolds);
+                    return;
+                }
+
+                bool confirmOk = accepted && crypto.VerifyPeerConfirm(confirm);
+                if (confirmOk && crypto.HybridPending && !crypto.PeerConfirmed)
+                {
+                    Interlocked.Increment(ref _hybridHandshakes);
+                }
 
                 HandshakeInput keys = default;
                 keys.Kind = HandshakeInputKind.PackKeys;

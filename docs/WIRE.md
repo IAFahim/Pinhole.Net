@@ -69,21 +69,37 @@ versioned; keys pin the version:
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 1 | version: `1` bare, `2` +static key, `3` +static+endpoint keys, `4` +knock |
-| 1 | 1 | flags: bit 0 = static key, bit 1 = endpoint key, bit 2 = knock — v1..v3 must equal exactly the key-presence bits implied by the version byte; v4 must be `static+knock` (0x05) or `static+endpoint+knock` (0x07) |
+| 0 | 1 | version: `1` bare, `2` +static key, `3` +static+endpoint keys, `4` +knock, `5` +ML-KEM key |
+| 1 | 1 | flags: bit 0 = static key, bit 1 = endpoint key, bit 2 = knock, bit 3 = ML-KEM key — v1..v3 must equal exactly the key-presence bits implied by the version byte; v4 must be `static+knock` (0x05) or `static+endpoint+knock` (0x07); v5 must carry at least `static+mlkem` (0x09) and may add the endpoint and knock bits (up to 0x0F), no others |
 | 2 | 8 | peer id, u64 **LE** |
 | 10 | 1 | NAT hint: 0 unknown, 1 cone, 2 symmetric |
 | 11 | 1 | candidate count, 1..32 (zero is not canonical) |
 | 12 | … | candidates, back to back |
 | … | 32 | static key, present iff version ≥ 2 |
-| … | 32 | endpoint key, present iff version 3, or version 4 with bit 1 set |
-| … | 1 + 1..64 | knock length (u8) then raw knock bytes, present iff version 4 |
+| … | 32 | endpoint key, present iff version 3, or version ≥ 4 with bit 1 set |
+| … | 1 + 1..64 | knock length (u8) then raw knock bytes, present iff version 4, or version 5 with bit 2 set |
+| … | 1184 | ML-KEM-768 encapsulation key, present iff version 5 (always last) |
 
 No trailing bytes. Bodies run 13 bytes minimum; the structural maximum is
 5,549 bytes / **7,408 characters** (32 candidates of maximal shape, both keys,
 and a 64-byte knock). The legacy parser's separate 8,192-character cap
 (`ConnectionString.MaxEncodedLength`) still governs the production SDK; the
-canonical bound is tighter and derived.
+canonical bound is tighter and derived. A v5 body adds a fixed 1,184-byte
+ML-KEM tail, so a minimal v5 string is still far under that cap.
+
+The ML-KEM field (R5 remainder) is the optional hybrid key exchange a node may
+be configured with (`PinholeOptions.HybridKeyExchange`, default **off**): the
+node derives an ML-KEM-768 keypair deterministically from its identity seed
+(seed = `BLAKE3-DeriveKey("pinhole-mlkem768-seed-v1", identitySeed)`), so the
+published key is stable across restarts, and publishes the encapsulation key in
+its string iff the flag is on and the runtime provides the BCL `MLKem` types
+(.NET 10+). On .NET 8 the flag is a safe no-op: no v5 strings are published and
+a dialer ignores the field, so the session stays classical. A v5 string also
+pins the ML-KEM key out of band — the ciphertext a dialer encapsulates against
+it cannot be redirected by an on-path attacker without breaking the X25519 pin
+first. Pre-v5 readers reject the version byte as unsupported, the same
+additive-versioning discipline as v4; a hybrid-enabled node that must serve
+old dialers keeps the flag off.
 
 The knock (R5 phase 2 remainder) is the optional per-string secret a node may
 be configured with (`PinholeOptions.Knock`): present in a string iff the
@@ -471,7 +487,7 @@ that interop decision as open).
 ## Engine handshake frames, v3/v4 — `NodeEngine.cs` + `CryptoWire`
 
 Datagram frames on the engine's direct path (`HeaderSize` header + body; frame types
-`Punc`, `Pack`, `Hsck`, `Cookie`; bodies sized by `CryptoWire`). Frame lengths by class:
+`Punc`, `Pack`, `Hsck`, `Cookie`, `Kem`; bodies sized by `CryptoWire`). Frame lengths by class:
 
 | Frame | v3 legacy | v3 crypto | v4 (mac1) | v4 (mac1+mac2) |
 |---|---|---|---|---|
@@ -479,6 +495,7 @@ Datagram frames on the engine's direct path (`HeaderSize` header + body; frame t
 | PACK  | 17 | 97 | 114 | — |
 | HSCK  | 29 | 29 | 29 | — |
 | COOKIE | — | — | 30 | — |
+| KEM   | — | — | 1101 | — |
 
 Every v4 length class is distinct from every v3 class, so a v3 reader silently ignores
 v4 frames on length alone and the extensions are purely additive.
@@ -622,6 +639,68 @@ precondition for the handshake:
 - Dialer side, versioning: a v4 dialer sends versioned frames and, when a peer never
   answers (a v3-only responder ignoring the unknown shape), retries unversioned
   exactly once per connection attempt.
+
+**The hybrid key exchange (R5 remainder): X25519 + ML-KEM-768 behind a flag.**
+Optional (`PinholeOptions.HybridKeyExchange`, default **off**) and purely
+additive: with the flag off on both sides the wire is byte-identical to today —
+same frames, same sizes, same schedule (the classical IKM is untouched).
+
+- **KEM frame (type `0x5A`):** `type(1) | sender peerId(8) | dialer token(4) |
+  mlkemCiphertext[1088]`, 1101 bytes — the ML-KEM-768 encapsulation against the
+  responder's published key. It rides the same paths as the dialer's PUNC
+  (direct UDP, TURN, keyed HTTPS relays, TCP) immediately after each PUNC
+  retransmission, so punch pacing and loss recovery come free. At 1101 bytes it
+  stays under the 1200-byte `MaxPayload` PMTU floor — one datagram, no
+  fragmentation, and it never rides the PMTU prober (it is handshake traffic).
+- **Negotiation, precisely.** The responder publishes an ML-KEM-768
+  encapsulation key in its connection string (v5) iff its flag is on (and the
+  runtime has the BCL `MLKem` types — on .NET 8 the flag is a no-op: no v5
+  string, classical only). The dialer attempts hybrid iff its flag is on *and*
+  the string carries the key: it encapsulates once per connection attempt and
+  sends the fixed KEM frame after every PUNC. Hybrid completes iff the
+  responder decapsulates a well-formed KEM before the session confirms: it
+  re-derives the schedule with the shared secret and re-sends its PACK (the
+  confirm now covers the hybrid). Any other combination is classical,
+  silently: a flag-off responder (pre-v5 string) is never sent a KEM; a
+  flag-on responder that never sees a KEM (flag-off or .NET 8 dialer) simply
+  completes the classical handshake it already answered.
+- **The dialer never completes classical after sending a KEM.** A hybrid
+  dialer holds its first (classical) PACK — keys latched, no HSCK, no confirm,
+  no session — until the responder's hybrid re-PACK verifies against the
+  ML-KEM-mixed schedule. This makes the hybrid binding anti-downgrade: an
+  on-path attacker who tampers with or drops the KEM frame breaks the handshake
+  (tamper → decapsulation yields an implicit-rejection secret → the re-PACK
+  confirm fails at the dialer → visible failure; drop → the dialer holds to
+  its connect timeout) instead of letting the session quietly fall back to
+  classical. A *stale* v5 string whose responder no longer holds the key fails
+  the same visible way — regenerate the string. The one honest downgrade rail
+  is the pre-existing v4→v3 fallback: a hybrid dialer that hears nothing for
+  the fallback window abandons the hybrid hold together with the v4 retry
+  (knock-configured targets never take that rail, which is why knock + hybrid
+  compose).
+- **Schedule mixing.** The ML-KEM shared secret joins the key schedule as a
+  labeled PSK slice exactly like the knock: IKM = `ee‖se‖es‖[knock-psk]‖[kem-psk]`
+  with `kem-psk = BLAKE3-DeriveKey("pinhole-mlkem768-psk-v1", ss)`. Every
+  derived key, salt, and confirm changes when the slice is present, both sides
+  derive it identically, and a classical-only peer derives different keys from
+  the same X25519 inputs — the session is confidential unless the adversary
+  breaks both X25519 and ML-KEM-768.
+- **Armor interplay.** A KEM from a conn-less stranger is dropped by the
+  no-conn gate (not a PUNC → silence, counted nowhere) — it is unsolicited
+  until a PUNC says otherwise. For an existing conn it must carry the dialer's
+  token (the same pre-keys token discipline as PACK) and is priced free like
+  every follow-on handshake frame; it never counts toward the cookie or ledger
+  windows (only PUNCs arm those), it is refused after the session confirms
+  (no supersede), and a flag-off or .NET 8 responder ignores it silently —
+  the classical handshake proceeds. TCP carries it inside the pre-auth
+  allowlist alongside PUNC/PACK/HSCK.
+- **Why 768 and not 1024.** X25519 is a ~128-bit classical ladder, so pairing
+  it with ML-KEM-768 (NIST category 3) matches strength the way the deployed
+  TLS/IKE hybrids (X25519MLKEM768) do; and 768's 1088-byte ciphertext keeps
+  the whole frame under the 1200-byte floor, while 1024's 1568-byte
+  ciphertext (1581-byte frame) would fragment on the same paths. Measured on
+  the dev machine (.NET 10 BCL): encapsulate ~16 µs, decapsulate ~24 µs,
+  keypair-from-seed ~48 µs once per process — noise next to a network RTT.
 
 **Rendezvous pricing (R5 final): address validation before large replies, the 3x
 rule, the per-source ledger.** The armor above gates *who may complete a
