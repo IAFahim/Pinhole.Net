@@ -26,13 +26,22 @@ public sealed class LanDiscoveryTests
 
         public IPEndPoint Local => (IPEndPoint)Sock.LocalEndPoint!;
 
+        public bool SendMulticastToWire = true;
+
         public void Send(ReadOnlySpan<byte> packet, IPEndPoint? unicastTo)
         {
             lock (Sent)
             {
                 Sent.Add((packet.ToArray(), unicastTo));
             }
-            Sock.SendTo(packet, SocketFlags.None, unicastTo ?? Group);
+            if (unicastTo is not null)
+            {
+                Sock.SendTo(packet, SocketFlags.None, unicastTo);
+            }
+            else if (SendMulticastToWire)
+            {
+                Sock.SendTo(packet, SocketFlags.None, Group);
+            }
         }
 
         public bool TryReceive(byte[] buffer, out int length, out IPEndPoint from, int timeoutMs)
@@ -377,12 +386,7 @@ public sealed class LanDiscoveryTests
     {
         ulong peerId = 0x0BAD_F00D_0000_0042;
         using var announcerSide = new DirectChannel();
-        using var sink = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        sink.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-        announcerSide.Group = (IPEndPoint)sink.LocalEndPoint!;
-        byte[] drain = new byte[2048];
-        EndPoint drainAny = new IPEndPoint(IPAddress.Any, 0);
-        _ = Task.Run(() => { try { while (true) sink.ReceiveFrom(drain, ref drainAny); } catch (SocketException) { } catch (ObjectDisposedException) { } });
+        announcerSide.SendMulticastToWire = false;
         using var announcer = new LanDiscovery(
             announcerSide, peerId, RandomNumberGenerator.GetBytes(32), () => [IPAddress.Parse("192.168.1.9")], 5353, NatHint.Cone);
 
