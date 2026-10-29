@@ -58,6 +58,13 @@ public sealed record PinholeOptions
 
     public byte[]? IdentityKeySeed { get; init; }
 
+    // The optional per-string secret (the knock). When set, the node's connection string
+    // carries it and ONLY string holders may complete a handshake: mac1 becomes keyed
+    // with a derivation of (static public key, knock), unversioned initiations are
+    // ignored, and the session keys mix the knock as a PSK. Raw bytes — a generated
+    // >=16-byte secret; the format bound is 1..64 and options enforce 8..64.
+    public byte[]? Knock { get; init; }
+
     public IReadOnlyList<IPEndPoint>? RendezvousEndpoints { get; init; }
 
     public IReadOnlyList<IPinholeLookupProvider>? LookupProviders { get; init; }
@@ -177,6 +184,14 @@ public sealed record PinholeOptions
             throw new ArgumentException("RelaySignalingOnly requires authenticated encrypted sessions", nameof(options));
         if (options.IdentityKeySeed is { Length: not NodeIdentity.KeyLength })
             throw new ArgumentOutOfRangeException(nameof(options), $"IdentityKeySeed must be {NodeIdentity.KeyLength} bytes");
+        if (options.Knock is { } knock)
+        {
+            if (knock.Length is < 8 or > ConnectionString.MaxKnockLength)
+                throw new ArgumentOutOfRangeException(nameof(options),
+                    $"Knock must be 8..{ConnectionString.MaxKnockLength} bytes — generate a >=16-byte secret, not a password-sized string");
+            if (options.Encryption == PinholeEncryption.Disabled)
+                throw new ArgumentException("a knock requires an encrypted node: the static public key keys its mac1", nameof(options));
+        }
         if (options.LookupProviders is { } providers && providers.Any(p => p is null))
             throw new ArgumentOutOfRangeException(nameof(options), "LookupProviders must not contain null entries");
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationIdle, TimeSpan.FromMilliseconds(50));

@@ -135,6 +135,26 @@ internal static class CryptoWire
         Blake3.HashKeyed(rotatingSecret, sourceAddress, digest);
         digest[..CookieLength].CopyTo(destination);
     }
+
+    // The knock (R5 phase 2 remainder): with a per-string secret configured, mac1 is no
+    // longer keyed with the raw static pub but with a domain-separated derivation of
+    // BOTH the static pub and the knock —
+    //   KnockMac1Key = BLAKE3-DeriveKey("pinhole-knock-mac1-v1", staticPub32 || knock)
+    // A dialer whose string carries the knock computes the same key; a scanner holding
+    // only the static pub cannot, and fails the same silent mac1 gate a random flood
+    // does. On the wire the frames are byte-shape identical to knock-less v4 — only the
+    // MAC key material differs.
+    public const string KnockMac1Label = "pinhole-knock-mac1-v1";
+
+    internal static ReadOnlySpan<byte> KnockMac1LabelBytes => "pinhole-knock-mac1-v1"u8;
+
+    public static void KnockMac1Key(Span<byte> destination, ReadOnlySpan<byte> responderStaticPub, ReadOnlySpan<byte> knock)
+    {
+        Span<byte> material = stackalloc byte[StaticKeyLength + ConnectionString.MaxKnockLength];
+        responderStaticPub.CopyTo(material);
+        knock.CopyTo(material[StaticKeyLength..]);
+        Blake3.HashDeriveKey(KnockMac1LabelBytes, material[..(StaticKeyLength + knock.Length)], destination);
+    }
 }
 
 internal sealed class NodeIdentity
@@ -200,6 +220,13 @@ internal static class KeySchedule
     public const string TranscriptLabel = "pinhole-hs1";
     public const string Info = "pinhole-session-v1";
     public const string RekeyInfo = "pinhole-rekey-v1";
+    // The knock rides the key schedule as a PSK block: a labeled BLAKE3 derivation of
+    // the secret appended to the DH ikm, so every output (keys, salts, confirm MACs)
+    // differs from a knock-less derivation. mac1 prices the string first; this makes
+    // the session itself unreachable without it.
+    public const string KnockPskLabel = "pinhole-knock-psk-v1";
+
+    private static ReadOnlySpan<byte> KnockPskLabelBytes => "pinhole-knock-psk-v1"u8;
 
     public static SessionKeys Derive(
         ulong myPeerId,
@@ -207,7 +234,8 @@ internal static class KeySchedule
         ReadOnlySpan<byte> myStaticPrivate,
         ulong peerPeerId,
         ReadOnlySpan<byte> peerEphPublic,
-        ReadOnlySpan<byte> peerStaticPublic)
+        ReadOnlySpan<byte> peerStaticPublic,
+        ReadOnlySpan<byte> knock = default)
     {
         bool iAmLo = myPeerId < peerPeerId;
         byte[] ee = NodeIdentity.X25519Agree(myEphPrivate, peerEphPublic);
@@ -220,10 +248,16 @@ internal static class KeySchedule
             ? NodeIdentity.X25519Agree(myEphPrivate, peerStaticPublic)
             : NodeIdentity.X25519Agree(myStaticPrivate, peerEphPublic);
 
-        var ikm = new byte[3 * NodeIdentity.KeyLength];
+        var ikm = new byte[3 * NodeIdentity.KeyLength + (knock.IsEmpty ? 0 : NodeIdentity.KeyLength)];
         ee.CopyTo(ikm, 0);
         se.CopyTo(ikm, NodeIdentity.KeyLength);
         es.CopyTo(ikm, 2 * NodeIdentity.KeyLength);
+        if (!knock.IsEmpty)
+        {
+            Span<byte> psk = stackalloc byte[NodeIdentity.KeyLength];
+            Blake3.HashDeriveKey(KnockPskLabelBytes, knock, psk);
+            psk.CopyTo(ikm.AsSpan(3 * NodeIdentity.KeyLength));
+        }
 
         byte[] myEphPublic = new X25519PrivateKeyParameters(myEphPrivate.ToArray(), 0).GeneratePublicKey().GetEncoded();
         byte[] myStaticPublic = new X25519PrivateKeyParameters(myStaticPrivate.ToArray(), 0).GeneratePublicKey().GetEncoded();
@@ -473,6 +507,7 @@ internal sealed class ConnectionCrypto
 {
     private readonly byte[] _ephPrivate;
     private readonly byte[] _staticPrivate;
+    private readonly byte[]? _knock; // the PSK: the string's knock when dialing, the engine's when answering
 
     public required ulong MyPeerId { get; init; }
     public required ulong PeerPeerId { get; init; }
@@ -488,7 +523,7 @@ internal sealed class ConnectionCrypto
     public long Rejected; // Interlocked: tampered, replayed, or downgraded frames dropped
 
     [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
-    private ConnectionCrypto(byte[] ephPrivate, byte[] ephPublic, byte[] staticPrivate, byte[] staticPublic, ulong myPeerId, ulong peerPeerId)
+    private ConnectionCrypto(byte[] ephPrivate, byte[] ephPublic, byte[] staticPrivate, byte[] staticPublic, ulong myPeerId, ulong peerPeerId, byte[]? knock)
     {
         _ephPrivate = ephPrivate;
         MyEphPublic = ephPublic;
@@ -496,12 +531,13 @@ internal sealed class ConnectionCrypto
         MyStaticPublic = staticPublic;
         MyPeerId = myPeerId;
         PeerPeerId = peerPeerId;
+        _knock = knock;
     }
 
-    public static ConnectionCrypto New(NodeIdentity identity, ulong myPeerId, ulong peerPeerId)
+    public static ConnectionCrypto New(NodeIdentity identity, ulong myPeerId, ulong peerPeerId, byte[]? knock = null)
     {
         (byte[] ephPrivate, byte[] ephPublic) = NodeIdentity.NewEphemeral();
-        return new ConnectionCrypto(ephPrivate, ephPublic, identity.ExportPrivateSeed(), identity.PublicKey, myPeerId, peerPeerId);
+        return new ConnectionCrypto(ephPrivate, ephPublic, identity.ExportPrivateSeed(), identity.PublicKey, myPeerId, peerPeerId, knock?.ToArray());
     }
 
     public bool Established => Keys is not null;
@@ -520,7 +556,7 @@ internal sealed class ConnectionCrypto
 
         try
         {
-            SessionKeys keys = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat);
+            SessionKeys keys = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock);
             PeerEphPublic = eph.ToArray();
             PeerStaticPublic = stat.ToArray();
             Keys = keys;
@@ -549,7 +585,7 @@ internal sealed class ConnectionCrypto
 
         try
         {
-            SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat);
+            SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock);
             ReadOnlySpan<byte> expected = MyPeerId < PeerPeerId ? trial.HiConfirm : trial.LoConfirm;
             if (!CryptographicOperations.FixedTimeEquals(confirm, expected))
             {

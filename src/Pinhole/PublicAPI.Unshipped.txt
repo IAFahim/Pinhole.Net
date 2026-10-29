@@ -296,6 +296,8 @@ Pinhole.PinholeOptions.Encryption.get -> Pinhole.PinholeEncryption
 Pinhole.PinholeOptions.Encryption.init -> void
 Pinhole.PinholeOptions.Equals(Pinhole.PinholeOptions? other) -> bool
 Pinhole.PinholeOptions.IdentityKeySeed.get -> byte[]?
+Pinhole.PinholeOptions.Knock.get -> byte[]?
+Pinhole.PinholeOptions.Knock.init -> void
 Pinhole.PinholeOptions.IdentityKeySeed.init -> void
 Pinhole.PinholeOptions.IrohRelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>?
 Pinhole.PinholeOptions.IrohRelayUrls.init -> void
