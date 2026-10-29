@@ -129,9 +129,10 @@ Pinhole.CandidateKind.Reflexive = 2 -> Pinhole.CandidateKind
 Pinhole.CandidateKind.Relay = 3 -> Pinhole.CandidateKind
 Pinhole.ConnectionString
 Pinhole.ConnectionString.Candidates.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>!
-Pinhole.ConnectionString.ConnectionString(ulong peerId, System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>! candidates, Pinhole.NatHint natHint = Pinhole.NatHint.Unknown, byte[]? staticKey = null, byte[]? endpointKey = null, byte[]? knock = null) -> void
+Pinhole.ConnectionString.ConnectionString(ulong peerId, System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>! candidates, Pinhole.NatHint natHint = Pinhole.NatHint.Unknown, byte[]? staticKey = null, byte[]? endpointKey = null, byte[]? knock = null, byte[]? mlKemKey = null) -> void
 Pinhole.ConnectionString.EndpointKey.get -> byte[]?
 Pinhole.ConnectionString.Knock.get -> byte[]?
+Pinhole.ConnectionString.MlKemKey.get -> byte[]?
 Pinhole.ConnectionString.NatHint.get -> Pinhole.NatHint
 Pinhole.ConnectionString.PeerId.get -> ulong
 Pinhole.ConnectionString.StaticKey.get -> byte[]?
@@ -298,6 +299,8 @@ Pinhole.PinholeOptions.Equals(Pinhole.PinholeOptions? other) -> bool
 Pinhole.PinholeOptions.IdentityKeySeed.get -> byte[]?
 Pinhole.PinholeOptions.Knock.get -> byte[]?
 Pinhole.PinholeOptions.Knock.init -> void
+Pinhole.PinholeOptions.HybridKeyExchange.get -> bool
+Pinhole.PinholeOptions.HybridKeyExchange.init -> void
 Pinhole.PinholeOptions.IdentityKeySeed.init -> void
 Pinhole.PinholeOptions.IrohRelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>?
 Pinhole.PinholeOptions.IrohRelayUrls.init -> void

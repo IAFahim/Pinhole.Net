@@ -60,6 +60,8 @@ public sealed record PinholeOptions
 
     public byte[]? Knock { get; init; }
 
+    public bool HybridKeyExchange { get; init; }
+
     public IReadOnlyList<IPEndPoint>? RendezvousEndpoints { get; init; }
 
     public IReadOnlyList<IPinholeLookupProvider>? LookupProviders { get; init; }
@@ -178,6 +180,8 @@ public sealed record PinholeOptions
             if (options.Encryption == PinholeEncryption.Disabled)
                 throw new ArgumentException("a knock requires an encrypted node: the static public key keys its mac1", nameof(options));
         }
+        if (options.HybridKeyExchange && options.Encryption == PinholeEncryption.Disabled)
+            throw new ArgumentException("hybrid key exchange requires an encrypted node: it extends the X25519 handshake", nameof(options));
         if (options.LookupProviders is { } providers && providers.Any(p => p is null))
             throw new ArgumentOutOfRangeException(nameof(options), "LookupProviders must not contain null entries");
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PathValidationIdle, TimeSpan.FromMilliseconds(50));

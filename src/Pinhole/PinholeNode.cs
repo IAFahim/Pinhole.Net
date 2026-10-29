@@ -114,7 +114,8 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         NatHint,
         _engine.StaticPublicKey,
         _engine.EndpointPublicKey,
-        _options.Knock).ToString();
+        _options.Knock,
+        _engine.MlKemPublicKey).ToString();
 
     public IrohAddress IrohAddress
     {

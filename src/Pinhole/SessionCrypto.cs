@@ -48,6 +48,8 @@ internal static class CryptoWire
     public const int CookieBody = TokenLength + 1 + CookieLength;
     public const int CookieFrameLength = HeaderLength + CookieBody;
 
+    public const int KemBody = TokenLength + HybridKem.CiphertextLength;
+
     public static void WriteMac1Ext(Span<byte> frame, ReadOnlySpan<byte> responderStaticPub)
     {
         frame[^Mac1ExtLength] = HandshakeV4Marker;
@@ -191,6 +193,10 @@ internal static class KeySchedule
 
     private static ReadOnlySpan<byte> KnockPskLabelBytes => "pinhole-knock-psk-v1"u8;
 
+    public const string MlKemPskLabel = "pinhole-mlkem768-psk-v1";
+
+    private static ReadOnlySpan<byte> MlKemPskLabelBytes => "pinhole-mlkem768-psk-v1"u8;
+
     public static SessionKeys Derive(
         ulong myPeerId,
         ReadOnlySpan<byte> myEphPrivate,
@@ -198,7 +204,8 @@ internal static class KeySchedule
         ulong peerPeerId,
         ReadOnlySpan<byte> peerEphPublic,
         ReadOnlySpan<byte> peerStaticPublic,
-        ReadOnlySpan<byte> knock = default)
+        ReadOnlySpan<byte> knock = default,
+        ReadOnlySpan<byte> mlkemSecret = default)
     {
         bool iAmLo = myPeerId < peerPeerId;
         byte[] ee = NodeIdentity.X25519Agree(myEphPrivate, peerEphPublic);
@@ -210,15 +217,26 @@ internal static class KeySchedule
             ? NodeIdentity.X25519Agree(myEphPrivate, peerStaticPublic)
             : NodeIdentity.X25519Agree(myStaticPrivate, peerEphPublic);
 
-        var ikm = new byte[3 * NodeIdentity.KeyLength + (knock.IsEmpty ? 0 : NodeIdentity.KeyLength)];
+        var ikm = new byte[3 * NodeIdentity.KeyLength
+            + (knock.IsEmpty ? 0 : NodeIdentity.KeyLength)
+            + (mlkemSecret.IsEmpty ? 0 : NodeIdentity.KeyLength)];
         ee.CopyTo(ikm, 0);
         se.CopyTo(ikm, NodeIdentity.KeyLength);
         es.CopyTo(ikm, 2 * NodeIdentity.KeyLength);
+        int tail = 3 * NodeIdentity.KeyLength;
         if (!knock.IsEmpty)
         {
             Span<byte> psk = stackalloc byte[NodeIdentity.KeyLength];
             Blake3.HashDeriveKey(KnockPskLabelBytes, knock, psk);
-            psk.CopyTo(ikm.AsSpan(3 * NodeIdentity.KeyLength));
+            psk.CopyTo(ikm.AsSpan(tail));
+            tail += NodeIdentity.KeyLength;
+        }
+
+        if (!mlkemSecret.IsEmpty)
+        {
+            Span<byte> psk = stackalloc byte[NodeIdentity.KeyLength];
+            Blake3.HashDeriveKey(MlKemPskLabelBytes, mlkemSecret, psk);
+            psk.CopyTo(ikm.AsSpan(tail));
         }
 
         byte[] myEphPublic = new X25519PrivateKeyParameters(myEphPrivate.ToArray(), 0).GeneratePublicKey().GetEncoded();
@@ -460,11 +478,16 @@ internal sealed class ConnectionCrypto
     private readonly byte[] _ephPrivate;
     private readonly byte[] _staticPrivate;
     private readonly byte[]? _knock;
+    private byte[]? _mlkemSecret;
 
     public required ulong MyPeerId { get; init; }
     public required ulong PeerPeerId { get; init; }
     public byte[] MyEphPublic { get; }
     public byte[] MyStaticPublic { get; }
+
+    public byte[]? MlKemCiphertext { get; }
+    public bool HybridPending => _mlkemSecret is not null;
+    public bool HybridLatched { get; private set; }
 
     public byte[]? PeerEphPublic { get; private set; }
     public byte[]? PeerStaticPublic { get; private set; }
@@ -475,7 +498,8 @@ internal sealed class ConnectionCrypto
     public long Rejected;
 
     [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
-    private ConnectionCrypto(byte[] ephPrivate, byte[] ephPublic, byte[] staticPrivate, byte[] staticPublic, ulong myPeerId, ulong peerPeerId, byte[]? knock)
+    private ConnectionCrypto(byte[] ephPrivate, byte[] ephPublic, byte[] staticPrivate, byte[] staticPublic,
+        ulong myPeerId, ulong peerPeerId, byte[]? knock, byte[]? mlkemSecret, byte[]? mlkemCiphertext)
     {
         _ephPrivate = ephPrivate;
         MyEphPublic = ephPublic;
@@ -484,15 +508,56 @@ internal sealed class ConnectionCrypto
         MyPeerId = myPeerId;
         PeerPeerId = peerPeerId;
         _knock = knock;
+        _mlkemSecret = mlkemSecret;
+        MlKemCiphertext = mlkemCiphertext;
     }
 
-    public static ConnectionCrypto New(NodeIdentity identity, ulong myPeerId, ulong peerPeerId, byte[]? knock = null)
+    public static ConnectionCrypto New(NodeIdentity identity, ulong myPeerId, ulong peerPeerId,
+        byte[]? knock = null, ReadOnlySpan<byte> mlKemPublicKey = default)
     {
         (byte[] ephPrivate, byte[] ephPublic) = NodeIdentity.NewEphemeral();
-        return new ConnectionCrypto(ephPrivate, ephPublic, identity.ExportPrivateSeed(), identity.PublicKey, myPeerId, peerPeerId, knock?.ToArray());
+        byte[]? mlkemSecret = null;
+        byte[]? mlkemCiphertext = null;
+        if (!mlKemPublicKey.IsEmpty)
+        {
+            if (!HybridKem.IsSupported || mlKemPublicKey.Length != HybridKem.PublicKeyLength)
+            {
+                throw new CryptographicException("the ticket's ML-KEM public key cannot be used for encapsulation");
+            }
+
+            (byte[] ciphertext, byte[] sharedSecret)? encapsulated = HybridKem.Encapsulate(mlKemPublicKey);
+            if (encapsulated is not { } pair)
+            {
+                throw new CryptographicException("ML-KEM encapsulation failed");
+            }
+
+            mlkemCiphertext = pair.ciphertext;
+            mlkemSecret = pair.sharedSecret;
+        }
+
+        return new ConnectionCrypto(ephPrivate, ephPublic, identity.ExportPrivateSeed(), identity.PublicKey,
+            myPeerId, peerPeerId, knock?.ToArray(), mlkemSecret, mlkemCiphertext);
     }
 
     public bool Established => Keys is not null;
+
+    public void AbandonHybridHold()
+    {
+        if (Keys is null)
+        {
+            _mlkemSecret = null;
+        }
+    }
+
+    private void LatchKeys(SessionKeys keys)
+    {
+        Keys = keys;
+        bool iAmLo = MyPeerId < PeerPeerId;
+        Send?.Dispose();
+        Recv?.Dispose();
+        Send = new FrameSealer(keys, iAmLo, sending: true);
+        Recv = new FrameSealer(keys, iAmLo, sending: false);
+    }
 
     public bool TryPeerKeys(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat)
     {
@@ -508,13 +573,10 @@ internal sealed class ConnectionCrypto
 
         try
         {
-            SessionKeys keys = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock);
+            SessionKeys keys = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock, _mlkemSecret);
             PeerEphPublic = eph.ToArray();
             PeerStaticPublic = stat.ToArray();
-            Keys = keys;
-            bool iAmLo = MyPeerId < PeerPeerId;
-            Send = new FrameSealer(keys, iAmLo, sending: true);
-            Recv = new FrameSealer(keys, iAmLo, sending: false);
+            LatchKeys(keys);
             return true;
         }
         catch (CryptographicException)
@@ -534,7 +596,7 @@ internal sealed class ConnectionCrypto
 
         try
         {
-            SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock);
+            SessionKeys trial = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock, _mlkemSecret);
             ReadOnlySpan<byte> expected = MyPeerId < PeerPeerId ? trial.HiConfirm : trial.LoConfirm;
             if (!CryptographicOperations.FixedTimeEquals(confirm, expected))
             {
@@ -543,12 +605,48 @@ internal sealed class ConnectionCrypto
 
             PeerEphPublic = eph.ToArray();
             PeerStaticPublic = stat.ToArray();
-            Keys = trial;
-            bool iAmLo = MyPeerId < PeerPeerId;
-            Send?.Dispose();
-            Recv?.Dispose();
-            Send = new FrameSealer(trial, iAmLo, sending: true);
-            Recv = new FrameSealer(trial, iAmLo, sending: false);
+            LatchKeys(trial);
+            Interlocked.Increment(ref SupersededLatches);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+    }
+
+    public bool ClassicalConfirmMatches(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm)
+    {
+        if (_mlkemSecret is null || Keys is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            SessionKeys classical = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId, eph, stat, _knock);
+            ReadOnlySpan<byte> expected = MyPeerId < PeerPeerId ? classical.HiConfirm : classical.LoConfirm;
+            return CryptographicOperations.FixedTimeEquals(confirm, expected);
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+    }
+
+    public bool TryUpgradeHybrid(ReadOnlySpan<byte> mlkemSecret)
+    {
+        if (Keys is null || PeerEphPublic is null || PeerStaticPublic is null || PeerConfirmed || HybridLatched)
+        {
+            return false;
+        }
+
+        try
+        {
+            SessionKeys hybrid = KeySchedule.Derive(MyPeerId, _ephPrivate, _staticPrivate, PeerPeerId,
+                PeerEphPublic, PeerStaticPublic, _knock, mlkemSecret);
+            LatchKeys(hybrid);
+            HybridLatched = true;
             Interlocked.Increment(ref SupersededLatches);
             return true;
         }
