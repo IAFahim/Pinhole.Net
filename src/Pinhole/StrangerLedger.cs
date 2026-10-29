@@ -14,6 +14,7 @@ internal sealed class StrangerLedger
     private readonly byte[][] _sourceKeys = new byte[MaxSources][];
     private readonly long[] _sourceWindowStart = new long[MaxSources];
     private readonly int[] _sourceCount = new int[MaxSources];
+    private readonly uint[] _sourceTokens = new uint[MaxSources];
     private int _sourceFill;
 
     public StrangerLedger(Func<long>? clock = null)
@@ -32,17 +33,23 @@ internal sealed class StrangerLedger
         }
     }
 
-    public bool TryCharge(ReadOnlySpan<byte> sourceKey, long now)
+    public bool TryCharge(ReadOnlySpan<byte> sourceKey, long now, uint token)
     {
         lock (_gate)
         {
             int slot = FindOrAdd(sourceKey, now);
+            if (token != 0 && token == _sourceTokens[slot])
+            {
+                return true;
+            }
+
             if (_sourceCount[slot] >= PricedRepliesPerWindow)
             {
                 return false;
             }
 
             _sourceCount[slot]++;
+            _sourceTokens[slot] = token;
             return true;
         }
     }
@@ -57,6 +64,7 @@ internal sealed class StrangerLedger
                 {
                     _sourceWindowStart[i] = now;
                     _sourceCount[i] = 0;
+                    _sourceTokens[i] = 0;
                     return;
                 }
             }
@@ -78,6 +86,7 @@ internal sealed class StrangerLedger
         _sourceKeys[slot] = sourceKey.ToArray();
         _sourceWindowStart[slot] = now;
         _sourceCount[slot] = 0;
+        _sourceTokens[slot] = 0;
         return slot;
     }
 
@@ -87,6 +96,7 @@ internal sealed class StrangerLedger
         {
             _sourceWindowStart[slot] = now;
             _sourceCount[slot] = 0;
+            _sourceTokens[slot] = 0;
         }
     }
 

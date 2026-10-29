@@ -120,7 +120,7 @@ internal sealed class LanDiscovery : IDisposable
         Span<byte> key = stackalloc byte[address.Length + 2];
         address.AsSpan().CopyTo(key);
         BinaryPrimitives.WriteUInt16BigEndian(key[address.Length..], (ushort)from.Port);
-        return _unicastLedger.TryCharge(key, Environment.TickCount64);
+        return _unicastLedger.TryCharge(key, Environment.TickCount64, 0);
     }
 
     private (string Key, string Value)[] TxtEntries()

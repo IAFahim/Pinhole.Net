@@ -2826,7 +2826,8 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             if (strangerDirectSource
-                && !_strangerLedger.TryCharge(strangerSourceKey[..strangerLedgerKeyLength], Environment.TickCount64))
+                && !_strangerLedger.TryCharge(strangerSourceKey[..strangerLedgerKeyLength], Environment.TickCount64,
+                    BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..])))
             {
                 Interlocked.Increment(ref _ledgerRefused);
                 Telemetry.FrameRejected("handshake", "ledger");
@@ -3122,7 +3123,8 @@ internal sealed partial class NodeEngine : IDisposable
                     sessionCompleted: sessionCompleted, arrival,
                     puncSourceKey, out _);
             bool pricedReplyBlocked = !strangerAdmitted && !sessionCompleted && puncDirectSource
-                && !_strangerLedger.TryCharge(puncSourceKey[..puncSourceKeyLength], Environment.TickCount64);
+                && !_strangerLedger.TryCharge(puncSourceKey[..puncSourceKeyLength], Environment.TickCount64,
+                    BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]));
             if (pricedReplyBlocked)
             {
                 Interlocked.Increment(ref _ledgerRefused);

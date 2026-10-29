@@ -59,23 +59,45 @@ public sealed class HandshakeRendezvousTests
         var ledger = new StrangerLedger(() => now);
         byte[] source = [0x11, 0x22, 0x33, 0x44];
 
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.False(ledger.TryCharge(source, now), "the fourth priced reply inside one window must be refused");
-        Assert.False(ledger.TryCharge(source, now + StrangerLedger.WindowMs - 1), "the window has not rolled");
+        Assert.True(ledger.TryCharge(source, now, token: 0x100));
+        Assert.True(ledger.TryCharge(source, now, token: 0x200));
+        Assert.True(ledger.TryCharge(source, now, token: 0x300));
+        Assert.False(ledger.TryCharge(source, now, token: 0x400), "the fourth priced reply inside one window must be refused");
+        Assert.False(ledger.TryCharge(source, now + StrangerLedger.WindowMs - 1, token: 0x500), "the window has not rolled");
 
         now += StrangerLedger.WindowMs + 1;
-        Assert.True(ledger.TryCharge(source, now), "a rolled window admits again");
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.False(ledger.TryCharge(source, now));
+        Assert.True(ledger.TryCharge(source, now, token: 0x600), "a rolled window admits again");
+        Assert.True(ledger.TryCharge(source, now, token: 0x700));
+        Assert.True(ledger.TryCharge(source, now, token: 0x800));
+        Assert.False(ledger.TryCharge(source, now, token: 0x900));
 
         ledger.NoteValidated(source, now);
-        Assert.True(ledger.TryCharge(source, now), "validation resets the budget");
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.True(ledger.TryCharge(source, now));
-        Assert.False(ledger.TryCharge(source, now));
+        Assert.True(ledger.TryCharge(source, now, token: 0xA00), "validation resets the budget");
+        Assert.True(ledger.TryCharge(source, now, token: 0xB00));
+        Assert.True(ledger.TryCharge(source, now, token: 0xC00));
+        Assert.False(ledger.TryCharge(source, now, token: 0xD00));
+    }
+
+    [Fact]
+    public void StrangerLedger_RetransmittedPuncsOfTheSameHandshakeDrawNothing()
+    {
+        long now = 2_000_000;
+        var ledger = new StrangerLedger(() => now);
+        byte[] source = [0x55, 0x66];
+
+        Assert.True(ledger.TryCharge(source, now, token: 0x4242_4242));
+        for (int i = 0; i < 12; i++)
+        {
+            Assert.True(ledger.TryCharge(source, now + 100 + i, token: 0x4242_4242),
+                "a retransmit of the same initiation is the same dialog, not a new bill");
+        }
+
+        Assert.True(ledger.TryCharge(source, now + 2_000, token: 0x5151_5151));
+        Assert.True(ledger.TryCharge(source, now + 3_000, token: 0x6161_6161));
+        Assert.False(ledger.TryCharge(source, now + 4_000, token: 0x7171_7171),
+            "distinct initiations still spend the window budget");
+        Assert.True(ledger.TryCharge(source, now + 5_000, token: 0x6161_6161),
+            "the latest dialog's retransmit still rides free");
     }
 
     [Fact]
@@ -88,16 +110,16 @@ public sealed class HandshakeRendezvousTests
 
         for (int i = 0; i < StrangerLedger.PricedRepliesPerWindow; i++)
         {
-            Assert.True(ledger.TryCharge(a, now));
+            Assert.True(ledger.TryCharge(a, now, token: (uint)(0x10 + i)));
         }
 
-        Assert.False(ledger.TryCharge(a, now));
-        Assert.True(ledger.TryCharge(b, now), "a fresh source has its own budget");
+        Assert.False(ledger.TryCharge(a, now, token: 0x99));
+        Assert.True(ledger.TryCharge(b, now, token: 0x1), "a fresh source has its own budget");
 
         for (int i = 0; i < 4 * StrangerLedger.MaxSources; i++)
         {
             Span<byte> key = [0xC0, (byte)(i >> 8), (byte)i];
-            ledger.TryCharge(key, now);
+            ledger.TryCharge(key, now, token: (uint)i);
             Assert.True(ledger.TrackedSources <= StrangerLedger.MaxSources, "the source table must stay bounded");
         }
     }
@@ -160,7 +182,7 @@ public sealed class HandshakeRendezvousTests
         const int flood = 16;
         for (int i = 0; i < flood; i++)
         {
-            attacker.SendTo(V4Punc(FakePeer, 0x1234_5678, eph, stat, listenerKey), SocketFlags.None, listenerWire);
+            attacker.SendTo(V4Punc(FakePeer, (uint)(0x1234_0000 + i), eph, stat, listenerKey), SocketFlags.None, listenerWire);
         }
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => listener.Engine.StrangerLedgerRefused >= 1);

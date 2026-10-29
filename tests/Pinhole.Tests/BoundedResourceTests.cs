@@ -427,11 +427,19 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         packJunk[0] = 0x51;
         BinaryPrimitives.WriteUInt64LittleEndian(packJunk.AsSpan(1), 0xCAFE_BABE_CAFE_BABE);
 
-        for (int i = 0; i < 40; i++) Send(v4Punc);
+        for (int i = 0; i < 40; i++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(v4Punc.AsSpan(9), (uint)(0x1234_0000 + i));
+            Send(v4Punc);
+        }
         received += DrainQuiet();
         Assert.True(listener.Engine.StrangerLedgerSources <= StrangerLedger.MaxSources, "ledger bounded mid-barrage (v4 phase)");
 
-        for (int i = 0; i < 40; i++) Send(v3Punc);
+        for (int i = 0; i < 40; i++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(v3Punc.AsSpan(9), (uint)(0x8765_0000 + i));
+            Send(v3Punc);
+        }
         received += DrainQuiet();
         Assert.True(listener.Engine.StrangerLedgerSources <= StrangerLedger.MaxSources, "ledger bounded mid-barrage (v3 phase)");
         Assert.True(listener.Engine.CookieLoadSources <= 64, "cookie table bounded mid-barrage");
