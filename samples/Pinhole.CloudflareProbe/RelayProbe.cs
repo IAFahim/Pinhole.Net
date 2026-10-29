@@ -107,7 +107,7 @@ internal static class RelayProbe
         var parsed = ConnectionString.Parse(node.ConnectionString);
         var relays = parsed.Candidates.Where(c => c.Kind == CandidateKind.Relay && server.Equals(c.RelayServer)).ToArray();
         if (relays.Length == 0) throw new ProbeFailure("FAIL", "NO_CLOUDFLARE_RELAY_CANDIDATE");
-        return new ConnectionString(parsed.PeerId, relays, parsed.NatHint, parsed.StaticKey, parsed.EndpointKey).ToString();
+        return new ConnectionString(parsed.PeerId, relays, parsed.NatHint, parsed.StaticKey, parsed.EndpointKey, parsed.Knock).ToString();
     }
 
     private static void RequireEncryptedRelay(PinholeConnection a, PinholeConnection b)
