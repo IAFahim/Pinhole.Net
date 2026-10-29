@@ -69,6 +69,7 @@ internal sealed class ConnState
     public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
     public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
     public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
+    public byte[]? PinnedKnock;              // the v4 connection string's knock (dial side; the string promised a knock-configured peer)
     public bool Announced;
     public long LastKickTicks = Environment.TickCount64; // monotonic: suspend-proof punch budget
     public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
@@ -260,6 +261,16 @@ internal sealed partial class NodeEngine : IDisposable
     private readonly CookieArmor? _cookieArmor;
     internal int CookieLoadSources => _cookieArmor?.TrackedSources ?? 0;
     internal bool HandshakeV4Active => !LegacyHandshakeV3Only && _identity is not null;
+    // The configured knock and, precomputed, the own-static mac1 key under it. When set,
+    // ONLY string holders may connect: mac1 must verify under knock-keyed material and
+    // unversioned (v3) initiations are ignored outright — the operator closed the v3
+    // support window for this node unilaterally.
+    internal byte[]? Knock => _knock;
+    private readonly byte[]? _knock;
+    private readonly byte[]? _knockMac1Key;
+    // The mac1 key own-side frames verify against: knock-keyed when configured, the raw
+    // static pub otherwise.
+    private ReadOnlySpan<byte> OwnMac1Key => _knockMac1Key ?? _identity!.PublicKey;
     // A v4 dialer that has sent PUNCs and heard nothing for this long assumes a v3-only
     // responder (which ignores the unknown frame shape) and falls back to unversioned
     // retries, exactly once — the blob layer's first-answer-timeout fallback discipline.
@@ -286,6 +297,17 @@ internal sealed partial class NodeEngine : IDisposable
         _options = options;
         _maxConns = options.MaxConnectionsOverride ?? MaxConnections;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
+        // The knock is shell-side key material: the raw bytes never leave except inside
+        // the node's own connection string, and the own-static mac1 key under knock is
+        // derived once here instead of per frame.
+        _knock = options.Knock?.ToArray();
+        if (_knock is not null && _identity is not null)
+        {
+            Span<byte> key = stackalloc byte[NodeIdentity.KeyLength];
+            CryptoWire.KnockMac1Key(key, _identity.PublicKey, _knock);
+            _knockMac1Key = key.ToArray();
+        }
+
         _cookieArmor = _identity is not null ? new CookieArmor() : null;
         _incoming = options.Listen ? Channel.CreateUnbounded<ConnState>() : null;
         if (options.RendezvousEndpoints is { Count: > 0 } || options.LookupProviders is { Count: > 0 })
@@ -1527,11 +1549,13 @@ internal sealed partial class NodeEngine : IDisposable
                 && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay),
             // Crypto is attempted exactly when the string vouches for a static key: a v2
             // string's publisher speaks the handshake, a v1 string's does not, so nothing is
-            // negotiated on the wire — no downgrade window exists to strip.
+            // negotiated on the wire — no downgrade window exists to strip. A v4 string's
+            // knock rides along as the dial-side PSK and the mac1 key derivation input.
             PinnedStaticKey = _identity is not null && cs.StaticKey is not null ? cs.StaticKey : null,
             PinnedEndpointKey = cs.EndpointKey,
+            PinnedKnock = cs.Knock,
             Crypto = _identity is not null && cs.StaticKey is not null
-                ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId)
+                ? ConnectionCrypto.New(_identity, _peerId, cs.PeerId, cs.Knock)
                 : null,
         };
         c.Buffer = CreateBuffer();
@@ -1587,6 +1611,7 @@ internal sealed partial class NodeEngine : IDisposable
                             existing.DialAdoptedIncoming = true;
                             existing.PinnedStaticKey = cs.StaticKey;
                             existing.PinnedEndpointKey = cs.EndpointKey;
+                            existing.PinnedKnock = cs.Knock;
                             existing.SymmetricHint = cs.NatHint == NatHint.Symmetric;
                         }
                     }
@@ -1684,7 +1709,9 @@ internal sealed partial class NodeEngine : IDisposable
             Token = BinaryPrimitives.ReadUInt32LittleEndian(RandomNumberGenerator.GetBytes(4)),
             IsIncoming = true,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly && arrival.ViaRelay,
-            Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId) : null,
+            // Answering under the engine's own knock: the dialer holds it from this
+            // node's string, so both sides of the session mix the same PSK.
+            Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId, _knock) : null,
         };
         c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
         c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
@@ -1840,8 +1867,11 @@ internal sealed partial class NodeEngine : IDisposable
                 // sent PUNCs and heard no handshake frame back for the fallback window
                 // assumes a v3-only responder silently dropping the unknown shape, and
                 // downgrades to the unversioned frame. Exactly once per connection — the
-                // latch persists, like BlobNegotiation's v4→v3 fallback.
-                if (c.PuncFrameV4 && !c.PuncFrameDowngraded && state == PinholeConnectionState.Punching)
+                // latch persists, like BlobNegotiation's v4→v3 fallback. A knock string
+                // never downgrades: its responder is knock-configured by construction and
+                // ignores unversioned PUNCs, so v3 retries can only waste the window.
+                if (c.PuncFrameV4 && !c.PuncFrameDowngraded && c.PinnedKnock is null
+                    && state == PinholeConnectionState.Punching)
                 {
                     long first = Volatile.Read(ref c.FirstPuncTicks);
                     if (first != 0 && now - first > HandshakeV4FallbackMs
@@ -2918,6 +2948,17 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
+            // Knock policy: a knock-configured responder answers string holders only.
+            // Unversioned PUNCs — legacy and crypto shapes alike — carry no mac1 to prove
+            // the knock, and the responder cannot tell an honest v3 dialer from a
+            // scanner, so both shapes are ignored before the encryption policy, the
+            // cookie gate, or any state. Not counted, not answered: the operator closed
+            // this node's v3 support window.
+            if (_knock is not null && !v4 && !v4Mac2)
+            {
+                return;
+            }
+
             if ((legacy && _options.Encryption == PinholeEncryption.Required)
                 || (crypto && _options.Encryption == PinholeEncryption.Disabled))
             {
@@ -2925,9 +2966,10 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             // The armor gate for strangers: an extension frame must prove mac1 (keyed with
-            // our own static public key — no lookup, no state) BEFORE any connection is
-            // created and before any key agreement could run. Failure is silence.
-            if ((v4 || v4Mac2) && !CryptoWire.VerifyMac1(CryptoWire.Mac1View(frame), _identity!.PublicKey))
+            // our own static public key — knock-keyed when a knock is configured — no
+            // lookup, no state) BEFORE any connection is created and before any key
+            // agreement could run. Failure is silence.
+            if ((v4 || v4Mac2) && !CryptoWire.VerifyMac1(CryptoWire.Mac1View(frame), OwnMac1Key))
             {
                 Interlocked.Increment(ref _mac1Refused);
                 Telemetry.FrameRejected("handshake", "mac1");
@@ -3086,11 +3128,53 @@ internal sealed partial class NodeEngine : IDisposable
     // outgoing connection keying with its peer's pin) — both keys are public material, so
     // widening to "either endpoint's key" still filters everything random. A mac2-carrying
     // frame is read through its mac1 view, so the verdict never depends on mac2's presence.
+    //
+    // Under a knock, both keys become knock-keyed derivations: a string that carries a
+    // knock accepts ONLY its knock-keyed pin (the raw-pin form is a knock-less impostor),
+    // and the own-key fallback verifies under the own knock exactly when this engine is
+    // knock-configured — the crossed-dial peer dials us with our string, knock included.
+    // A knock-less engine dialing a knock-configured peer keeps the raw pin, and its own
+    // fallback stays raw: each side keys with the responder-of-the-string's material.
     private bool Mac1OkForConn(ConnState c, ReadOnlySpan<byte> frame)
     {
         ReadOnlySpan<byte> mac1Frame = CryptoWire.Mac1View(frame);
-        return c.PinnedStaticKey is { } pin && CryptoWire.VerifyMac1(mac1Frame, pin)
-            || CryptoWire.VerifyMac1(mac1Frame, _identity!.PublicKey);
+        if (c.PinnedStaticKey is { } pin)
+        {
+            if (c.PinnedKnock is { } knock)
+            {
+                Span<byte> key = stackalloc byte[NodeIdentity.KeyLength];
+                CryptoWire.KnockMac1Key(key, pin, knock);
+                return CryptoWire.VerifyMac1(mac1Frame, key);
+            }
+
+            if (CryptoWire.VerifyMac1(mac1Frame, pin))
+            {
+                return true;
+            }
+        }
+
+        return CryptoWire.VerifyMac1(mac1Frame, OwnMac1Key);
+    }
+
+    // The mac1 key this connection's outbound frames are keyed with (BuildPunc's half of
+    // Mac1OkForConn's verdict): the string's pin — knock-keyed when the string carried a
+    // knock — when we dialed, and our own static knock-keyed exactly when the engine is
+    // knock-configured, for the answer side and the adopted-incoming dial alike.
+    private byte[] Mac1KeyFor(ConnState c)
+    {
+        if (c.PinnedStaticKey is { } pin)
+        {
+            if (c.PinnedKnock is { } knock)
+            {
+                Span<byte> key = stackalloc byte[NodeIdentity.KeyLength];
+                CryptoWire.KnockMac1Key(key, pin, knock);
+                return key.ToArray();
+            }
+
+            return pin;
+        }
+
+        return OwnMac1Key.ToArray();
     }
 
     private const int MaxSocketAddressBytes = 32; // the IPv6 SocketAddress wire form tops out at 28
@@ -3195,6 +3279,14 @@ internal sealed partial class NodeEngine : IDisposable
         bool v4PuncMac2 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4Mac2;
         if (frame.Length is not (HeaderSize + CryptoWire.PuncLegacyBody or HeaderSize + CryptoWire.PuncCryptoBody)
             && !v4Punc && !v4PuncMac2)
+        {
+            return;
+        }
+
+        // Knock policy, conn'd form of the stranger gate: under a knock, unversioned
+        // PUNCs are ignored on an existing connection exactly as for strangers — an
+        // honest knock holder never sends them, and nobody else may connect at all.
+        if (_knock is not null && !v4Punc && !v4PuncMac2)
         {
             return;
         }
@@ -3343,7 +3435,7 @@ internal sealed partial class NodeEngine : IDisposable
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
             if (v4Reply)
             {
-                CryptoWire.WriteMac1Ext(pack, _identity!.PublicKey);
+                CryptoWire.WriteMac1Ext(pack, OwnMac1Key);
             }
 
             SendOnArrival(arrival, pack);
@@ -3410,7 +3502,12 @@ internal sealed partial class NodeEngine : IDisposable
         {
             // Same gate as OnPunc, same position: the shell computes the keyed-MAC
             // verdict, the machine refuses silently before the echo is even examined.
-            bool mac1Ok = !v4Pack || Mac1OkForConn(c, frame);
+            // A dial whose string carried a knock was promised a knock-configured v4
+            // peer, so a crypto PACK without the mac1 extension is priced as a failed
+            // mac1 (a knock-less impostor, or a truncation stripping the tail) — the
+            // verdict rides the machine's existing RejectMac1 silence.
+            bool promisedKnockMac1 = c.PinnedKnock is not null && cryptoPack;
+            bool mac1Ok = !v4Pack && !promisedKnockMac1 || Mac1OkForConn(c, frame);
 
             bool pinMatches = true;
             if (cryptoPack && c.PinnedStaticKey is { } pinned)
@@ -3424,7 +3521,7 @@ internal sealed partial class NodeEngine : IDisposable
             input.PinMatches = pinMatches;
             input.BodyPlausible = true; // the length floor check above already returned
             input.LengthClassOk = lengthOk;
-            input.Mac1Present = v4Pack;
+            input.Mac1Present = v4Pack || promisedKnockMac1;
             input.Mac1Ok = mac1Ok;
             input.FrameToken = echo;
             input.PeerToken = peerToken;
@@ -4843,15 +4940,19 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 // The answering node's static key keys mac1: the pin when we dialed, our
                 // own when we answer (this connection was born from the peer's PUNC).
-                // With mac2 appended, mac1 is written over its own view of the frame.
+                // Knock-aware on both sides — the string's knock keys the pin, our own
+                // config keys our static — so a knock-configured responder's PUNCs are
+                // indistinguishable on the wire from a knock-less node's. With mac2
+                // appended, mac1 is written over its own view of the frame.
+                byte[] mac1Key = Mac1KeyFor(c);
                 if (mac2Key is { } cookie)
                 {
-                    CryptoWire.WriteMac1Ext(frame.AsSpan()[..^CryptoWire.Mac2ExtLength], c.PinnedStaticKey ?? _identity!.PublicKey);
+                    CryptoWire.WriteMac1Ext(frame.AsSpan()[..^CryptoWire.Mac2ExtLength], mac1Key);
                     CryptoWire.WriteMac2Ext(frame, cookie);
                 }
                 else
                 {
-                    CryptoWire.WriteMac1Ext(frame, c.PinnedStaticKey ?? _identity!.PublicKey);
+                    CryptoWire.WriteMac1Ext(frame, mac1Key);
                 }
             }
         }
