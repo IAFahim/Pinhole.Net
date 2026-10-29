@@ -385,7 +385,9 @@ public sealed class HandshakeKnockTests
 
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         conn.Received += p => got.TrySetResult(p.ToArray());
-        listener.Connections.First(l => l.PeerId == dialer.PeerId).Send("through the knock wall"u8);
+        PinholeConnection atListener = listener.Connections.First(l => l.PeerId == dialer.PeerId);
+        await TestPoll.UntilAsync(Timeout, () => atListener.State == PinholeConnectionState.Open);
+        atListener.Send("through the knock wall"u8);
         Assert.Equal("through the knock wall"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
