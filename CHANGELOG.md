@@ -1,6 +1,34 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — rendezvous hardening: priced stranger replies (#49 R5 final)
+
+The rendezvous rules close the last unpriced surface: what a stranger may
+extract from a node before it validates. The candidate announce and the PMTU
+floor-ping probe no longer ride a PUNC answer — they wait for the peer's first
+confirmed frame (HSCK or PACK-confirm, both of which already trigger them, so an
+honest dial loses no round trips), which removes the only unbounded replies a
+77-byte spoofed PUNC could draw (a sealed candidate list with relay credentials,
+plus a ~1237-byte introduction ping). A per-source ledger (`StrangerLedger`, the
+CookieArmor table pattern: 64 sources, coldest-window eviction, 10 s windows)
+admits at most 3 priced replies — PACK-class answers including the DH and state
+they pay for — per direct-UDP source per window; the refusal is the machine's
+(`PricedReplyBlocked` → `RejectPricedReply`, sequenced after mac1 and the cookie
+demand): silence, no state, no key agreement, counted in `StrangerLedgerRefused`.
+COOKIE replies stay exempt so a flood keeps arming the cookie load windows and
+still earns its 30-byte answers; a source that validates (HSCK/sealed frame
+verifies) resets its budget, and a confirmed peer's retransmissions are never
+charged. LAN-discovery unicast query answers draw from the same 3-per-window
+per-source cap. The UDP introducer prices its records the way GETC always has:
+a bare `WANT` earns a CHAL plus endpoint-only INTROs, and the 1 KiB lookup
+record travels only after the source answers the challenge — the SDK's
+`RendezvousLookup` resolves it automatically (one extra round trip per source
+per minute). The raw PeerSocket signal path (OBS/INTRO) now accepts signals
+only from configured rendezvous servers (audit C-12). Rules, bounds and the
+honest-dial cost (at most one spent 10 s window when a first volley's every PACK
+is lost): `docs/WIRE.md` §"Rendezvous pricing"; gates: `HandshakeRendezvousTests`,
+`StrangerBarrage_NeverAmplifies_AndHoldsTheSourceLedger`.
+
 ## 1.10.0 (unreleased) — handshake armor: the knock PSK (#49 R5 phase 2)
 
 A node MAY configure a per-string secret (`PinholeOptions.Knock`, 8..64 raw bytes
