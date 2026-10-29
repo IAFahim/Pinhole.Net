@@ -131,6 +131,10 @@ internal sealed class InterfaceUdpTransport : IDisposable
     {
 
         if (IPAddress.IsLoopback(remote.Address) || remote.Address.IsIPv6LinkLocal) return;
+        if (frame.Length > 0 && frame[0] is not ((byte)FrameType.Punc or (byte)FrameType.Kem))
+        {
+            return;
+        }
         AddressFamily family = remote.Address.IsIPv4MappedToIPv6 ? AddressFamily.InterNetwork : remote.AddressFamily;
         IPEndPoint mapped = family == AddressFamily.InterNetwork && !remote.Address.IsIPv4MappedToIPv6
             ? new(remote.Address.MapToIPv6(), remote.Port) : remote;

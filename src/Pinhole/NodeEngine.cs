@@ -3820,8 +3820,18 @@ internal sealed partial class NodeEngine : IDisposable
             }
             else if (arrival.Direct is { } direct)
             {
-                if (arrival.UdpSocket is { } socket) socket.SendTo(frame, direct);
-                else SendToWire(direct, frame);
+                bool unsealedHandshakeFrame = frame.Length > 0 && frame[0]
+                    is (byte)FrameType.Punc or (byte)FrameType.Pack or (byte)FrameType.Hsck
+                        or (byte)FrameType.Cookie or (byte)FrameType.Kem;
+                bool viaInterfaceSlot = arrival.UdpSocket is { } candidate && _interfaceUdp?.Contains(candidate) == true;
+                if (arrival.UdpSocket is { } socket && (!viaInterfaceSlot || unsealedHandshakeFrame))
+                {
+                    socket.SendTo(frame, direct);
+                }
+                else
+                {
+                    SendToWire(direct, frame);
+                }
             }
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)

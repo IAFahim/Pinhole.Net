@@ -1,6 +1,28 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — direct-path adoption stops chasing interface-slot endpoints
+
+Multi-homed hosts punch from per-interface UDP sockets alongside the main one;
+punch probes are deliberately duplicated from every interface so a hole opens
+wherever one exists. The bug: any frame whose arrival could confirm a path also
+adopted its SOURCE as the connection's direct endpoint — so a punch copy that
+happened to leave a slot socket (or a reply that a slot socket carried back)
+pinned the session to that socket's ephemeral port. The slot is owned by the
+interface refresh and can be retired at any moment; frames sent to a retired
+port vanish silently (unconnected UDP sendto still succeeds), and the conn sat
+Open on a dead remote until a fresh inbound frame re-taught the endpoint — the
+first listener-to-dialer payload after Open was lost roughly every fifth dial
+under load, exactly the `KnockDialerUnderCookieLoad` CI flake. Now sealed frames
+(path-confirming evidence) never source from an interface slot: `SendOnArrival`
+reroutes them through the main socket, and `SendCandidates` duplicates only the
+unsealed punch families (PUNC/KEM). Slot sockets keep delivering everything
+inbound (the alternate-interface data path is a feature and stays tested), and
+unsealed handshake replies still exit the arrival's own socket for NAT-hole
+consistency. Gates: `KnockDialerUnderCookieLoad_CompletesWithTheMac2RoundTrip`
+hammered 55/55 under 4-core synthetic load (was 1-in-5 failing locally, failing
+on all three CI OSes); interface suites unchanged.
+
 ## 1.10.0 (unreleased) — rendezvous hardening: priced stranger replies (#49 R5 final)
 
 The rendezvous rules close the last unpriced surface: what a stranger may
