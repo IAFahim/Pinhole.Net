@@ -113,8 +113,23 @@ Bounds: ≤4096 codes, code records ≤8 KiB base64url,
 codes 4–16 ASCII chars, TTL sweep, oldest-eviction at capacity. The
 directory stores and forwards records without validating them — the
 authentication always happens in the dialer's handshake, never at the
-coordinator. Nothing about the existing REG/WANT/INTRO protocol changed.
-Peer-ID lookup records retain their 1 KiB limit. Code records carry a whole
+coordinator. The peer-id side of the same socket now prices its large
+replies the same way GETC always has:
+
+- `WANT <me> <target>` → when the target is registered: `CHAL <target>
+  <cookie>` plus a bare-endpoint `INTRO <target> <ep>` (both well under 3x
+  the request's size) — the record itself is withheld until the requester's
+  source is validated; `WAIT <target>` when absent, with the waiter parked.
+- `WANT <me> <target> <cookie>` → with the cookie bound to the requester's
+  endpoint and the target: the full `INTRO <target> <b64url-record>`, and
+  the waiter it parks earns record-carrying intros when the target
+  registers. A bad cookie is re-challenged, never answered with a record.
+
+Records therefore never travel to a spoofable source: a 35-byte forged WANT
+can no longer aim a 1 KiB record at a victim. The SDK's lookup provider
+answers the challenge automatically (one extra round trip per source per
+minute); legacy endpoint-only clients (PeerSocket) are unaffected. Peer-ID
+lookup records retain their 1 KiB limit. Code records carry a whole
 connection string wrapped in base64url, so the larger bound accommodates
 both default HTTPS relay fleets. The SDK validates decoded invitations against
 the connection string's 8192-character limit. Upgrade the code-directory server

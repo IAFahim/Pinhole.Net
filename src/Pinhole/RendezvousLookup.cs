@@ -41,13 +41,13 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
 
     public async Task<byte[]?> ResolveAsync(ulong peerId, CancellationToken ct)
     {
-        string message = $"WANT {_selfId:x16} {peerId:x16}";
+        string wantMessage = $"WANT {_selfId:x16} {peerId:x16}";
         using Socket udp = NewSocket();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(ResolveWait);
         foreach (IPEndPoint server in _servers)
         {
-            await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, ToWire(server), deadline.Token).ConfigureAwait(false);
+            await udp.SendToAsync(Encoding.ASCII.GetBytes(wantMessage), SocketFlags.None, ToWire(server), deadline.Token).ConfigureAwait(false);
         }
 
         byte[] buffer = new byte[2048];
@@ -70,6 +70,17 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             }
 
             string[] parts = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim().Split(' ');
+            if (parts is ["CHAL", var chalSubject, var chalCookie] && chalSubject == peerId.ToString("x16"))
+            {
+                string retry = $"{wantMessage} {chalCookie}";
+                foreach (IPEndPoint server in _servers)
+                {
+                    await udp.SendToAsync(Encoding.ASCII.GetBytes(retry), SocketFlags.None, ToWire(server), deadline.Token).ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
             if (parts is ["INTRO", var idText, var payload]
                 && ulong.TryParse(idText, NumberStyles.HexNumber, null, out ulong id) && id == peerId
                 && payload.Length <= MaxWireRecord)
@@ -80,7 +91,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
                 }
                 catch (FormatException)
                 {
-                    return null;
+
                 }
             }
         }

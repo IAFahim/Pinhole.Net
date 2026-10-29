@@ -65,9 +65,12 @@ signed-record bytes: `PublishAsync` and `ResolveAsync`. Configure:
 
 - `PinholeOptions.RendezvousEndpoints` — the built-in provider: a `Pinhole.Rendezvous`
   UDP introducer (`RendezvousServer.Start()`), which stores and forwards records without
-  ever validating them. REG may now carry the publisher's record; INTRO carries it back.
-  A bare-endpoint INTRO (legacy client) is ignored by adopters — an unsigned address is
-  exactly the redirection abuse signatures exist to prevent.
+  ever validating them. REG may now carry the publisher's record; INTRO carries it back —
+  but only to a source that answered a challenge cookie bound to its address (a bare
+  `WANT` earns a `CHAL` plus an endpoint-only INTRO, never the record; the built-in
+  `RendezvousLookup` resolves the challenge automatically, one extra round trip per
+  source per minute). A bare-endpoint INTRO (legacy client) is ignored by adopters — an
+  unsigned address is exactly the redirection abuse signatures exist to prevent.
 - `PinholeOptions.LookupProviders` — your own implementation, fronting signed DNS, pkarr,
   or an iroh-style lookup service over whatever transport they speak.
 

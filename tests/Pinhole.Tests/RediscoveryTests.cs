@@ -204,16 +204,26 @@ public sealed class RediscoveryTests
         await SendAsync(a, $"REG {registeredId:x16} {record}", server);
         Assert.StartsWith("OBS", await RecvAsync(a), StringComparison.Ordinal);
         await SendAsync(b, $"WANT 5678 {registeredId:x16}", server);
+        string challenge = await RecvAsync(b);
+        Assert.StartsWith($"CHAL {registeredId:x16} ", challenge, StringComparison.Ordinal);
+        string intro = await RecvAsync(b);
+        Assert.StartsWith($"INTRO {registeredId:x16} ", intro, StringComparison.Ordinal);
+        Assert.DoesNotContain(record, intro);
+
+        await SendAsync(b, $"WANT 5678 {registeredId:x16} {challenge.Split(' ')[^1]}", server);
         Assert.Equal($"INTRO {registeredId:x16} {record}", await RecvAsync(b));
+
+        await SendAsync(b, $"WANT 5678 {registeredId:x16} AAAAAAAAAAAAAAAA", server);
+        Assert.StartsWith($"CHAL {registeredId:x16} ", await RecvAsync(b), StringComparison.Ordinal);
 
         ulong legacyId = 0x9ABC;
         using Socket c = TalkSocket();
         await SendAsync(c, $"REG {legacyId:x16}", server);
         Assert.StartsWith("OBS", await RecvAsync(c), StringComparison.Ordinal);
         await SendAsync(b, $"WANT 5678 {legacyId:x16}", server);
-        string intro = await RecvAsync(b);
-        Assert.StartsWith($"INTRO {legacyId:x16} ", intro, StringComparison.Ordinal);
-        Assert.DoesNotContain(record, intro);
+        string legacyIntro = await RecvAsync(b);
+        Assert.StartsWith($"INTRO {legacyId:x16} ", legacyIntro, StringComparison.Ordinal);
+        Assert.DoesNotContain(record, legacyIntro);
 
         using Socket d = TalkSocket();
         await SendAsync(d, "REG dead not-base64!!", server);
@@ -490,6 +500,30 @@ public sealed class RediscoveryTests
         return stranger.ConnectionString;
     }
 
+    private static async Task<string> WantRecordReplyAsync(Socket probe, ulong peerId, RendezvousServer server,
+        TimeSpan budget)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < budget)
+        {
+            string reply = await RecvAsync(probe, TimeSpan.FromSeconds(1));
+            if (reply.StartsWith("CHAL ", StringComparison.Ordinal)
+                && reply.Split(' ') is { Length: 3 } chal && chal[1] == peerId.ToString("x16"))
+            {
+                await SendAsync(probe, $"WANT 0 {peerId:x16} {chal[2]}", server);
+                continue;
+            }
+
+            if (reply.StartsWith("INTRO", StringComparison.Ordinal)
+                && reply.Split(' ').Length == 3 && !reply.Contains(':'))
+            {
+                return reply;
+            }
+        }
+
+        throw new TimeoutException($"no record published for peer {peerId:x16}");
+    }
+
     private static async Task UntilRecordServedAsync(RendezvousServer server, ulong peerId)
     {
         using Socket probe = TalkSocket();
@@ -497,14 +531,8 @@ public sealed class RediscoveryTests
         while (sw.Elapsed < TimeSpan.FromSeconds(10))
         {
             await SendAsync(probe, $"WANT 0 {peerId:x16}", server);
-            string reply = await RecvAsync(probe, TimeSpan.FromSeconds(1));
-            if (reply.StartsWith("INTRO", StringComparison.Ordinal) && reply.Split(' ').Length == 3
-                && !reply.Contains(':'))
-            {
-                return;
-            }
-
-            await Task.Delay(100);
+            await WantRecordReplyAsync(probe, peerId, server, TimeSpan.FromSeconds(2));
+            return;
         }
 
         throw new TimeoutException($"no record published for peer {peerId:x16}");
@@ -513,15 +541,13 @@ public sealed class RediscoveryTests
     private static async Task UntilRecordServesPortAsync(
         RendezvousServer server, ulong peerId, byte[] endpointKey, int port)
     {
-        using Socket probe = TalkSocket();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < TimeSpan.FromSeconds(10))
         {
+            using Socket probe = TalkSocket();
             await SendAsync(probe, $"WANT 0 {peerId:x16}", server);
-            string reply = await RecvAsync(probe, TimeSpan.FromSeconds(1));
-            if (reply.StartsWith("INTRO", StringComparison.Ordinal) && reply.Split(' ').Length == 3
-                && !reply.Contains(':')
-                && AddressRecord.TryParseVerified(Base64Url.Decode(reply.Split(' ')[2]), peerId, endpointKey,
+            string reply = await WantRecordReplyAsync(probe, peerId, server, TimeSpan.FromSeconds(2));
+            if (AddressRecord.TryParseVerified(Base64Url.Decode(reply.Split(' ')[2]), peerId, endpointKey,
                     DateTimeOffset.UtcNow, out AddressRecord? record)
                 && record!.Endpoints.Any(e => e.Port == port))
             {
