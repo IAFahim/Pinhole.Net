@@ -21,6 +21,7 @@ public struct HandshakeInput
     public bool Mac1Ok;
     public bool CookieRequired;
     public bool CookieOk;
+    public bool PricedReplyBlocked;
     public bool Accepted;
     public bool ConfirmOk;
     public uint FrameToken;
@@ -64,6 +65,8 @@ public static class HandshakeMachine
 
     public const long RejectMac1 = 9;
 
+    public const long RejectPricedReply = 10;
+
     public const long NeedKeys = 63;
     public const long PeerConfirmed = 64;
 
@@ -97,6 +100,11 @@ public static class HandshakeMachine
             int written = 0;
             Effects.Add(effects, ref written, EffectKind.Transmit, 0, 0, ReplyCookie);
             return written;
+        }
+
+        if (input.PricedReplyBlocked)
+        {
+            return Reject(effects, RejectPricedReply);
         }
 
         if (input.CryptoBody && !input.PinMatches)

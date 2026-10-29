@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -345,6 +347,115 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task StrangerBarrage_NeverAmplifies_AndHoldsTheSourceLedger()
+    {
+        await using PinholeNode listener = await PinholeNode.BindAsync(new PinholeOptions
+        {
+            StunServers = [],
+            Relays = [],
+            IrohRelayUrls = [], DerpRelayUrls = [],
+            Listen = true,
+            Encryption = PinholeEncryption.Optional,
+            ConnectTimeout = TimeSpan.FromSeconds(8),
+            PublishIrohAddress = false,
+            EnableLanDiscovery = false,
+            EnableNetworkWatch = false, EnablePortMapping = false,
+            EnableTcpTransport = false,
+        });
+        var listenerWire = new IPEndPoint(IPAddress.Loopback, listener.LocalPort);
+        byte[] listenerKey = ConnectionString.Parse(listener.ConnectionString).StaticKey!;
+
+        using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        long sent = 0;
+        long received = 0;
+        byte[] buf = new byte[2048];
+        EndPoint any = new IPEndPoint(IPAddress.Any, 0);
+        attacker.ReceiveTimeout = 100;
+
+        void Send(byte[] frame)
+        {
+            attacker.SendTo(frame, SocketFlags.None, listenerWire);
+            sent += frame.Length;
+        }
+
+        long DrainQuiet()
+        {
+            long bytes = 0;
+            while (true)
+            {
+                int n;
+                try
+                {
+                    n = attacker.ReceiveFrom(buf, SocketFlags.None, ref any);
+                }
+                catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
+                {
+                    return bytes;
+                }
+
+                bytes += n;
+            }
+        }
+
+        byte[] eph = RandomNumberGenerator.GetBytes(32);
+        byte[] stat = RandomNumberGenerator.GetBytes(32);
+        byte[] v4Punc = new byte[9 + CryptoWire.PuncCryptoBodyV4];
+        v4Punc[0] = 0x50;
+        BinaryPrimitives.WriteUInt64LittleEndian(v4Punc.AsSpan(1), 0xDEAD_BEEF_DEAD_BEEF);
+        BinaryPrimitives.WriteUInt32LittleEndian(v4Punc.AsSpan(9), 0x1234_5678);
+        eph.CopyTo(v4Punc.AsSpan(13));
+        stat.CopyTo(v4Punc.AsSpan(45));
+        CryptoWire.WriteMac1Ext(v4Punc, listenerKey);
+
+        byte[] v3Punc = new byte[9 + CryptoWire.PuncCryptoBody];
+        v3Punc[0] = 0x50;
+        BinaryPrimitives.WriteUInt64LittleEndian(v3Punc.AsSpan(1), 0xDEAD_BEEF_DEAD_BEEF);
+        BinaryPrimitives.WriteUInt32LittleEndian(v3Punc.AsSpan(9), 0x8765_4321);
+        RandomNumberGenerator.GetBytes(32).CopyTo(v3Punc.AsSpan(13));
+        RandomNumberGenerator.GetBytes(32).CopyTo(v3Punc.AsSpan(45));
+
+        byte[] legacyPunc = new byte[13];
+        legacyPunc[0] = 0x50;
+        BinaryPrimitives.WriteUInt64LittleEndian(legacyPunc.AsSpan(1), 0xDEAD_BEEF_DEAD_BEEF);
+        BinaryPrimitives.WriteUInt32LittleEndian(legacyPunc.AsSpan(9), 0x55AA_55AA);
+
+        byte[] packJunk = new byte[25];
+        packJunk[0] = 0x51;
+        BinaryPrimitives.WriteUInt64LittleEndian(packJunk.AsSpan(1), 0xCAFE_BABE_CAFE_BABE);
+
+        for (int i = 0; i < 40; i++) Send(v4Punc);
+        received += DrainQuiet();
+        Assert.True(listener.Engine.StrangerLedgerSources <= StrangerLedger.MaxSources, "ledger bounded mid-barrage (v4 phase)");
+
+        for (int i = 0; i < 40; i++) Send(v3Punc);
+        received += DrainQuiet();
+        Assert.True(listener.Engine.StrangerLedgerSources <= StrangerLedger.MaxSources, "ledger bounded mid-barrage (v3 phase)");
+        Assert.True(listener.Engine.CookieLoadSources <= 64, "cookie table bounded mid-barrage");
+
+        for (int i = 0; i < 40; i++) Send(legacyPunc);
+        for (int i = 0; i < 40; i++) Send(packJunk);
+        byte[] junk = new byte[64];
+        for (int i = 0; i < 120; i++)
+        {
+            RandomNumberGenerator.Fill(junk);
+            junk[0] = (byte)(0x50 + (i % 8));
+            Send(junk);
+        }
+
+        received += DrainQuiet();
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => listener.Engine.StrangerLedgerRefused >= 1);
+
+        Assert.True(listener.Engine.CookieDemanded >= 1, "the under-load cookie layer still answered the barrage");
+        Assert.True(listener.Engine.StrangerLedgerSources <= StrangerLedger.MaxSources, "ledger bounded after the barrage");
+        Assert.True(received <= sent,
+            $"the barrage extracted {received} bytes for {sent} sent (ratio {received / (double)sent:F2})");
+        output.WriteLine($"stranger barrage: {sent} B in, {received} B out " +
+                         $"({received / (double)sent:F2}x), ledger refused {listener.Engine.StrangerLedgerRefused}, " +
+                         $"cookie demands {listener.Engine.CookieDemanded}, ledger sources {listener.Engine.StrangerLedgerSources}");
     }
 
     [SoakFact]

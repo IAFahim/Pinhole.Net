@@ -623,6 +623,57 @@ precondition for the handshake:
   answers (a v3-only responder ignoring the unknown shape), retries unversioned
   exactly once per connection attempt.
 
+**Rendezvous pricing (R5 final): address validation before large replies, the 3x
+rule, the per-source ledger.** The armor above gates *who may complete a
+handshake*; these rules gate *what any stranger may extract before it completes
+one*. Three invariants, each checkable per reply:
+
+1. **Address validation before large replies.** A reply to a source that has not
+  validated is priced by its request: never larger than 3x the request's bytes,
+  never an unbounded frame, no key agreement or state without an admission.
+  Validation means one of: the cookie (mac2 under load — the source proved it
+  receives at that address), a confirmed handshake (the peer produced a frame
+  that verifies under the derived keys: PACK confirm, HSCK, or any sealed frame
+  — possession plus a return path), or the transport (a TCP peer completed a
+  three-way handshake; relay datagrams are bound to the sender's static key).
+  Concretely: the **announce is withheld until the peer confirms** — answering a
+  PUNC never again emits the candidate list (which can run to hundreds of bytes
+  and carries relay credentials); the candidate exchange begins at the first
+  confirmed frame (HSCK/PACK-confirm both trigger it, so an honest dial loses
+  zero round trips). The **PMTU floor-ping introduction probe** (~1237 B) is
+  withheld the same way. After these, the only frames a stranger can extract are
+  PACK (17/97/114 B answering 13/77/94–111 B) and COOKIE (30 B) — every one
+  priced ≤ 1.31x, far under the 3x bound.
+2. **The 3x rule.** A stranger's unvalidated requests earn at most 3 priced
+  replies (PACK-class answers, each including the DH/state admission they pay
+  for) per source per 10 s window. After 3 without progress toward validation,
+  silence until the window rolls. COOKIE replies are exempt — they are the
+  armor's own priced reply (30 B answering ≥ 94 B) and exempting them keeps the
+  cookie gate armed: PUNCs keep counting toward the 64/512 load windows even
+  while the ledger silences the PACKs, so a single-source flood transitions to
+  COOKIE-only exactly as before. A source that validates (its HSCK/sealed frame
+  verifies) resets its budget; a confirmed peer's retransmissions are never
+  charged. The honest-dial cost is one window: a dial whose first volley spends
+  the budget and loses all its PACKs waits out ≤ 10 s before the next volley —
+  a normal dial validates inside its first RTT and never notices.
+3. **The per-source ledger.** One fixed 64-entry table (the `CookieArmor`
+  pattern: coldest-window eviction, byte-keyed by the arrival's source socket
+  address) prices every stranger-reply path — direct-UDP PUNC answers on every
+  socket the engine owns, and (as the same class) each LAN-discovery unicast
+  query answer, capped at 3 per source per 10 s window. The sequencing decision
+  is the machine's (`PricedReplyBlocked` → `RejectPricedReply`, ordered after
+  mac1 and after the cookie demand, so a refused PUNC is silent with no state
+  and no DH); `NodeEngine` owns the windows and tables. Counters:
+  `StrangerLedgerRefused` sits beside `Mac1Refused`/`CookieDemanded`.
+
+The same rules price the text-protocol introducer (`Pinhole.Rendezvous`,
+[HOST_JOIN.md](HOST_JOIN.md)): the GETC cookie generalizes to WANT — records
+(peer-id lookup records up to 1 KiB) never ride an INTRO to a source that has
+not answered a challenge bound to its address; an unvalidated WANT earns a CHAL
+plus endpoint-only INTROs (both priced ≤ 3x), never a record. And the raw
+`PeerSocket` legacy layer now accepts OBS/INTRO signals only from its
+configured rendezvous servers (audit C-12's source check).
+
 ## Canonical vs legacy divergences (normative list)
 
 The canonical rule is normative in each case; the note records what the
