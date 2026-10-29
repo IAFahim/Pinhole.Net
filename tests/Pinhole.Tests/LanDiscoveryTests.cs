@@ -377,6 +377,12 @@ public sealed class LanDiscoveryTests
     {
         ulong peerId = 0x0BAD_F00D_0000_0042;
         using var announcerSide = new DirectChannel();
+        using var sink = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        sink.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        announcerSide.Group = (IPEndPoint)sink.LocalEndPoint!;
+        byte[] drain = new byte[2048];
+        EndPoint drainAny = new IPEndPoint(IPAddress.Any, 0);
+        _ = Task.Run(() => { try { while (true) sink.ReceiveFrom(drain, ref drainAny); } catch (SocketException) { } catch (ObjectDisposedException) { } });
         using var announcer = new LanDiscovery(
             announcerSide, peerId, RandomNumberGenerator.GetBytes(32), () => [IPAddress.Parse("192.168.1.9")], 5353, NatHint.Cone);
 
