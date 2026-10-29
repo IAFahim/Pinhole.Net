@@ -412,7 +412,7 @@ internal static class PeerEngine
                 {
                 }
             }
-            else
+            else if (IsConfiguredRendezvous(s, remote))
             {
                 OnSignal(s, buf.AsSpan(0, n));
             }
@@ -477,6 +477,35 @@ internal static class PeerEngine
         }
 
         s.LastRtt = TimeSpan.FromMilliseconds(Environment.TickCount64 - BinaryPrimitives.ReadInt64LittleEndian(frame[1..]));
+    }
+
+    private static bool IsConfiguredRendezvous(PeerState s, SocketAddress remote)
+    {
+        lock (s.Rendezvous)
+        {
+            foreach (SocketAddress server in s.Rendezvous)
+            {
+                if (server.Size == remote.Size && SameBytes(server, remote))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool SameBytes(SocketAddress left, SocketAddress right)
+    {
+        for (int i = 0; i < left.Size; i++)
+        {
+            if (left[i] != right[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void OnSignal(PeerState s, ReadOnlySpan<byte> line)

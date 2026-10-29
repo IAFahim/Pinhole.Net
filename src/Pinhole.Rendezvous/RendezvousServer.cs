@@ -17,12 +17,15 @@ public sealed class RendezvousServer : IAsyncDisposable
     public const int MaxCodes = 4096;
     public const int MaxCodeLength = 16;
 
+    public const int MaxValidatedSources = 1024;
+
     private readonly Socket _udp;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _run;
     private readonly ConcurrentDictionary<ulong, (IPEndPoint Ep, DateTimeOffset Seen, string? Record)> _nodes = new();
-    private readonly ConcurrentDictionary<ulong, List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>> _wants = new();
+    private readonly ConcurrentDictionary<ulong, List<(ulong Id, IPEndPoint Ep, DateTimeOffset At, bool Validated)>> _wants = new();
     private readonly ConcurrentDictionary<string, (string Record, string Token, DateTimeOffset Seen)> _codes = new();
+    private readonly ConcurrentDictionary<IPEndPoint, DateTimeOffset> _validated = new();
     private readonly byte[] _cookieKey = RandomNumberGenerator.GetBytes(32);
     private long _datagramFaults;
 
@@ -59,7 +62,7 @@ public sealed class RendezvousServer : IAsyncDisposable
 
     internal int WaitersFor(ulong target)
     {
-        if (!_wants.TryGetValue(target, out List<(ulong, IPEndPoint, DateTimeOffset)>? list))
+        if (!_wants.TryGetValue(target, out List<(ulong, IPEndPoint, DateTimeOffset, bool)>? list))
         {
             return 0;
         }
@@ -135,10 +138,10 @@ public sealed class RendezvousServer : IAsyncDisposable
                 }
 
                 await Say(remote, $"OBS {remote}").ConfigureAwait(false);
-                if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>? waiters))
+                if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At, bool Validated)>? waiters))
                 {
 
-                    (ulong Id, IPEndPoint Ep, DateTimeOffset At)[] matched;
+                    (ulong Id, IPEndPoint Ep, DateTimeOffset At, bool Validated)[] matched;
                     lock (waiters)
                     {
                         matched = waiters.ToArray();
@@ -149,13 +152,15 @@ public sealed class RendezvousServer : IAsyncDisposable
                         self = (remote, DateTimeOffset.UtcNow, null);
                     }
 
-                    foreach ((ulong waiterId, IPEndPoint waiterEp, _) in matched)
+                    bool registrantValidated = _validated.ContainsKey(remote);
+                    foreach ((ulong waiterId, IPEndPoint waiterEp, _, bool waiterValidated) in matched)
                     {
                         OnWaiterIntro?.Invoke();
-                        await IntroTo(waiterEp, id, self).ConfigureAwait(false);
-                        await IntroTo(remote, waiterId, _nodes.TryGetValue(waiterId, out var waiterEntry)
-                            ? waiterEntry
-                            : (waiterEp, DateTimeOffset.UtcNow, null)).ConfigureAwait(false);
+                        await IntroTo(waiterEp, id, waiterValidated ? self : StripRecord(self)).ConfigureAwait(false);
+                        (IPEndPoint Ep, DateTimeOffset Seen, string? Record) waiterEntry = _nodes.TryGetValue(waiterId, out var registered)
+                            ? registered
+                            : (waiterEp, DateTimeOffset.UtcNow, null);
+                        await IntroTo(remote, waiterId, registrantValidated ? waiterEntry : StripRecord(waiterEntry)).ConfigureAwait(false);
                     }
                 }
 
@@ -163,33 +168,12 @@ public sealed class RendezvousServer : IAsyncDisposable
             case ["WANT", var meText, var targetText]
                 when ulong.TryParse(meText, NumberStyles.HexNumber, null, out ulong me)
                      && ulong.TryParse(targetText, NumberStyles.HexNumber, null, out ulong target):
-                if (_nodes.TryGetValue(target, out (IPEndPoint Ep, DateTimeOffset Seen, string? Record) entry)
-                    && entry.Seen > DateTimeOffset.UtcNow - _ttl)
-                {
-                    await IntroTo(remote, target, entry).ConfigureAwait(false);
-                    await IntroTo(entry.Ep, me, (remote, DateTimeOffset.UtcNow, null)).ConfigureAwait(false);
-                }
-                else
-                {
-                    _wants.AddOrUpdate(target,
-                        _ => new List<(ulong, IPEndPoint, DateTimeOffset)> { (me, remote, DateTimeOffset.UtcNow) },
-                        (_, list) =>
-                        {
-                            lock (list)
-                            {
-                                if (list.Count >= MaxWaitersPerTarget)
-                                {
-                                    list.RemoveAt(0);
-                                }
-
-                                list.Add((me, remote, DateTimeOffset.UtcNow));
-                            }
-
-                            return list;
-                        });
-                    await Say(remote, $"WAIT {target:x16}").ConfigureAwait(false);
-                }
-
+                await HandleWantAsync(remote, me, target, null).ConfigureAwait(false);
+                break;
+            case ["WANT", var meText, var targetText, var cookie]
+                when ulong.TryParse(meText, NumberStyles.HexNumber, null, out ulong me)
+                     && ulong.TryParse(targetText, NumberStyles.HexNumber, null, out ulong target):
+                await HandleWantAsync(remote, me, target, cookie).ConfigureAwait(false);
                 break;
             case ["PUTC", var code, var record] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
 
@@ -276,6 +260,94 @@ public sealed class RendezvousServer : IAsyncDisposable
         }
     }
 
+    private async Task HandleWantAsync(IPEndPoint remote, ulong me, ulong target, string? cookie)
+    {
+        string subject = target.ToString("x16");
+        if (cookie is not null)
+        {
+            if (!ValidCookie(remote, subject, cookie, "pinhole-want"))
+            {
+                await Say(remote, $"CHAL {subject} {ChallengeCookie(remote, subject, "pinhole-want")}").ConfigureAwait(false);
+                return;
+            }
+
+            NoteValidatedSource(remote);
+        }
+
+        if (_nodes.TryGetValue(target, out (IPEndPoint Ep, DateTimeOffset Seen, string? Record) entry)
+            && entry.Seen > DateTimeOffset.UtcNow - _ttl)
+        {
+            if (_validated.ContainsKey(remote))
+            {
+                await IntroTo(remote, target, entry).ConfigureAwait(false);
+            }
+            else
+            {
+                await Say(remote, $"CHAL {subject} {ChallengeCookie(remote, subject, "pinhole-want")}").ConfigureAwait(false);
+                await IntroTo(remote, target, StripRecord(entry)).ConfigureAwait(false);
+            }
+
+            await IntroTo(entry.Ep, me, (remote, DateTimeOffset.UtcNow, null)).ConfigureAwait(false);
+            return;
+        }
+
+        bool waiterValidated = cookie is not null || _validated.ContainsKey(remote);
+        _wants.AddOrUpdate(target,
+            _ => new List<(ulong Id, IPEndPoint Ep, DateTimeOffset At, bool Validated)>
+            {
+                (me, remote, DateTimeOffset.UtcNow, waiterValidated),
+            },
+            (_, list) =>
+            {
+                lock (list)
+                {
+                    if (list.Count >= MaxWaitersPerTarget)
+                    {
+                        list.RemoveAt(0);
+                    }
+
+                    list.Add((me, remote, DateTimeOffset.UtcNow, waiterValidated));
+                }
+
+                return list;
+            });
+        await Say(remote, $"WAIT {subject}").ConfigureAwait(false);
+        if (!waiterValidated)
+        {
+            await Say(remote, $"CHAL {subject} {ChallengeCookie(remote, subject, "pinhole-want")}").ConfigureAwait(false);
+        }
+    }
+
+    private static (IPEndPoint Ep, DateTimeOffset Seen, string? Record) StripRecord(
+        (IPEndPoint Ep, DateTimeOffset Seen, string? Record) entry) => (entry.Ep, entry.Seen, null);
+
+    private void NoteValidatedSource(IPEndPoint source)
+    {
+        _validated[source] = DateTimeOffset.UtcNow;
+        if (_validated.Count > MaxValidatedSources)
+        {
+            EvictOldestValidated();
+        }
+    }
+
+    private void EvictOldestValidated()
+    {
+        IPEndPoint? oldest = null;
+        DateTimeOffset oldestSeen = DateTimeOffset.MaxValue;
+        foreach (var (source, seen) in _validated)
+        {
+            if (seen < oldestSeen)
+            {
+                (oldest, oldestSeen) = (source, seen);
+            }
+        }
+
+        if (oldest is { } evicted)
+        {
+            _validated.TryRemove(evicted, out _);
+        }
+    }
+
     private async Task SweepLoop()
     {
         while (!_shutdown.IsCancellationRequested)
@@ -313,6 +385,14 @@ public sealed class RendezvousServer : IAsyncDisposable
                 }
             }
 
+            foreach (var (source, seen) in _validated)
+            {
+                if (seen < cutoff)
+                {
+                    _validated.TryRemove(source, out _);
+                }
+            }
+
             foreach (var (code, (_, _, seen)) in _codes)
             {
                 if (seen < cutoff)
@@ -341,15 +421,15 @@ public sealed class RendezvousServer : IAsyncDisposable
         }
     }
 
-    private string ChallengeCookie(IPEndPoint src, string code)
+    private string ChallengeCookie(IPEndPoint src, string code, string label = "pinhole-chal")
     {
         long minute = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
         Span<byte> mac = stackalloc byte[32];
-        HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"pinhole-chal|{src}|{code}|{minute}"), mac);
+        HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"{label}|{src}|{code}|{minute}"), mac);
         return Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
 
-    private bool ValidCookie(IPEndPoint src, string code, string presented)
+    private bool ValidCookie(IPEndPoint src, string code, string presented, string label = "pinhole-chal")
     {
         if (presented.Length != 16)
         {
@@ -363,7 +443,7 @@ public sealed class RendezvousServer : IAsyncDisposable
         Encoding.ASCII.GetBytes(presented, given);
         for (long m = minute - 1; m <= minute; m++)
         {
-            HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"pinhole-chal|{src}|{code}|{m}"), mac);
+            HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"{label}|{src}|{code}|{m}"), mac);
             Encoding.ASCII.GetBytes(Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_'), expected);
             if (CryptographicOperations.FixedTimeEquals(expected, given))
             {

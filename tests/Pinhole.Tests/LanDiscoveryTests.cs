@@ -371,4 +371,46 @@ public sealed class LanDiscoveryTests
         PinholeConnection conn = await announcing.ConnectAsync(other.ConnectionString).WaitAsync(Timeout);
         Assert.True(conn.IsEncrypted);
     }
+
+    [Fact]
+    public async Task UnicastQueryReplies_AreCappedPerSource_MulticastHeartbeatsUnaffected()
+    {
+        ulong peerId = 0x0BAD_F00D_0000_0042;
+        using var announcerSide = new DirectChannel();
+        using var announcer = new LanDiscovery(
+            announcerSide, peerId, RandomNumberGenerator.GetBytes(32), () => [IPAddress.Parse("192.168.1.9")], 5353, NatHint.Cone);
+
+        await TestPoll.UntilAsync(Timeout, () =>
+        {
+            lock (announcerSide.Sent) { return announcerSide.Sent.Count(s => s.To is null) >= 3; }
+        });
+
+        var w = new DnsCodec.Writer();
+        w.Header(flags: 0x0000, questions: 1, answers: 0, 0, 0);
+        w.WritePtrQuestion(LanDiscovery.Service);
+        byte[] query = w.ToArray();
+
+        using var querier = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        querier.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        for (int i = 0; i < 6; i++)
+        {
+            querier.SendTo(query, SocketFlags.None, announcerSide.Local);
+        }
+
+        await TestPoll.UntilAsync(Timeout, () =>
+        {
+            lock (announcerSide.Sent) { return announcerSide.Sent.Count(s => s.To is not null) >= StrangerLedger.PricedRepliesPerWindow; }
+        });
+        await Task.Delay(600);
+
+        int unicast, multicast;
+        lock (announcerSide.Sent)
+        {
+            unicast = announcerSide.Sent.Count(s => s.To is not null);
+            multicast = announcerSide.Sent.Count(s => s.To is null);
+        }
+
+        Assert.Equal(StrangerLedger.PricedRepliesPerWindow, unicast);
+        Assert.True(multicast >= 3, "the multicast announcements are not part of the stranger budget");
+    }
 }

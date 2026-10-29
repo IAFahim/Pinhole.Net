@@ -203,15 +203,19 @@ internal sealed partial class NodeEngine : IDisposable
     private long _handshakeKeyAgreements;
     private long _cookieDemanded;
     private long _cookieAccepted;
+    private long _ledgerRefused;
 
     internal bool LegacyHandshakeV3Only;
     internal long Mac1Refused => Volatile.Read(ref _mac1Refused);
     internal long HandshakeKeyAgreements => Volatile.Read(ref _handshakeKeyAgreements);
     internal long CookieDemanded => Volatile.Read(ref _cookieDemanded);
     internal long CookieAccepted => Volatile.Read(ref _cookieAccepted);
+    internal long StrangerLedgerRefused => Volatile.Read(ref _ledgerRefused);
     internal CookieArmor CookieArmor => _cookieArmor!;
     private readonly CookieArmor? _cookieArmor;
+    private readonly StrangerLedger _strangerLedger = new();
     internal int CookieLoadSources => _cookieArmor?.TrackedSources ?? 0;
+    internal int StrangerLedgerSources => _strangerLedger.TrackedSources;
     internal bool HandshakeV4Active => !LegacyHandshakeV3Only && _identity is not null;
 
     internal byte[]? Knock => _knock;
@@ -2744,6 +2748,9 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             Span<byte> strangerSourceKey = stackalloc byte[MaxSocketAddressBytes];
+            SocketAddress? strangerSource = !arrival.ViaRelay && arrival.Tcp is null ? arrival.Direct : null;
+            bool strangerDirectSource = strangerSource is not null;
+            int strangerLedgerKeyLength = strangerDirectSource ? WriteSourceKey(strangerSource!, strangerSourceKey) : 0;
             (bool strangerCookieRequired, bool strangerCookieOk) = CookieVerdict(
                 frame, v4Mac2, mac1Eligible: true, sessionCompleted: false, arrival,
                 strangerSourceKey, out int strangerSourceKeyLength);
@@ -2756,6 +2763,14 @@ internal sealed partial class NodeEngine : IDisposable
                 {
                     TraceLine($"cookie demanded for stranger punc from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16}");
                 }
+                return;
+            }
+
+            if (strangerDirectSource
+                && !_strangerLedger.TryCharge(strangerSourceKey[..strangerLedgerKeyLength], Environment.TickCount64))
+            {
+                Interlocked.Increment(ref _ledgerRefused);
+                Telemetry.FrameRejected("handshake", "ledger");
                 return;
             }
 
@@ -2820,6 +2835,7 @@ internal sealed partial class NodeEngine : IDisposable
                 c.Handshake.RemoteTokenKnown = true;
                 c.Handshake.RemoteTokenAuthenticated = true;
                 cryptoState.MarkPeerConfirmed();
+                NoteArrivalValidated(arrival);
             }
 
             if (arrival.ViaRelay) RelayPathConfirmed(c, arrival);
@@ -2926,6 +2942,18 @@ internal sealed partial class NodeEngine : IDisposable
         return size;
     }
 
+    private void NoteArrivalValidated(in Arrival arrival)
+    {
+        if (arrival.ViaRelay || arrival.Tcp is not null || arrival.Direct is not { } source)
+        {
+            return;
+        }
+
+        Span<byte> key = stackalloc byte[MaxSocketAddressBytes];
+        int length = WriteSourceKey(source, key);
+        _strangerLedger.NoteValidated(key[..length], Environment.TickCount64);
+    }
+
     private (bool Required, bool Ok) CookieVerdict(ReadOnlySpan<byte> frame, bool mac2Capable, bool mac1Eligible,
         bool sessionCompleted, in Arrival arrival, Span<byte> sourceKeyBuf, out int sourceKeyLength)
     {
@@ -3011,18 +3039,32 @@ internal sealed partial class NodeEngine : IDisposable
         long reply;
         Span<byte> puncSourceKey = stackalloc byte[MaxSocketAddressBytes];
         int puncSourceKeyLength = 0;
+        SocketAddress? puncSource = !arrival.ViaRelay && arrival.Tcp is null ? arrival.Direct : null;
+        bool puncDirectSource = puncSource is not null;
+        if (puncDirectSource)
+        {
+            puncSourceKeyLength = WriteSourceKey(puncSource!, puncSourceKey);
+        }
+
         lock (c.Gate)
         {
 
             bool mac1Ok = !v4Punc && !v4PuncMac2 || Mac1OkForConn(c, frame);
 
+            bool sessionCompleted = c.Crypto is { PeerConfirmed: true };
             bool strangerAdmitted = c.StrangerAdmitted;
             c.StrangerAdmitted = false;
-            (bool cookieRequired, bool cookieOk) = strangerAdmitted ? (false, true)
+            (bool cookieRequired, bool cookieOk) = strangerAdmitted || sessionCompleted ? (false, true)
                 : CookieVerdict(
                     frame, v4PuncMac2, mac1Eligible: mac1Ok,
-                    sessionCompleted: c.Crypto is { PeerConfirmed: true }, arrival,
-                    puncSourceKey, out puncSourceKeyLength);
+                    sessionCompleted: sessionCompleted, arrival,
+                    puncSourceKey, out _);
+            bool pricedReplyBlocked = !strangerAdmitted && !sessionCompleted && puncDirectSource
+                && !_strangerLedger.TryCharge(puncSourceKey[..puncSourceKeyLength], Environment.TickCount64);
+            if (pricedReplyBlocked)
+            {
+                Interlocked.Increment(ref _ledgerRefused);
+            }
 
             bool pinMatches = true;
             if (cryptoPunc && c.PinnedStaticKey is { } pinned)
@@ -3038,6 +3080,7 @@ internal sealed partial class NodeEngine : IDisposable
             input.Mac1Ok = mac1Ok;
             input.CookieRequired = cookieRequired;
             input.CookieOk = cookieOk;
+            input.PricedReplyBlocked = pricedReplyBlocked;
             input.FrameToken = token;
             StepHandshake(ref c.Handshake, in input, out long kind, out reply);
             if (kind == HandshakeMachine.RejectMac1)
@@ -3045,6 +3088,12 @@ internal sealed partial class NodeEngine : IDisposable
 
                 Interlocked.Increment(ref _mac1Refused);
                 Telemetry.FrameRejected("handshake", "mac1");
+                return;
+            }
+
+            if (kind == HandshakeMachine.RejectPricedReply)
+            {
+                Telemetry.FrameRejected("handshake", "ledger");
                 return;
             }
 
@@ -3127,7 +3176,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             SendOnArrival(arrival, pack);
             if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
-            else if (!arrival.ViaRelay) SendUdpIntroductionProbe(c, arrival);
+            else if (!arrival.ViaRelay && crypto is { PeerConfirmed: true }) SendUdpIntroductionProbe(c, arrival);
         }
         else if (reply == HandshakeMachine.ReplyPackLegacy)
         {
@@ -3154,12 +3203,6 @@ internal sealed partial class NodeEngine : IDisposable
         else
         {
             DirectPathConfirmed(c, arrival);
-        }
-
-        if (!c.Announced)
-        {
-            c.Announced = true;
-            AnnounceTo(c, target: arrival);
         }
     }
 
@@ -3308,6 +3351,7 @@ internal sealed partial class NodeEngine : IDisposable
 
                 sendHsck = reply == HandshakeMachine.ReplyHsck;
                 crypto.MarkPeerConfirmed();
+                NoteArrivalValidated(arrival);
             }
         }
 
@@ -3370,6 +3414,8 @@ internal sealed partial class NodeEngine : IDisposable
 
             crypto.MarkPeerConfirmed();
         }
+
+        NoteArrivalValidated(arrival);
 
         if (arrival.Tcp is { } tcp) SendTcpProof(c, tcp);
 
@@ -3688,6 +3734,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void AnnounceTo(ConnState c, bool blast = false, Arrival? target = null)
     {
+        if (c.IsIncoming && c.Crypto is not { PeerConfirmed: true }) return;
         if (_options.RelaySignalingOnly && (c.State == PinholeConnectionState.Closed || c.Crypto is not { Established: true })) return;
         Volatile.Write(ref c.LastCandidateAnnouncement, Environment.TickCount64);
         IReadOnlyList<PinholeCandidate> candidates = LocalCandidatesSnapshot();

@@ -182,25 +182,40 @@ public sealed class AttackTests
         await using PinholeNode listener = await PinholeNode.BindAsync(
             Opts() with { MaxConnectionsOverride = cap, ConnectTimeout = TimeSpan.FromSeconds(2) });
 
-        using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         IPEndPoint listenerWire = new(IPAddress.Loopback, listener.LocalPort);
 
-        byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
-        punc[0] = 0x50;
-        for (int i = 0; i < cap * 5; i++)
+        var attackers = new List<Socket>();
+        try
         {
-            RandomNumberGenerator.Fill(punc.AsSpan(1));
-            attacker.SendTo(punc, SocketFlags.None, listenerWire);
+            for (int source = 0; source < 4; source++)
+            {
+                var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                attackers.Add(attacker);
+                byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
+                punc[0] = 0x50;
+                for (int i = 0; i < StrangerLedger.PricedRepliesPerWindow; i++)
+                {
+                    RandomNumberGenerator.Fill(punc.AsSpan(1));
+                    attacker.SendTo(punc, SocketFlags.None, listenerWire);
+                }
+            }
+
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap);
+
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(10), () => listener.Connections.Count == 0);
+
+            await using PinholeNode real = await PinholeNode.BindAsync(Opts() with { ConnectTimeout = TimeSpan.FromSeconds(5) });
+            await using PinholeConnection conn = await real.ConnectAsync(LoopbackString(listener)).WaitAsync(Timeout);
+            Assert.True(conn.IsEncrypted);
         }
-
-        await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap);
-
-        await TestPoll.UntilAsync(TimeSpan.FromSeconds(10), () => listener.Connections.Count == 0);
-
-        await using PinholeNode real = await PinholeNode.BindAsync(Opts() with { ConnectTimeout = TimeSpan.FromSeconds(5) });
-        await using PinholeConnection conn = await real.ConnectAsync(LoopbackString(listener)).WaitAsync(Timeout);
-        Assert.True(conn.IsEncrypted);
+        finally
+        {
+            foreach (Socket attacker in attackers)
+            {
+                attacker.Dispose();
+            }
+        }
     }
 
     [Fact]

@@ -169,7 +169,6 @@ public sealed class RendezvousTests
     [Fact]
     public async Task Getc_BigRecordRequiresACookie_StrangerRepliesStaySmall()
     {
-
         await using RendezvousServer server = RendezvousServer.Start();
         IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
         using Socket host = NewClient();
@@ -196,5 +195,73 @@ public sealed class RendezvousTests
         await joiner.SendToAsync(Encoding.ASCII.GetBytes("GETC code1234 AAAAAAAAAAAAAAAA\n"), SocketFlags.None, serverEp);
         int third = await joiner.ReceiveAsync(new ArraySegment<byte>(buf)).WaitAsync(DefaultTimeout);
         Assert.StartsWith("CHAL code1234 ", Encoding.ASCII.GetString(buf, 0, third).Trim());
+    }
+
+    [Fact]
+    public async Task Want_BigRecordRequiresACookie_StrangerRepliesStayPriced()
+    {
+        await using RendezvousServer server = RendezvousServer.Start();
+        IPEndPoint serverEp = new(IPAddress.IPv6Loopback, server.LocalEndPoint.Port);
+        using Socket host = NewClient();
+        string record = new string('B', RendezvousServer.MaxRecordLength);
+        await host.SendToAsync(Encoding.ASCII.GetBytes($"REG 00000000000000ab {record}\n"), SocketFlags.None, serverEp);
+        byte[] hostBuf = new byte[128];
+        int put = await host.ReceiveAsync(new ArraySegment<byte>(hostBuf)).WaitAsync(DefaultTimeout);
+        Assert.StartsWith("OBS", Encoding.ASCII.GetString(hostBuf, 0, put));
+
+        using Socket joiner = NewClient();
+        byte[] buf = new byte[16 * 1024];
+        string want = "WANT 00000000000000cd 00000000000000ab\n";
+        await joiner.SendToAsync(Encoding.ASCII.GetBytes(want), SocketFlags.None, serverEp);
+
+        long strangerReplyBytes = 0;
+        int first = await joiner.ReceiveAsync(new ArraySegment<byte>(buf)).WaitAsync(DefaultTimeout);
+        string challenge = Encoding.ASCII.GetString(buf, 0, first).Trim();
+        Assert.StartsWith("CHAL 00000000000000ab ", challenge);
+        strangerReplyBytes += first;
+
+        int second = await joiner.ReceiveAsync(new ArraySegment<byte>(buf)).WaitAsync(DefaultTimeout);
+        string intro = Encoding.ASCII.GetString(buf, 0, second).Trim();
+        Assert.StartsWith("INTRO 00000000000000ab ", intro);
+        Assert.DoesNotContain(record, intro);
+        strangerReplyBytes += second;
+        Assert.True(strangerReplyBytes <= 3 * want.Length,
+            $"unvalidated WANT earned {strangerReplyBytes} reply bytes for {want.Length} sent");
+
+        await joiner.SendToAsync(Encoding.ASCII.GetBytes(
+            $"WANT 00000000000000cd 00000000000000ab {challenge.Split(' ')[^1]}\n"), SocketFlags.None, serverEp);
+        int third = await joiner.ReceiveAsync(new ArraySegment<byte>(buf)).WaitAsync(DefaultTimeout);
+        Assert.StartsWith("INTRO 00000000000000ab ", Encoding.ASCII.GetString(buf, 0, third).Trim());
+        Assert.Contains(record, Encoding.ASCII.GetString(buf, 0, third));
+
+        await joiner.SendToAsync(Encoding.ASCII.GetBytes(
+            "WANT 00000000000000cd 00000000000000ab AAAAAAAAAAAAAAAA\n"), SocketFlags.None, serverEp);
+        int fourth = await joiner.ReceiveAsync(new ArraySegment<byte>(buf)).WaitAsync(DefaultTimeout);
+        Assert.StartsWith("CHAL 00000000000000ab ", Encoding.ASCII.GetString(buf, 0, fourth).Trim());
+    }
+
+    [Fact]
+    public async Task PeerSocket_IgnoresSignalsFromSourcesThatAreNotItsRendezvous()
+    {
+        using var peer = new PeerSocket(0x66);
+        using var stranger = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp)
+        {
+            DualMode = true,
+        };
+        stranger.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+        var peerWire = new IPEndPoint(IPAddress.IPv6Loopback, peer.LocalPort);
+
+        await stranger.SendToAsync(Encoding.ASCII.GetBytes("OBS 9.9.9.9:9\n"), SocketFlags.None, peerWire);
+        await stranger.SendToAsync(Encoding.ASCII.GetBytes("INTRO 0000000000000066 9.9.9.9:9\n"), SocketFlags.None, peerWire);
+        await Task.Delay(300);
+
+        Assert.Null(peer.PublicAddress);
+        Assert.Null(peer.Peer);
+
+        await using RendezvousServer server = RendezvousServer.Start();
+        peer.AddRendezvous(new IPEndPoint(IPAddress.IPv6Loopback, server.LocalEndPoint.Port));
+        IPEndPoint observed = await peer.RegisterAsync().WaitAsync(DefaultTimeout);
+        Assert.NotNull(observed);
+        Assert.Equal(1, server.NodeCount);
     }
 }

@@ -29,6 +29,7 @@ internal sealed class LanDiscovery : IDisposable
     private readonly Func<IReadOnlyList<IPAddress>> _addresses;
     private readonly int _port;
     private readonly NatHint _hint;
+    private readonly StrangerLedger _unicastLedger = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _loop;
     private int _disposed;
@@ -67,7 +68,7 @@ internal sealed class LanDiscovery : IDisposable
             {
                 if (_channel.TryReceive(buf, out int len, out IPEndPoint from, 500))
                 {
-                    if (DnsCodec.AsksForOurService(buf.AsSpan(0, len)))
+                    if (DnsCodec.AsksForOurService(buf.AsSpan(0, len)) && UnicastReplyAllowed(from))
                     {
                         SendAnnouncement(RecordTtl, from);
                     }
@@ -111,6 +112,15 @@ internal sealed class LanDiscovery : IDisposable
         }
 
         _channel.Send(w.ToArray(), unicastTo);
+    }
+
+    private bool UnicastReplyAllowed(IPEndPoint from)
+    {
+        byte[] address = from.Address.GetAddressBytes();
+        Span<byte> key = stackalloc byte[address.Length + 2];
+        address.AsSpan().CopyTo(key);
+        BinaryPrimitives.WriteUInt16BigEndian(key[address.Length..], (ushort)from.Port);
+        return _unicastLedger.TryCharge(key, Environment.TickCount64);
     }
 
     private (string Key, string Value)[] TxtEntries()
