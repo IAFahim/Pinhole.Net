@@ -87,6 +87,7 @@ const Pinhole.AddressRecord.MaxRelayedEndpoints = 4 -> int
 const Pinhole.AddressRecord.SignatureLength = 64 -> int
 const Pinhole.ConnectionString.MaxCandidates = 32 -> int
 const Pinhole.ConnectionString.MaxEncodedLength = 8192 -> int
+const Pinhole.ConnectionString.MaxKnockLength = 64 -> int
 const Pinhole.ConnectionString.Scheme = "pinhole1" -> string!
 const Pinhole.PinholeConnection.MaxPayload = 1200 -> int
 override Pinhole.ConnectionString.ToString() -> string!
@@ -128,8 +129,9 @@ Pinhole.CandidateKind.Reflexive = 2 -> Pinhole.CandidateKind
 Pinhole.CandidateKind.Relay = 3 -> Pinhole.CandidateKind
 Pinhole.ConnectionString
 Pinhole.ConnectionString.Candidates.get -> System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>!
-Pinhole.ConnectionString.ConnectionString(ulong peerId, System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>! candidates, Pinhole.NatHint natHint = Pinhole.NatHint.Unknown, byte[]? staticKey = null, byte[]? endpointKey = null) -> void
+Pinhole.ConnectionString.ConnectionString(ulong peerId, System.Collections.Generic.IReadOnlyList<Pinhole.PinholeCandidate!>! candidates, Pinhole.NatHint natHint = Pinhole.NatHint.Unknown, byte[]? staticKey = null, byte[]? endpointKey = null, byte[]? knock = null) -> void
 Pinhole.ConnectionString.EndpointKey.get -> byte[]?
+Pinhole.ConnectionString.Knock.get -> byte[]?
 Pinhole.ConnectionString.NatHint.get -> Pinhole.NatHint
 Pinhole.ConnectionString.PeerId.get -> ulong
 Pinhole.ConnectionString.StaticKey.get -> byte[]?
@@ -294,6 +296,8 @@ Pinhole.PinholeOptions.Encryption.get -> Pinhole.PinholeEncryption
 Pinhole.PinholeOptions.Encryption.init -> void
 Pinhole.PinholeOptions.Equals(Pinhole.PinholeOptions? other) -> bool
 Pinhole.PinholeOptions.IdentityKeySeed.get -> byte[]?
+Pinhole.PinholeOptions.Knock.get -> byte[]?
+Pinhole.PinholeOptions.Knock.init -> void
 Pinhole.PinholeOptions.IdentityKeySeed.init -> void
 Pinhole.PinholeOptions.IrohRelayUrls.get -> System.Collections.Generic.IReadOnlyList<System.Uri!>?
 Pinhole.PinholeOptions.IrohRelayUrls.init -> void

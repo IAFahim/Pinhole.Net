@@ -1,6 +1,30 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — handshake armor: the knock PSK (#49 R5 phase 2)
+
+A node MAY configure a per-string secret (`PinholeOptions.Knock`, 8..64 raw bytes
+— generate >=16; it is subject to offline guessing against any observed frame).
+When set, the node's connection string becomes version 4 and carries the secret
+(the only format change; v1..v3 strings parse byte-identically on every reader),
+and possession of the string becomes a precondition for the handshake: mac1 keys
+under `BLAKE3-DeriveKey("pinhole-knock-mac1-v1", staticPub32 || knock)` instead of
+the raw static pub — wire-shape identical, so a scanner holding only the public
+static key falls to the same silent mac1 refusal a random flood does — and the
+session KDF mixes the knock as a fourth HKDF input (`BLAKE3-DeriveKey
+("pinhole-knock-psk-v1", knock)`), so keys derived without it differ in every
+artifact including both confirm MACs: a knock-less MITM cannot terminate the
+handshake whatever frames it forges. Unversioned v3 PUNCs are ignored outright
+(the operator closed that node's v3 support window: the responder cannot tell an
+honest v3 dialer from a scanner), while the node's own outbound dials — including
+to v3-only peers — are untouched, and a knock-pinned dial never fires the v3
+fallback. Layering holds: only knock-keyed mac1-valid PUNCs count toward the
+cookie load windows, and under load from knock holders the honest knock dialer
+pays the mac2 round trip on the same attempt. The refusal sequencing adds no new
+machine input — v4-without-the-knock rides `RejectMac1`, v3 rides the shell's
+shape gate. Constructions, policy, and entropy guidance: `docs/WIRE.md` §"The
+knock"; gates: `HandshakeKnockTests`.
+
 ## 1.10.0 (unreleased) — handshake armor: mac2/cookie under initiation load (#49 R5 phase 2)
 
 A responder under initiation load stops answering PUNCs directly and demands a

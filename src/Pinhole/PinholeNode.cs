@@ -109,12 +109,16 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     public byte[]? EndpointPublicKey => _engine.EndpointPublicKey;
 
+    // Knock-aware: a knock-configured node's string carries the secret (version 4) —
+    // only what this string hands out may connect. LAN-discovery strings never do: a
+    // multicast announcement would hand the knock to every listener.
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
         NatHint,
         _engine.StaticPublicKey,
-        _engine.EndpointPublicKey).ToString();
+        _engine.EndpointPublicKey,
+        _options.Knock).ToString();
 
     public IrohAddress IrohAddress
     {

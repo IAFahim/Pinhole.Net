@@ -141,7 +141,7 @@ internal static class MeshNode
 
         ConnectionString full = ConnectionString.Parse(node.ConnectionString);
         var relayOnly = full.Candidates.Where(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay).ToList();
-        return new ConnectionString(full.PeerId, relayOnly, full.NatHint, full.StaticKey, full.EndpointKey).ToString();
+        return new ConnectionString(full.PeerId, relayOnly, full.NatHint, full.StaticKey, full.EndpointKey, full.Knock).ToString();
     }
 
     private static async Task<RoundReport> RunRoundAsync(

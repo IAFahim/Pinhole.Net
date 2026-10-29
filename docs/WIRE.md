@@ -69,20 +69,32 @@ versioned; keys pin the version:
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 1 | version: `1` bare, `2` +static key, `3` +static+endpoint keys |
-| 1 | 1 | flags: bit 0 = static key present, bit 1 = endpoint key present — must equal exactly the key-presence bits implied by the version byte |
+| 0 | 1 | version: `1` bare, `2` +static key, `3` +static+endpoint keys, `4` +knock |
+| 1 | 1 | flags: bit 0 = static key, bit 1 = endpoint key, bit 2 = knock — v1..v3 must equal exactly the key-presence bits implied by the version byte; v4 must be `static+knock` (0x05) or `static+endpoint+knock` (0x07) |
 | 2 | 8 | peer id, u64 **LE** |
 | 10 | 1 | NAT hint: 0 unknown, 1 cone, 2 symmetric |
 | 11 | 1 | candidate count, 1..32 (zero is not canonical) |
 | 12 | … | candidates, back to back |
 | … | 32 | static key, present iff version ≥ 2 |
-| … | 32 | endpoint key, present iff version 3 |
+| … | 32 | endpoint key, present iff version 3, or version 4 with bit 1 set |
+| … | 1 + 1..64 | knock length (u8) then raw knock bytes, present iff version 4 |
 
 No trailing bytes. Bodies run 13 bytes minimum; the structural maximum is
-5,484 bytes / **7,321 characters** (32 candidates of maximal shape plus both
-keys). The legacy parser's separate 8,192-character cap (`ConnectionString.
-MaxEncodedLength`) still governs the production SDK; the canonical bound is
-tighter and derived.
+5,549 bytes / **7,408 characters** (32 candidates of maximal shape, both keys,
+and a 64-byte knock). The legacy parser's separate 8,192-character cap
+(`ConnectionString.MaxEncodedLength`) still governs the production SDK; the
+canonical bound is tighter and derived.
+
+The knock (R5 phase 2 remainder) is the optional per-string secret a node may
+be configured with (`PinholeOptions.Knock`): present in a string iff the
+publisher is knock-configured, and never on v1..v3 — a pre-v4 reader rejects
+the version byte as unsupported, exactly the additive-versioning discipline
+the engine handshake's v4 frames use. Old strings parse identically: v1..v3
+bodies are untouched. The knock is raw bytes (a generated ≥16-byte secret;
+the options surface enforces 8..64) and rides the string only — LAN-discovery
+strings never carry it, because a multicast announcement would hand the secret
+to every listener and the knock's whole point is that only string holders may
+connect.
 
 **Candidate layout** (repeated, in order):
 
@@ -102,8 +114,10 @@ tighter and derived.
 Canonical rules beyond the legacy parser: the candidate list is non-empty and
 duplicate-free (compared on encoded bytes); short texts are strict 7-bit ASCII
 (the legacy decode maps ≥ 0x80 to `?`); the flags byte must match the version
-exactly; the base64url layer is the unpadded, zero-trailing-bit form (legacy
-`Pinhole.Base64Url.Decode` accepts `=` padding and dirty trailing bits).
+exactly (for v4, one of its two legal shapes); a v4 knock length is 1..64 and
+the knock tail must tile the body exactly; the base64url layer is the
+unpadded, zero-trailing-bit form (legacy `Pinhole.Base64Url.Decode` accepts
+`=` padding and dirty trailing bits).
 
 ## Address record — `AddressRecordCodec.cs`
 
@@ -558,6 +572,52 @@ reply to a ≥94-byte mac1-valid PUNC) and a spoofed source, which never sees th
 COOKIE, remains unable to move the responder at all. Encrypting the cookie to the
 dialer's static key remains available as a later hardening if on-path cookie theft
 ever matters in practice.
+
+**The knock (R5 phase 2 remainder).** A node MAY be configured with a per-string
+secret (`PinholeOptions.Knock`, 8..64 raw bytes; the node's connection string then
+carries it as the v4 knock field). When set, possession of the string becomes a
+precondition for the handshake:
+
+- **mac1 is knock-keyed.** The mac1 key is no longer the raw static pub but
+  `KnockMac1Key = BLAKE3-DeriveKey("pinhole-knock-mac1-v1", responderStaticPub32 || knock)`.
+  The frames are byte-shape identical to knock-less v4 — only the key material
+  differs — so the wire stays indistinguishable and no length class changes. A
+  dialer whose string carries the knock computes the same key; a scanner holding
+  only the static pub (public material) fails the same silent `RejectMac1` gate a
+  random flood does: no PACK, no COOKIE, no state, no key agreement, counted only
+  in `Mac1Refused`. The pinned-key path in `Mac1OkForConn` verifies knock-keyed
+  only (the raw-pin form is a knock-less impostor); the own-key fallback is
+  knock-keyed exactly when the engine itself is knock-configured, so crossed
+  simultaneous-dial frames still verify.
+- **v3 is ignored.** A knock-configured responder cannot distinguish an honest v3
+  dialer from a scanner, and the operator has said nobody without the string gets
+  in — so unversioned PUNCs (the 13-byte legacy and 77-byte crypto shapes, on every
+  transport) are ignored outright: before the encryption policy, before the cookie
+  gate, before any state, and without even a `Mac1Refused` tick. The knock closes
+  that node's v3 support window unilaterally; its OUTBOUND window is untouched (a
+  knock-configured node dials v3-only peers normally). A knock string's dialer
+  never fires the v4→v3 unversioned fallback — its responder is knock-configured
+  by construction and ignores v3.
+- **The knock is a PSK.** `KeySchedule.Derive` mixes it as a fourth HKDF ikm slice:
+  `psk = BLAKE3-DeriveKey("pinhole-knock-psk-v1", knock)`, appended to `ee || se || es`.
+  The dialer holds the knock from the string, the responder from its options — a
+  knock-less MITM that somehow slipped a frame past mac1 still cannot produce a
+  confirm MAC that verifies (every sealed artifact differs; pinned in
+  HandshakeKnockTests). A dial whose string promised a knock also prices a crypto
+  PACK *without* the mac1 extension (a truncated or knock-less impostor's answer)
+  as a failed mac1 — same silent refusal. Mismatch is impossible without a forged
+  string, and forging one is priced by the mac1 gate itself.
+- **Layering.** mac1 (knock-keyed) runs before the cookie gate, and only
+  knock-keyed VALID PUNCs count toward the cookie load windows — a knock-less flood
+  cannot even arm them. Under load from knock holders (the compromised-string
+  scenario), the honest knock dialer pays the mac2 round trip on the same attempt
+  and seals, exactly as without a knock.
+- **Entropy guidance.** The knock is subject to offline guessing: anyone who saw a
+  single valid v4 frame can test guesses at BLAKE3 speed. Generate it as ≥16 random
+  bytes (the options surface enforces 8..64); never a human password. A knock
+  holder can still do everything a string holder could always do — dial honestly,
+  and arm the cookie gate with a flood of mac1-valid PUNCs, which is exactly the
+  load the cookie layer exists to absorb.
 
 - Dialer side, versioning: a v4 dialer sends versioned frames and, when a peer never
   answers (a v3-only responder ignoring the unknown shape), retries unversioned
