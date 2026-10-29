@@ -56,6 +56,18 @@ public struct PacerState
     public long PreCollapseWindow;
     public long PreCollapseSsthresh;
     public long SpuriousVerdicts;   // +1 per dup-after-retransmit, -1 per fresh-after-retransmit
+    // Vote pairing: the indices that cast the fresh-retransmitted (real-loss) vote
+    // this collapse cycle. A fresh copy of a re-requested chunk votes -1, but when
+    // the ORIGINAL then straggles in as a duplicate, both copies were in flight the
+    // whole time — the straggler cancels its chunk's -1 and votes spurious (a swing
+    // of +2), making the verdict order-independent. Without the pairing the ledger
+    // nets zero exactly when the duplicates prove the collapse spurious, and the
+    // restore can never fire (the macOS hunter capture: tailDropped=0, restores=0,
+    // 52 KiB of stragglers). Ring with overwrite-oldest; a cycle's overturn quorum
+    // is max(expiries/2, 1), far under capacity in every observed collapse.
+    public long[]? FreshVoteIndices;
+    public int FreshVoteCount;
+    public const int VoteRingCapacity = 32;
     public long DupWindowStartMs;
     public long LastDupMs;
     public long DupWindowBytes;
@@ -73,6 +85,7 @@ public struct PacerState
         s.LastPacerMs = long.MinValue;
         s.LastLossMs = -long.MaxValue / 2;
         s.Window = fixedWindow ? 4L * maxRequestCount * chunkBytes : Math.Min(32L * chunkBytes, s.MaxWindow);
+        s.FreshVoteIndices = new long[VoteRingCapacity];
         return s;
     }
 }
@@ -190,20 +203,22 @@ public static class PacerMachine
         return Math.Min(pto, PtoCeilingMs * 8);
     }
 
-    public static PacerEvent OnChunkArrived(ref PacerState s, int chunkBytes, bool fresh, bool retransmitted, long nowMs)
+    public static PacerEvent OnChunkArrived(ref PacerState s, int chunkBytes, bool fresh, bool retransmitted, long nowMs, long index)
     {
         if (!fresh)
         {
             PacerEvent verdict = default;
 
-            // A duplicate of a chunk we re-requested is a verdict on the expiry that
-            // re-requested it: the original was in flight the whole time — the timer
-            // fired on queueing delay (or a runner stall), not loss. Count it toward
-            // undoing the collapse those expiries caused; the retransmission served
-            // below is the wire cost already paid.
-            if (retransmitted && s.CollapsePending)
+            // The straggler: this duplicate is the ORIGINAL of a chunk whose re-served
+            // copy already cast the real-loss vote (TakeFreshVote). Both copies were in
+            // flight the whole time, so the vote cancels and the spurious side takes
+            // it — a swing of +2 against the ledger's earlier -1, netting the same +1
+            // the dup-first ordering earns. Without the pairing, arrival order decides
+            // the verdict instead of the wire facts.
+            bool overturns = s.CollapsePending && TakeFreshVote(ref s, index);
+            if (overturns || (retransmitted && s.CollapsePending))
             {
-                s.SpuriousVerdicts++;
+                s.SpuriousVerdicts += overturns ? 2 : 1;
                 verdict = TryRestoreSpuriousCollapse(ref s);
             }
 
@@ -230,10 +245,12 @@ public static class PacerMachine
         }
 
         // The retransmission delivered what the original never did: a real-loss vote
-        // against restoring the collapse those expiries caused.
+        // against restoring the collapse those expiries caused. Recorded so the
+        // original can overturn it later if it was merely slow, not lost.
         if (retransmitted && s.CollapsePending)
         {
             s.SpuriousVerdicts--;
+            RememberFreshVote(ref s, index);
         }
 
         if (s.FixedWindow)
@@ -334,6 +351,7 @@ public static class PacerMachine
         s.CollapseExpiries = s.ExpiriesThisLossWindow;
         s.SpuriousVerdicts = 0;
         s.CollapsePending = true;
+        s.FreshVoteCount = 0; // a fresh ledger cycle: stragglers of the last one vote nowhere
         s.ExpiriesThisLossWindow = 0;
 
         s.Ssthresh = Math.Max(s.Window / 2, 2 * MinimumWindow(in s));
@@ -368,6 +386,43 @@ public static class PacerMachine
     // flight those expiries buried was moving, and the window's dip (a quarter of
     // what it was) plus the linear congestion-avoidance climb back is pure
     // self-inflicted under-utilization on a path that never lost anything.
+    private static void RememberFreshVote(ref PacerState s, long index)
+    {
+        if (s.FreshVoteIndices is not { Length: > 0 } ring)
+        {
+            return; // a default-constructed state has no ring; Create() always allocates one
+        }
+
+        if (s.FreshVoteCount < ring.Length)
+        {
+            ring[s.FreshVoteCount++] = index;
+            return;
+        }
+
+        Array.Copy(ring, 1, ring, 0, ring.Length - 1);
+        ring[^1] = index;
+    }
+
+    private static bool TakeFreshVote(ref PacerState s, long index)
+    {
+        if (s.FreshVoteIndices is not { Length: > 0 } ring)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < s.FreshVoteCount; i++)
+        {
+            if (ring[i] == index)
+            {
+                ring[i] = ring[s.FreshVoteCount - 1];
+                s.FreshVoteCount--;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static PacerEvent TryRestoreSpuriousCollapse(ref PacerState s)
     {
         if (s.SpuriousVerdicts < Math.Max(s.CollapseExpiries / 2, 1))
@@ -380,6 +435,7 @@ public static class PacerMachine
         s.CollapsePending = false;
         long verdicts = s.SpuriousVerdicts;
         s.SpuriousVerdicts = 0;
+        s.FreshVoteCount = 0; // the cycle closed: its unclaimed fresh votes are spent
         return new PacerEvent { Kind = PacerEventKind.Restored, Verdicts = verdicts };
     }
 
@@ -409,6 +465,7 @@ public static class PacerMachine
         s.CollapsePending = false;
         s.CollapseExpiries = 0;
         s.SpuriousVerdicts = 0;
+        s.FreshVoteCount = 0;
         s.LastLossMs = -long.MaxValue / 2;
         return true;
     }

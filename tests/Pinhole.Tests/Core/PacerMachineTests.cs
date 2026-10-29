@@ -99,11 +99,11 @@ public sealed class PacerMachineTests
         // Eight duplicate KiB do not cross a quarter of the window; the ninth does.
         for (int i = 0; i < 8; i++)
         {
-            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 1000 + i);
+            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 1000 + i, i);
         }
 
         Assert.Equal(1.0, s.PtoInflation, 10);
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 1008);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 1008, 0);
         Assert.Equal(1.5, s.PtoInflation, 10);
         Assert.Equal((long)(900 * 1.5), PacerMachine.PtoMs(in s, 0));
 
@@ -112,7 +112,7 @@ public sealed class PacerMachineTests
         {
             for (int i = 0; i < 9; i++)
             {
-                PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 2000 + burst * 10_000 + i);
+                PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 2000 + burst * 10_000 + i, i);
             }
         }
 
@@ -120,7 +120,7 @@ public sealed class PacerMachineTests
 
         // A full loss window with zero duplicates is a clean bill: immediate relax.
         long lastDup = s.LastDupMs;
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, lastDup + 751);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, lastDup + 751, 0);
         Assert.Equal(1.0, s.PtoInflation, 10);
 
         // One millisecond short of the window the relaxation does not fire
@@ -128,10 +128,10 @@ public sealed class PacerMachineTests
         PacerState tight = Pacer();
         for (int i = 0; i < 9; i++)
         {
-            PacerMachine.OnChunkArrived(ref tight, Chunk, fresh: false, retransmitted: false, 5000 + i);
+            PacerMachine.OnChunkArrived(ref tight, Chunk, fresh: false, retransmitted: false, 5000 + i, i);
         }
 
-        PacerMachine.OnChunkArrived(ref tight, Chunk, fresh: true, retransmitted: false, 5008 + 750);
+        PacerMachine.OnChunkArrived(ref tight, Chunk, fresh: true, retransmitted: false, 5008 + 750, 0);
         Assert.Equal(1.5, tight.PtoInflation, 10);
     }
 
@@ -252,21 +252,21 @@ public sealed class PacerMachineTests
 
         // A fresh delivery of a retransmitted chunk is a REAL-loss vote: the verdict
         // ledger goes negative, so a single dup no longer clears the bar.
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: true, 10_050);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: true, 10_050, 7);
         Assert.Equal(-1, s.SpuriousVerdicts);
         Assert.True(s.CollapsePending);
 
         // Plain duplicates (of never-retransmitted chunks) are wire load, not verdicts.
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 10_051);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 10_051, 8);
         Assert.Equal(-1, s.SpuriousVerdicts);
 
         // Duplicate verdicts climb back from the deficit one by one: at zero the
         // quorum max(2/2, 1) = 1 is still short.
-        Assert.Equal(PacerEventKind.None, PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_052).Kind);
+        Assert.Equal(PacerEventKind.None, PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_052, 9).Kind);
         Assert.Equal(0, s.SpuriousVerdicts);
         Assert.True(s.CollapsePending);
 
-        PacerEvent restore = PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_053);
+        PacerEvent restore = PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_053, 10);
         Assert.Equal(PacerEventKind.Restored, restore.Kind);
         Assert.Equal(1, restore.Verdicts);
         Assert.Equal(s.PreCollapseWindow, s.Window); // the dip and the climb back were self-inflicted
@@ -275,8 +275,46 @@ public sealed class PacerMachineTests
         Assert.Equal(0, s.SpuriousVerdicts);
 
         // The latch: with no pending collapse, further duplicate verdicts change nothing.
-        Assert.Equal(PacerEventKind.None, PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_054).Kind);
+        Assert.Equal(PacerEventKind.None, PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_054, 11).Kind);
         Assert.Equal(s.PreCollapseWindow, s.Window);
+    }
+
+    [Fact]
+    public void Pacer_StragglerOriginal_OverturnsItsChunksFreshVote_RegardlessOfArrivalOrder()
+    {
+        // The hunter's macOS capture: nothing drops (tailDropped=0), the re-served
+        // copies land FIRST and vote real-loss, and the slow originals straggle in
+        // after — with no entry left to vouch for them. Both copies were in flight
+        // the whole time, so the straggler must cancel its chunk's vote and add the
+        // spurious one, netting the same +1 the dup-first ordering earns.
+        PacerState s = Pacer();
+        DeepQueueShape(ref s);
+        PacerMachine.OnRetransmit(ref s, 10_000);
+        PacerMachine.OnRetransmit(ref s, 10_001); // standing quorum: collapse, 2 expiries
+        Assert.True(s.CollapsePending);
+
+        // The re-served copy of chunk 7 is fresh and votes real-loss (-1, recorded).
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: true, 10_050, 7);
+        Assert.Equal(-1, s.SpuriousVerdicts);
+        Assert.True(s.CollapsePending);
+
+        // The original of chunk 7 straggles in: entry long gone, retransmitted false.
+        // It swings the ledger by two — cancel plus spurious — and the collapse
+        // overturns at quorum max(2/2, 1) = 1.
+        PacerEvent restore = PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 10_400, 7);
+        Assert.Equal(PacerEventKind.Restored, restore.Kind);
+        Assert.Equal(s.PreCollapseWindow, s.Window);
+        Assert.Equal(0, s.SpuriousVerdicts);
+        Assert.Equal(0, s.FreshVoteCount);
+
+        // A straggler nobody recorded votes nowhere: it is plain wire load.
+        PacerState lone = Pacer();
+        DeepQueueShape(ref lone);
+        PacerMachine.OnRetransmit(ref lone, 10_000);
+        PacerMachine.OnRetransmit(ref lone, 10_001);
+        Assert.Equal(PacerEventKind.None, PacerMachine.OnChunkArrived(ref lone, Chunk, fresh: false, retransmitted: false, 10_400, 99).Kind);
+        Assert.True(lone.CollapsePending);
+        Assert.Equal(0, lone.SpuriousVerdicts);
     }
 
     [Fact]
@@ -288,7 +326,7 @@ public sealed class PacerMachineTests
         // Collapse one: a fresh-retransmit vote puts the ledger at -1.
         PacerMachine.OnRetransmit(ref s, 10_000);
         PacerMachine.OnRetransmit(ref s, 10_001);
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: true, 10_050);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: true, 10_050, 7);
         Assert.Equal(-1, s.SpuriousVerdicts);
 
         // Collapse two a loss window later starts a fresh ledger at zero, so a single
@@ -298,7 +336,7 @@ public sealed class PacerMachineTests
         Assert.Equal(0, s.SpuriousVerdicts);
         long secondFrom = s.PreCollapseWindow;
 
-        PacerEvent restore = PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_700);
+        PacerEvent restore = PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: true, 10_700, 10);
         Assert.Equal(PacerEventKind.Restored, restore.Kind);
         Assert.Equal(secondFrom, s.Window);
     }
@@ -432,13 +470,13 @@ public sealed class PacerMachineTests
         // Slow start: every fresh delivery adds its own chunk, bounded by the cap.
         for (int i = 0; i < 40; i++)
         {
-            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, i);
+            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, i, i);
         }
 
         Assert.Equal(64 * Chunk, s.Window); // 32768 + 40*1024 clamped at the cap
 
         // Duplicates never grow the window.
-        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 100);
+        PacerMachine.OnChunkArrived(ref s, Chunk, fresh: false, retransmitted: false, 100, 0);
         Assert.Equal(64 * Chunk, s.Window);
 
         // Congestion avoidance: each 1024 adds 1024*1024/65536 = 16 to the
@@ -446,7 +484,7 @@ public sealed class PacerMachineTests
         s.Ssthresh = s.Window;
         for (int i = 0; i < 63; i++)
         {
-            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, 200 + i);
+            PacerMachine.OnChunkArrived(ref s, Chunk, fresh: true, retransmitted: false, 200 + i, i);
         }
 
         Assert.Equal(64 * Chunk, s.Window); // at the cap the growth lands as headroom
@@ -459,12 +497,12 @@ public sealed class PacerMachineTests
         open.Ssthresh = 32 * Chunk; // CA from the start, 32 KiB window, 1 MiB of headroom
         for (int i = 0; i < 31; i++)
         {
-            PacerMachine.OnChunkArrived(ref open, Chunk, fresh: true, retransmitted: false, i);
+            PacerMachine.OnChunkArrived(ref open, Chunk, fresh: true, retransmitted: false, i, i);
         }
 
         Assert.Equal(32 * Chunk, open.Window);
         Assert.Equal(992, open.FractionalGrowth);
-        PacerMachine.OnChunkArrived(ref open, Chunk, fresh: true, retransmitted: false, 31);
+        PacerMachine.OnChunkArrived(ref open, Chunk, fresh: true, retransmitted: false, 31, 31);
         Assert.Equal(33 * Chunk, open.Window);
         Assert.Equal(0, open.FractionalGrowth);
 
@@ -472,7 +510,7 @@ public sealed class PacerMachineTests
         PacerState fixedWindow = Pacer(fixedWindow: true);
         for (int i = 0; i < 100; i++)
         {
-            PacerMachine.OnChunkArrived(ref fixedWindow, Chunk, fresh: true, retransmitted: false, i);
+            PacerMachine.OnChunkArrived(ref fixedWindow, Chunk, fresh: true, retransmitted: false, i, i);
         }
 
         Assert.Equal(4 * MaxRun * Chunk, fixedWindow.Window);

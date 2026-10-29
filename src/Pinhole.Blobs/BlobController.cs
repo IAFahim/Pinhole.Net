@@ -118,7 +118,7 @@ internal sealed class BlobController
     // downloader's stall math must not depend on that option.
     public TimeSpan? SmoothedRtt => !_pacer.HaveRtt ? null : TimeSpan.FromMilliseconds(_pacer.SrttMs);
 
-    public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, bool retransmitted, long nowMs)
+    public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, bool retransmitted, long nowMs, long index)
     {
         if (hadReservation)
         {
@@ -126,7 +126,7 @@ internal sealed class BlobController
             _budget.Release(chunkBytes);
         }
 
-        PacerEvent verdict = PacerMachine.OnChunkArrived(ref _pacer, chunkBytes, fresh, retransmitted, nowMs);
+        PacerEvent verdict = PacerMachine.OnChunkArrived(ref _pacer, chunkBytes, fresh, retransmitted, nowMs, index);
         if (_stats is not null)
         {
             if (fresh)

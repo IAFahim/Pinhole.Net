@@ -134,7 +134,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
         Assert.Equal(window, controller.WindowBytes);
         Assert.Equal(initial, controller.PtoFor(0));
         Assert.Null(stats.SmoothedRtt); // the old route's sample cannot describe the new one
-        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, 2000);
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, 2000, index: 0);
         Assert.Equal(window + 1024, controller.WindowBytes); // fresh-route slow start is restored
     }
 
@@ -161,7 +161,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
         // No duplicate verdict ever arrives, so nothing may come back.
         for (int i = 0; i < 3; i++)
         {
-            controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050 + i);
+            controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050 + i, index: 100 + i);
         }
 
         Assert.Equal(0, stats.RestoredWindows);
@@ -178,9 +178,46 @@ public sealed class CongestionTests(ITestOutputHelper output)
         long beforeSpuriousVerdict = controller.WindowBytes;
         Assert.True(beforeSpuriousVerdict < window);
 
-        controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: true, 10_700);
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: true, 10_700, index: 0);
         Assert.Equal(1, stats.RestoredWindows);
         Assert.Equal(collapsed, controller.WindowBytes); // restored to the pre-collapse window
+    }
+
+    [Fact]
+    public void Controller_StragglerOriginals_OverturnTheFreshVotes_AndRestoreTheWindow()
+    {
+        // The macOS hunter orbit: a starved scheduler delivers the re-served copies
+        // first (fresh, real-loss votes) and the slow originals after (no reservation
+        // left). Before pairing, each chunk netted -1 — the duplicates PROVED the
+        // collapse spurious while confirming it in the ledger, restores stayed at 0,
+        // and the window ground down on a link that dropped nothing. Paired, each
+        // completed chunk nets +1: two fresh votes (-2), then each original cancels
+        // its chunk's vote and adds the spurious one (+2), so the ledger crosses the
+        // quorum on the second completed pair.
+        var stats = new BlobTransferStats();
+        var controller = new BlobController(1024 * 1024, new BlobFlowBudget(1024 * 1024), stats, fixedWindow: false);
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(40));
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
+        controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
+
+        long window = controller.WindowBytes;
+        controller.OnRetransmit(10_000);
+        controller.OnRetransmit(10_001); // standing cluster: collapse, 2 expiries, quorum 1
+        Assert.True(controller.WindowBytes < window);
+
+        // Both re-served copies land fresh: real-loss votes, no duplicates in sight.
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050, index: 100);
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_051, index: 101);
+        Assert.Equal(0, stats.RestoredWindows);
+
+        // First original straggles in: its pair nets +1, the other pair still owes -1.
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: false, 10_600, index: 100);
+        Assert.Equal(0, stats.RestoredWindows); // ledger 0: under the quorum of 1
+
+        // Second original completes its pair: ledger +1, the collapse overturns.
+        controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: false, 10_640, index: 101);
+        Assert.Equal(1, stats.RestoredWindows);
+        Assert.Equal(window, controller.WindowBytes);
     }
 
     [Theory]
@@ -191,7 +228,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
     {
         var controller = new BlobController(maximum, new BlobFlowBudget(64 * 1024), null, fixedWindow: false);
         Assert.InRange(controller.WindowBytes, 4096, maximum);
-        for (int i = 0; i < 100; i++) controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, i);
+        for (int i = 0; i < 100; i++) controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, i, index: i);
         Assert.InRange(controller.WindowBytes, 4096, maximum);
         controller.OnPathChanged();
         Assert.InRange(controller.WindowBytes, 4096, maximum);
