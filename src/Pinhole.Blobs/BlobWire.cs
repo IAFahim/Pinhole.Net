@@ -16,7 +16,7 @@ internal static class BlobWire
     internal const byte ProtocolVersion = 3;
     internal const byte CurrentVersion = 4;
 
-    public const int MaxChunkData = Blake3.ChunkSize; // 1024
+    public const int MaxChunkData = Blake3.ChunkSize;
     public const int MaxRequestCount = 64;
     public const int MaxProofSiblings = 64;
 
@@ -36,8 +36,6 @@ internal static class BlobWire
         return frame;
     }
 
-    // Built without the shared BodyWriter helper, like Chunk: spans cannot be captured
-    // in the lambda.
     public static byte[] Hello(ulong stream, ReadOnlySpan<byte> sessionId, byte version = ProtocolVersion)
     {
         CheckVersion(version);
@@ -98,7 +96,6 @@ internal static class BlobWire
             BinaryPrimitives.WriteUInt16LittleEndian(body[8..], (ushort)count);
         });
 
-    // Built without the shared BodyWriter helper: spans cannot be captured in the lambda.
     public static byte[] Chunk(ulong stream, long index, ReadOnlySpan<byte> cv, ReadOnlySpan<byte> data)
     {
         byte[] frame = new byte[9 + 8 + 32 + data.Length];
@@ -110,7 +107,6 @@ internal static class BlobWire
         return frame;
     }
 
-    // Sibling CVs run bottom-up: from the verified run's root toward the file root.
     public static byte[] Proof(ulong stream, long runIndex, ReadOnlySpan<byte> siblingCvs32Each)
     {
         if (siblingCvs32Each.Length % SessionIdLength != 0
@@ -139,7 +135,7 @@ internal static class BlobWire
         public long Index { get; init; }
         public byte[]? ChunkCv { get; init; }
         public byte[]? ChunkData { get; init; }
-        public byte[]? SiblingCvs { get; init; } // Proof: count * 32 concatenated sibling CVs
+        public byte[]? SiblingCvs { get; init; }
 
         public byte[]? SessionId { get; init; }
         public byte Version { get; init; }
@@ -213,7 +209,7 @@ internal static class BlobWire
                         TotalChunks = BinaryPrimitives.ReadInt64LittleEndian(body[8..]),
                     };
                     return f.TotalBytes >= 0 && f.TotalChunks == f.TotalBytes / Blake3.ChunkSize
-                        + (f.TotalBytes % Blake3.ChunkSize == 0 ? 0 : 1); // overflow-safe; only (0,0) is empty
+                        + (f.TotalBytes % Blake3.ChunkSize == 0 ? 0 : 1);
                 case TypeReq:
                     if (body.Length != 10)
                     {
@@ -311,8 +307,6 @@ internal static class BlobWire
                 return Frame.TryParse(payload, out frame) && frame.Stream == stream;
             }
 
-            // Try ordinary ciphertext first after negotiation. A failed open never changes
-            // the watermark, so an unsealed Welcome can safely be checked afterwards.
             if (_cipher is not null && _cipher.TryOpen(fromProvider: true, payload, ref _watermark, out byte[] plain))
             {
                 return Frame.TryParse(plain, out frame) && frame.Stream == stream;
@@ -351,8 +345,6 @@ internal static class BlobWire
         private const byte ProviderRole = 1;
         private readonly Aead _aead;
 
-        // Callers seal on one task and open on another (client pump vs run loop), and a
-        // BCL AEAD instance is not thread-safe — the per-call BouncyCastle engines were.
         private readonly object _gate = new();
 
         private Cipher(ReadOnlySpan<byte> key) => _aead = Aead.CreateChaCha20Poly1305(key);
@@ -378,7 +370,6 @@ internal static class BlobWire
             return Derive(psk, salt, Info(version));
         }
 
-        // The HKDF info string is the only v3/v4 difference; role byte and counters are shared.
         private static ReadOnlySpan<byte> Info(byte version) => version switch
         {
             ProtocolVersion => "pinhole-blobs-v3"u8,
@@ -390,8 +381,6 @@ internal static class BlobWire
 
         internal static Cipher ForLegacyEmulation(byte[] psk, byte[] root) => Derive(psk, root, "pinhole-blobs-v1"u8);
 
-        // The salt/info inputs are a wire-format promise: they must stay byte-identical
-        // to what the BouncyCastle implementation fed HKDF (RFC 5869 is deterministic).
         private static Cipher Derive(ReadOnlySpan<byte> psk, ReadOnlySpan<byte> salt, ReadOnlySpan<byte> info)
         {
             Span<byte> key = stackalloc byte[Aead.KeySize];
@@ -428,7 +417,7 @@ internal static class BlobWire
             ulong candidate = BinaryPrimitives.ReadUInt64LittleEndian(wire);
             if (candidate <= watermark)
             {
-                return false; // replay or regression; the ARQ layer tolerates loss, not lies
+                return false;
             }
 
             Span<byte> nonce = stackalloc byte[Aead.NonceSize];
@@ -438,12 +427,12 @@ internal static class BlobWire
             {
                 if (!_aead.TryOpen(nonce, [], wire[8..], plain))
                 {
-                    return false; // forged or corrupted in flight: the watermark does not move
+                    return false;
                 }
             }
 
             plaintext = plain;
-            watermark = candidate; // committed only after the tag verifies
+            watermark = candidate;
             return true;
         }
 
@@ -464,8 +453,6 @@ internal static class BlobWire
                 _inner.TryOpen(fromProvider, wire, ref watermark, out plaintext);
         }
     }
-
-    // ------------------------------------------------------------------ send-path transition tolerance
 
     internal static readonly TimeSpan RideOutBudget = TimeSpan.FromSeconds(30);
 

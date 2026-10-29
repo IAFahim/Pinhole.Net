@@ -29,8 +29,7 @@ internal static class TestDispose
         }
         catch
         {
-            // The dispose itself threw a real error (not a timeout): still not worth
-            // replacing the test's own result — but a stuck one above is worth failing.
+
         }
     }
 

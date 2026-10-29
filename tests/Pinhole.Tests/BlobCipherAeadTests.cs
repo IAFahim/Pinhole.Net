@@ -13,9 +13,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-// Differential proof that moving BlobWire.Cipher off BouncyCastle changed nothing on
-// the wire: the Bc* helpers below are the pre-swap implementation, verbatim, and every
-// seal through the new Cipher must produce byte-identical frames through both paths.
 public sealed class BlobCipherAeadTests
 {
     [Theory]
@@ -53,13 +50,12 @@ public sealed class BlobCipherAeadTests
                 byte[] newFrame = cipher.Seal(asProvider, counter, payload);
                 Assert.Equal(bcFrame, newFrame);
 
-                if (counter > 0) // the watermark starts above 0, so counter 0 can never be opened
+                if (counter > 0)
                 {
                     ulong watermark = counter - 1;
                     Assert.True(cipher.TryOpen(asProvider, newFrame, ref watermark, out byte[] plain));
                     Assert.Equal(payload, plain);
-                    // A separate watermark: opening the BC frame at the same counter would
-                    // otherwise be a replay reject, which is the protocol working, not a defect.
+
                     ulong viaBcWatermark = counter - 1;
                     Assert.True(cipher.TryOpen(asProvider, bcFrame, ref viaBcWatermark, out byte[] viaBc));
                     Assert.Equal(payload, viaBc);
@@ -143,10 +139,6 @@ public sealed class BlobCipherAeadTests
         Assert.Equal(bc, bcl);
     }
 
-    // The BouncyCastle engines were constructed per call, so concurrent Seal/TryOpen on one
-    // session used to be safe by accident. The BCL instance is not, and the client really
-    // does open on the pump task while sealing on the run loop; without the gate this test
-    // corrupts the OpenSSL context (observed as "tag not set" or a test-host SIGSEGV).
     [Fact]
     public async Task Cipher_ConcurrentSealAndOpenOnOneSession_StaysSafe()
     {
@@ -183,9 +175,6 @@ public sealed class BlobCipherAeadTests
         BlobWire.CurrentVersion => "pinhole-blobs-v4",
         _ => throw new ArgumentOutOfRangeException(nameof(version), "blob protocol version must be 3 or 4"),
     };
-
-    // Everything below is the pre-swap BouncyCastle implementation of BlobWire.Cipher,
-    // kept here as the wire-format oracle: per-call engine, per-call AeadParameters.
 
     private static byte[] BcDeriveKey(byte[] psk, byte[] salt, byte[] info)
     {

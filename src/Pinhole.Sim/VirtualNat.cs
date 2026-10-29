@@ -10,11 +10,6 @@ public enum VirtualNatKind
     Symmetric,
 }
 
-// The endpoint-translation semantics of the four NAT behaviors: a mapping table
-// from internal endpoints to public ones plus the per-kind inbound filter. It is
-// deliberately socket-free — the caller resolves the returned internal endpoint
-// to whatever peer object it attached there — so a deterministic, thread-free
-// sim can drive it exactly like the wall-clock fixture does.
 internal sealed class VirtualNat : IDisposable
 {
     private readonly IPAddress _publicAddress;
@@ -23,7 +18,7 @@ internal sealed class VirtualNat : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<IPEndPoint, Mapping> _byPublic = new();
     private readonly List<Mapping> _mappings = [];
-    private int _nextInternalHost = 2; // .1 is the box itself
+    private int _nextInternalHost = 2;
     private int _nextPublicPort = 49152;
 
     private sealed class Mapping(IPEndPoint internalEndpoint, IPEndPoint @public)
@@ -32,7 +27,7 @@ internal sealed class VirtualNat : IDisposable
         public readonly IPEndPoint Public = @public;
         public HashSet<IPAddress> SentToAddresses { get; } = [];
         public HashSet<IPEndPoint> SentToEndpoints { get; } = [];
-        public IPEndPoint? SoleRemote; // symmetric only: the one destination this mapping serves
+        public IPEndPoint? SoleRemote;
         public bool Dead;
     }
 
@@ -49,8 +44,6 @@ internal sealed class VirtualNat : IDisposable
 
     public bool BlockAllOutboundDirect { get; set; }
 
-    // Independent allocation policy for tests of predictable versus randomized
-    // symmetric NATs; it does not inspect Pinhole frames or connection identity.
     internal Func<int, int>? PortAllocator { get; set; }
     private int NextPort() => PortAllocator?.Invoke(_nextPublicPort++) ?? _nextPublicPort++;
 
@@ -58,7 +51,6 @@ internal sealed class VirtualNat : IDisposable
     public long FilterDrops;
     public long ExpiredMappings;
 
-    // The next internal address for a socket that will live behind this NAT.
     public IPEndPoint AllocateInternalEndpoint()
     {
         lock (_gate)

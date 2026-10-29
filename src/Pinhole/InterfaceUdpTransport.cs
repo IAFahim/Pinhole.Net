@@ -75,9 +75,7 @@ internal sealed class InterfaceUdpTransport : IDisposable
     {
         UdpInterfaceSource[] valid = sources.Where(s => s.Index > 0 && Eligible(s.Address))
             .OrderBy(s => s.Rank).ThenBy(s => s.Index).ThenBy(s => s.Address.AddressFamily).Distinct().ToArray();
-        // Keep both available families before expanding across interfaces, then take
-        // extra families/addresses. Many IPv4 links or privacy addresses must not
-        // crowd every IPv6 source out of the bounded pool.
+
         return valid.DistinctBy(s => s.Address.AddressFamily).Concat(valid.DistinctBy(s => s.Index))
             .Concat(valid.DistinctBy(s => (s.Index, s.Address.AddressFamily)))
             .Concat(valid).Distinct().Take(MaxSources).ToArray();
@@ -116,7 +114,7 @@ internal sealed class InterfaceUdpTransport : IDisposable
         }
         foreach (Slot slot in retired) slot.Dispose();
         foreach (Slot slot in created) { slot.Start(); slot.ProbeSoon(); }
-        if (changed) _changed(); // callbacks never run under the pool's lock
+        if (changed) _changed();
     }
 
     internal void Tick(long now)
@@ -131,8 +129,7 @@ internal sealed class InterfaceUdpTransport : IDisposable
 
     internal void SendCandidates(ReadOnlySpan<byte> frame, IPEndPoint remote)
     {
-        // Initial punches are bounded by the source pool. Ordinary application sends use
-        // exactly the socket selected by an authenticated receive, never this fan-out.
+
         if (IPAddress.IsLoopback(remote.Address) || remote.Address.IsIPv6LinkLocal) return;
         AddressFamily family = remote.Address.IsIPv4MappedToIPv6 ? AddressFamily.InterNetwork : remote.AddressFamily;
         IPEndPoint mapped = family == AddressFamily.InterNetwork && !remote.Address.IsIPv4MappedToIPv6
@@ -198,7 +195,7 @@ internal sealed class InterfaceUdpTransport : IDisposable
                 catch (ObjectDisposedException) { return; }
                 catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut || ex.SocketErrorCode == SocketError.Interrupted) { }
                 catch (SocketException) { _owner.Failed(this); return; }
-                catch (Exception) { } // one malformed frame/user handler cannot terminate this listener
+                catch (Exception) { }
             }
         }
 

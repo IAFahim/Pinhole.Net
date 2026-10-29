@@ -1,7 +1,5 @@
 namespace Pinhole;
 
-// Identity-addressed HTTPS relays share the session engine's path lifecycle. Their
-// authentication, wire framing and key types remain specific to each protocol.
 internal interface IKeyedRelay : IDisposable
 {
     Uri Url { get; }

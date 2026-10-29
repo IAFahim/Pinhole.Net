@@ -7,9 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Crypto;
 
-// R1 gates for the zero-allocation BLAKE3: the official vector suite (all three
-// modes, both execution paths), differential against BouncyCastle, map/reduce
-// agreement with the streaming core, and the 0-allocation-per-op property.
 public sealed class Blake3PrimitiveTests
 {
     private const string KeyString = "whats the Elvish word for friend";
@@ -123,7 +120,7 @@ public sealed class Blake3PrimitiveTests
                         $"stream plain len={length} path={(bypass ? "scalar" : "simd")}");
 
                     var keyedHasher = new Blake3Hasher(key);
-                    // feed in odd pieces to cross chunk and block boundaries
+
                     int pos = 0;
                     var rng = new Random(length);
                     while (pos < data.Length)
@@ -171,7 +168,7 @@ public sealed class Blake3PrimitiveTests
                 int pos = 0;
                 while (pos < data.Length)
                 {
-                    // piece sizes straddle blocks (64), chunks (1024) and batches (64 KiB)
+
                     int take = Math.Min((int)(rng.NextInt64(1, 90_000)), data.Length - pos);
                     hasher.Update(data.AsSpan(pos, take));
                     pos += take;
@@ -217,7 +214,7 @@ public sealed class Blake3PrimitiveTests
                     {
                         if (chunks == 1 && tail == 0)
                         {
-                            continue; // empty input covered by the vectors
+                            continue;
                         }
 
                         byte[] data = RandomNumberGenerator.GetBytes(chunks * 1024 + tail);
@@ -238,8 +235,6 @@ public sealed class Blake3PrimitiveTests
                             nodes = Blake3.ReduceLevel(cvs, nodes);
                         }
 
-                        // nodes >= 2 always holds here: single-chunk inputs were skipped
-                        // above and any fuller input leaves at least the top pair.
                         Assert.True(nodes >= 2);
                         byte[] digest = new byte[32];
                         Blake3.RootFromTopPair(cvs.AsSpan(0, 8), cvs.AsSpan(8, 8), digest);
@@ -263,13 +258,12 @@ public sealed class Blake3PrimitiveTests
         uint[] whole = new uint[300 * 8];
         Assert.Equal(300, Blake3.HashChunks(data, 0, whole));
 
-        // slice the map step at an arbitrary offset: the counter is the chunk index
         uint[] secondHalf = new uint[149 * 8];
         Assert.Equal(149, Blake3.HashChunks(data.AsSpan(151 * 1024), 151, secondHalf));
         Assert.True(whole.AsSpan(151 * 8, 149 * 8).SequenceEqual(secondHalf));
 
         uint[] tiny = new uint[3 * 8];
-        Assert.Equal(3, Blake3.HashChunks(data, 0, tiny)); // capacity-bound
+        Assert.Equal(3, Blake3.HashChunks(data, 0, tiny));
     }
 
     [Fact]
@@ -321,7 +315,6 @@ public sealed class Blake3PrimitiveTests
         Span<uint> cv = stackalloc uint[8];
         block.Fill(0x5A5A5A5Au);
 
-        // warm every code path so tiering and first-touch costs are outside the window
         for (int i = 0; i < 3; i++)
         {
             Blake3.Hash(big, digest);
@@ -333,7 +326,7 @@ public sealed class Blake3PrimitiveTests
             hasher.Finish(digest);
         }
 
-        var fresh = new Blake3Hasher(); // construction cost is by design; ops below must be free
+        var fresh = new Blake3Hasher();
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 5; i++)
         {

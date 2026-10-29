@@ -1,6 +1,5 @@
 using Pinhole;
 
-// No arguments: host. One argument: join the friend's nine-character code.
 if (args.Length > 1) { Console.Error.WriteLine("Usage: Pinhole.CloudflareChat [code]"); return 1; }
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };

@@ -9,7 +9,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
 {
     private static readonly TimeSpan PublishConfirmWait = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ResolveWait = TimeSpan.FromSeconds(3);
-    private const int MaxWireRecord = 1024; // records are ~450 bytes today; room to grow
+    private const int MaxWireRecord = 1024;
 
     private readonly ulong _selfId;
     private readonly IPEndPoint[] _servers;
@@ -36,8 +36,6 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, ToWire(server), confirm.Token).ConfigureAwait(false);
         }
 
-        // Waiting for one OBS turns "server down" into a detectable failure the publisher
-        // can back off from, instead of a silent datagram into the void.
         await ExpectAsync(udp, "OBS", confirm.Token).ConfigureAwait(false);
     }
 
@@ -52,9 +50,6 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             await udp.SendToAsync(Encoding.ASCII.GetBytes(message), SocketFlags.None, ToWire(server), deadline.Token).ConfigureAwait(false);
         }
 
-        // First record-bearing INTRO for the target wins. A legacy bare-endpoint INTRO
-        // carries no signature, so it can never be adopted — unknown-endpoint redirects are
-        // exactly the traffic-redirection abuse signed records exist to prevent.
         byte[] buffer = new byte[2048];
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
         while (!deadline.IsCancellationRequested)
@@ -70,8 +65,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
             }
             catch (SocketException)
             {
-                // An ICMP error from one server is not a verdict on the others. The
-                // operation's deadline still bounds a directory where nobody replies.
+
                 continue;
             }
 
@@ -126,8 +120,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         if (OperatingSystem.IsWindows())
         {
-            // A failed UDP destination otherwise makes the next receive (or send) fail,
-            // even when a different directory server has a valid reply waiting.
+
             const int sioUdpConnreset = -1744830452;
             udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
         }
@@ -137,9 +130,7 @@ internal sealed class RendezvousLookup : IPinholeLookupProvider
 
     private static IPEndPoint ToWire(IPEndPoint ep)
     {
-        // Same mapping PeerSocket performs: the socket is dual-mode IPv6, so v4 servers must
-        // be v4-mapped, and an unspecified address (a server reported as "[::]:port") can
-        // only ever mean loopback here.
+
         if (ep.Address.AddressFamily == AddressFamily.InterNetwork || ep.Address.Equals(IPAddress.IPv6Any))
         {
             IPAddress mapped = ep.Address.Equals(IPAddress.IPv6Any) ? IPAddress.IPv6Loopback : ep.Address.MapToIPv6();

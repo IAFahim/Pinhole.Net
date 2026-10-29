@@ -1,10 +1,5 @@
 namespace Pinhole.Crypto;
 
-// Credit ledger for shared budgets (the pacer pie, relay grants, connection caps):
-// Outstanding never exceeds Capacity, reserves are all-or-nothing, and releases must
-// return previously reserved credit. Conservation invariant for any operation
-// sequence: Outstanding equals the sum of live reservations, and is zero at
-// quiescence. Relocates to Pinhole.Core with the sans-IO machines.
 public struct Ledger : IEquatable<Ledger>
 {
     public long Capacity { get; }

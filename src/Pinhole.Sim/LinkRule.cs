@@ -19,8 +19,8 @@ internal sealed class LinkRule
 
     public long Passed;
     public long Lost;
-    public long Duplicated;  // Interlocked: copies the rule emitted onto the wire
-    public long Corrupted;   // Interlocked: crossings that left with a flipped byte
+    public long Duplicated;
+    public long Corrupted;
 
     public bool DuplicatesAnything => ForwardDuplicate is not null || ReverseDuplicate is not null;
 
@@ -34,8 +34,6 @@ internal sealed class LinkRule
         return Compare(source, dest) < 0 ? ForwardLoss : ReverseLoss;
     }
 
-    // Same direction split as LossFor: a null reverse model means the forward model
-    // speaks for both directions.
     public DuplicationModel? DuplicateFor(IPEndPoint source, IPEndPoint dest)
     {
         if (ReverseDuplicate is null)
@@ -118,9 +116,6 @@ internal sealed class LinkRule
         DropAll = true,
     };
 
-    // A hostile internet leg (R3/P1): everything that crosses is liable to be
-    // duplicated, delayed+reordered, and byte-corrupted — the receiving AEAD must
-    // refuse every corrupted or replayed copy while the honest stream gets through.
     public static LinkRule Hostile(Subnet a, Subnet b,
         DuplicationModel? duplicate = null, CorruptionModel? corrupt = null,
         LossModel? forwardLoss = null, LossModel? reverseLoss = null,

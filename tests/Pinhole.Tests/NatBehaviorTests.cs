@@ -137,12 +137,12 @@ public sealed class NatBehaviorTests
     }
 
     [Theory]
-    [InlineData(0)] // short known address
-    [InlineData(1)] // truncated tail
-    [InlineData(2)] // invalid reserved byte
-    [InlineData(3)] // zero mapped port
-    [InlineData(4)] // multicast mapped address
-    [InlineData(5)] // message length mismatch
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
     public void MessageCodec_RejectsMalformedOrUnusableEvidence(int variant)
     {
         byte[] wire = VirtualBehaviorStunServer.Response(new byte[12], Mapping(41000), Primary, Other);

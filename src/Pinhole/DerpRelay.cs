@@ -8,8 +8,6 @@ using System.Threading.Channels;
 
 namespace Pinhole;
 
-// Managed DERP v2 over the official "derp" WebSocket transport. This consumes
-// Tailcat-compatible relays; it does not implement Tailcat/WireGuard peer tunnels.
 internal sealed class DerpRelay : IKeyedRelay
 {
     internal const int MaxDatagramSize = 65536;
@@ -58,8 +56,7 @@ internal sealed class DerpRelay : IKeyedRelay
         byte[] frame = EncodeFrame(0x04, new byte[32 + payload.Length]);
         destination.CopyTo(frame.AsSpan(5, 32));
         payload.CopyTo(frame.AsSpan(37));
-        // Honor the relay's advertised byte budget, including DERP framing, just as
-        // the upstream client does. Drops are consistent with the datagram API.
+
         lock (_rateGate)
         {
             if (_bytesPerSecond > 0)
@@ -67,7 +64,7 @@ internal sealed class DerpRelay : IKeyedRelay
                 long now = Stopwatch.GetTimestamp();
                 _tokens = Math.Min(_burst, _tokens + Stopwatch.GetElapsedTime(_lastRefill, now).TotalSeconds * _bytesPerSecond);
                 _lastRefill = now;
-                if (_tokens < frame.Length) return true; // upstream drops without declaring the path dead
+                if (_tokens < frame.Length) return true;
                 _tokens -= frame.Length;
             }
             return _outgoing.Writer.TryWrite(frame);
@@ -184,8 +181,7 @@ internal sealed class DerpRelay : IKeyedRelay
     }
 
     internal static Task<WebSocket> ConnectManagedAsync(Uri uri, CancellationToken ct) =>
-        // HTTP/WebSocket framing runs over the already authenticated TLS stream
-        // returned by ConnectCallback. No plaintext network connection is used.
+
         ConnectSocketAsync(new UriBuilder(uri) { Scheme = "ws", Port = uri.Port }.Uri, DerpTls.Http, ct);
 
     private static async Task<WebSocket> ConnectSocketAsync(Uri uri, HttpMessageInvoker? http, CancellationToken ct)
@@ -216,15 +212,15 @@ internal sealed class DerpRelay : IKeyedRelay
         while (!ct.IsCancellationRequested)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(TimeSpan.FromSeconds(130)); // two missed upstream keepalives
+            deadline.CancelAfter(TimeSpan.FromSeconds(130));
             var (type, body) = await ReadFrameAsync(socket, deadline.Token).ConfigureAwait(false);
             switch (type)
             {
-                case 0x05: // RecvPacket v2: source Curve25519 key, then datagram
+                case 0x05:
                     if (body.Length is <= 32 or > MaxDatagramSize + 32) throw new InvalidDataException("invalid DERP datagram size");
                     Received?.Invoke(this, body[..32], body[32..]);
                     break;
-                case 0x12: // Ping: pong must use the shared send lane
+                case 0x12:
                     if (body.Length != 8) throw new InvalidDataException("invalid DERP ping");
                     if (!_outgoing.Writer.TryWrite(EncodeFrame(0x13, body))) throw new IOException("DERP send queue is full");
                     break;
@@ -236,7 +232,7 @@ internal sealed class DerpRelay : IKeyedRelay
                     break;
                 case 0x15:
                     throw new IOException("DERP relay requested reconnection");
-                // PeerGone, Pong, and future informational frames do not carry data.
+
             }
         }
     }
@@ -267,7 +263,7 @@ internal sealed class DerpRelay : IKeyedRelay
         {
             var read = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
             if (read.MessageType != WebSocketMessageType.Binary) throw new IOException("DERP connection closed or sent non-binary data");
-            buffer = buffer[read.Count..]; // DERP is a byte stream across WebSocket messages
+            buffer = buffer[read.Count..];
         }
     }
 

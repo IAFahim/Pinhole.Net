@@ -7,17 +7,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests.Sim;
 
-// R3 property gate P5 at END-TO-END level: blob resume is idempotent —
-// Resume(Resume(x)) = Resume(x). x is a mid-flight PBPART02 checkpoint (verified-run
-// bitmap + fold state on disk); Resume(x) is a completed, root-verified destination
-// file with the checkpoint consumed; the second Resume is a THIRD call of the same
-// ticket against the same destination, and it must be a no-op on the wire: zero
-// provider connections, zero chunks served, no checkpoint churn, identical file
-// bytes. A third call that re-downloads anything means the completed destination is
-// not recognized as the transfer's own fixed point. The ledger probe rides the same
-// runs (P3 discipline, for free) so conservation is asserted across every dial the
-// property exercises. Every stochastic model here is seeded (this suite runs clean
-// links; see SimPhase2P1SealTests for the hostile ones).
 public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;
@@ -61,7 +50,7 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
 
             try
             {
-                // ---- x: interrupt a healthy transfer mid-flight; the checkpoint is the state.
+
                 long verified = 0;
                 var progress = new Progress<BlobProgress>(p => Volatile.Write(ref verified, p.VerifiedBytes));
                 using var cts = new CancellationTokenSource();
@@ -73,7 +62,6 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
                 Assert.True(Directory.Exists(partDir), "the interrupted transfer left no checkpoint to resume from");
                 Assert.True(File.Exists(Path.Combine(partDir, "state")), "the checkpoint state file is missing");
 
-                // ---- Resume(x): the same call re-dials and finishes from the checkpoint.
                 BlobDownloadResult second = await DownloadAsync(lab, server, dest, flow).WaitAsync(Budget);
                 Assert.Equal(FlowBytes, second.Bytes);
                 Assert.True(second.Resumed, "the second call must resume, not restart");
@@ -82,7 +70,6 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
                 long servedAfterResume = server.ChunksServed;
                 long connectionsAfterResume = server.ConnectionsAccepted;
 
-                // ---- Resume(Resume(x)): the fixed point. No dial, no chunk, no state churn.
                 BlobDownloadResult third = await DownloadAsync(lab, server, dest, flow).WaitAsync(Budget);
                 Assert.Equal(FlowBytes, third.Bytes);
                 Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dest, "resume.bin")));
@@ -95,7 +82,7 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
                 BlobTestHooks.Ledger = null;
             }
 
-            Assert.Empty(violations); // the ledger stayed conserved across every dial
+            Assert.Empty(violations);
             Assert.Equal(0, flow.UsedBytes);
             output.WriteLine($"resume idempotent: {server.ChunksServed} chunks served total across " +
                              $"{server.ConnectionsAccepted} connections, {ticks} ledger observations");
@@ -109,9 +96,7 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
     [Fact]
     public async Task P5_TamperedDestination_IsNotTrusted_AndIsOverwrittenByAHonestDownload()
     {
-        // The safety valve of the idempotence fix: a destination that exists but does
-        // not hash to the ticket root is NOT the fixed point. The call must fall
-        // through to a full wire download and overwrite the tampered bytes.
+
         string dir = TempDir();
         try
         {
@@ -141,7 +126,7 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
                 .WaitAsync(Budget);
 
             Assert.Equal(FlowBytes, result.Bytes);
-            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dest, "tamper.bin"))); // healed, not trusted
+            Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dest, "tamper.bin")));
             Assert.True(server.ChunksServed > 0, "the tampered destination was trusted without a wire download");
         }
         finally
@@ -149,8 +134,6 @@ public sealed class SimPhase2P5ResumeTests(ITestOutputHelper output)
             Directory.Delete(dir, recursive: true);
         }
     }
-
-    // ------------------------------------------------------------------ plumbing
 
     private static string TempDir()
     {

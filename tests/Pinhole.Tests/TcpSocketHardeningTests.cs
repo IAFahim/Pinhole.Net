@@ -14,15 +14,15 @@ public sealed class TcpSocketHardeningTests
         Bind = new IPEndPoint(bind, 0), StunServers = [], IrohRelayUrls = [], DerpRelayUrls = [],
         EnablePortMapping = false, PublishIrohAddress = false, EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnableDirectUdp = false, ReceiveBufferCapacity = 16,
-        ConnectTimeout = TimeSpan.FromSeconds(8), // TCP rounds start after the 1.2 s UDP-first window
+        ConnectTimeout = TimeSpan.FromSeconds(8),
     };
 
     private static Task<PinholeNode> BindWithSidecarAsync(IPAddress address, IPEndPoint? bind = null)
         => SidecarSockets.BindWithSidecarAsync(address, endpoint => Options(address) with { Bind = endpoint }, bind);
 
     [Theory]
-    [InlineData(8193)]   // one past TcpTransport.MaxFrame
-    [InlineData(65535)]  // the largest u16 header a stranger can write
+    [InlineData(8193)]
+    [InlineData(65535)]
     public async Task OversizedFrameHeader_ClosesTheStreamWithoutASession(int declaredLength)
     {
         await using var node = await BindWithSidecarAsync(IPAddress.Loopback);
@@ -33,8 +33,6 @@ public sealed class TcpSocketHardeningTests
         await stream.WriteAsync("PHNTCP1\n"u8.ToArray());
         await stream.ReadExactlyAsync(new byte[8]).AsTask().WaitAsync(Timeout);
 
-        // A length header outside 13..8192 is refused before any body is read; the
-        // codec must not allocate or queue a declared-length buffer for a stranger.
         byte[] header = new byte[2];
         BinaryPrimitives.WriteUInt16BigEndian(header, (ushort)declaredLength);
         await stream.WriteAsync(header);
@@ -45,9 +43,7 @@ public sealed class TcpSocketHardeningTests
     [Fact]
     public async Task WrongStaticKey_TcpOnlyDial_FailsCleanlyWithoutDowngrade()
     {
-        // Key substitution: the ticket names the real listener candidate but pins a
-        // key the listener cannot prove. The dial must die inside its budget — never
-        // downgrade to plaintext, never surface an unauthenticated connection.
+
         await using var listener = await BindWithSidecarAsync(IPAddress.Loopback);
         await using var dialer = await PinholeNode.BindAsync(Options(IPAddress.Loopback));
         ConnectionString substituted = new(
@@ -61,13 +57,11 @@ public sealed class TcpSocketHardeningTests
         Assert.Contains("does not match its connection string", ex.Message);
         Assert.Contains("man in the middle", ex.Message);
 
-        // Each side may hold the abandoned handshake as a bounded, revivable husk, but
-        // it must never surface to the application and must be condemned on schedule.
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(15), () =>
             listener.Connections.Concat(dialer.Connections)
                 .All(c => c.State != PinholeConnectionState.Punching));
         Assert.False(accepted.IsCompletedSuccessfully, "an unauthenticated peer was accepted");
-        // Node disposal cancels the pending accept; observe its fault off-thread.
+
         _ = accepted.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
     }
 
@@ -80,9 +74,7 @@ public sealed class TcpSocketHardeningTests
             probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             port = ((IPEndPoint)probe.LocalEndPoint!).Port;
         }
-        // A UDP-ephemeral port can sit in a Windows-excluded TCP range; this case needs
-        // the sidecar on this exact port, so probe TCP first and bow out if the runner
-        // cannot provide it (the Linux/macOS matrix still covers the full path).
+
         try
         {
             using var tcpProbe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -113,7 +105,6 @@ public sealed class TcpSocketHardeningTests
             await firstIncoming.DisposeAsync();
         }
 
-        // Disposal tore the session down on both ends; the ports are free again.
         await TestPoll.UntilAsync(Timeout, () => firstIncoming.State != PinholeConnectionState.Open);
         Assert.NotEqual(PinholeConnectionState.Open, firstOutgoing.State);
 

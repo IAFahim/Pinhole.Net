@@ -7,15 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// ConnectionStringCodec test shapes, following WirePrimitivesTests:
-//   1. Fixed golden vectors pinning the byte format against the public
-//      Pinhole.ConnectionString implementation, plus round-trip boundaries.
-//   2. Seeded totality fuzz (raw bytes / bit flips / truncations / overwrites
-//      on the binary body; random and mutated strings on the text layer):
-//      TryRead/TryParse never throw, never return out-of-range values, and
-//      accept a strict subset of what the reference parser accepts.
-//   3. Explicit non-canonical rejection cases (binary and text).
-//   4. Differential both directions against Pinhole.ConnectionString.
 public sealed class ConnectionStringCodecTests
 {
     private const string GoldenAHex = "010088776655443322110001047f0000019c4001";
@@ -23,8 +14,6 @@ public sealed class ConnectionStringCodecTests
     private const string GoldenCHex = "0303ffffffffffffffff020104080808080d960304010203040d9701750370773911111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222";
     private const string GoldenDHex = "01002a2a2a2a2a2a2a2a0001047f0000010001041368747470733a2f2f722e6578616d706c652f78cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
-    // v4 knock shapes: flags 5 = static+knock, flags 7 = static+endpoint+knock. The tail
-    // is the key(s), a u8 knock length, then that many raw knock bytes.
     private const string GoldenEHex = "040588776655443322110001047f0000019c4001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f10abababababababababababababababab";
     private const string GoldenFHex = "040788776655443322110001047f0000019c4001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f222222222222222222222222222222222222222222222222222222222222222208cdcdcdcdcdcdcdcd";
 
@@ -34,8 +23,6 @@ public sealed class ConnectionStringCodecTests
     private const string GoldenDText = "pinhole1:AQAqKioqKioqKgABBH8AAAEAAQQTaHR0cHM6Ly9yLmV4YW1wbGUveM3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3N";
     private const string GoldenEText = "pinhole1:BAWId2ZVRDMiEQABBH8AAAGcQAEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHxCrq6urq6urq6urq6urq6ur";
     private const string GoldenFText = "pinhole1:BAeId2ZVRDMiEQABBH8AAAGcQAEAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiCM3Nzc3Nzc3N";
-
-    // ---------- shape (a): fixed vectors + boundaries ----------
 
     [Fact]
     public void FixedVectors_PinTheByteFormat_AgainstTheReference()
@@ -73,7 +60,7 @@ public sealed class ConnectionStringCodecTests
                         "http://127.0.0.1:99/k", new byte[32]),
                 ],
                 key, (byte[])[.. key]),
-            // v4 knock boundaries: 1-byte and 64-byte knocks, with and without endpoint key
+
             new(0x5566778899AABBCCUL, WireNatHint.Unknown, [Direct(IPAddress.Loopback, 7)], key, null, [0x5A]),
             new(0x5566778899AABBCDUL, WireNatHint.Cone, [Direct(IPAddress.Loopback, 8)], key, (byte[])[.. key],
                 new byte[64]),
@@ -131,39 +118,37 @@ public sealed class ConnectionStringCodecTests
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], null, new byte[32]), buffer));
         Assert.Throws<ArgumentException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good, good], null, null), buffer));
-        // short texts above 64 bytes are refused before any byte is written
+
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.Relay, Endpoint(IPAddress.Loopback, 1), Endpoint(IPAddress.Loopback, 2), new string('u', 65), "p", null, null)], null, null), buffer));
 
-        // unknown kind
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData((WireCandidateKind)9, Endpoint(IPAddress.Loopback, 1), null, null, null, null, null)], null, null), buffer));
-        // relay candidate missing fields
+
         Assert.Throws<ArgumentException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.Relay, Endpoint(IPAddress.Loopback, 1), null, "u", "p", null, null)], null, null), buffer));
-        // https relay with bad URL or key
+
         Assert.Throws<ArgumentException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.IrohRelay, Endpoint(IPAddress.Loopback, 1), null, null, null, "http://relay.example/x", new byte[32])], null, null), buffer));
         Assert.Throws<ArgumentException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.IrohRelay, Endpoint(IPAddress.Loopback, 1), null, null, null, "https://r.example/x", new byte[31])], null, null), buffer));
-        // non-ASCII short text would silently corrupt under Encoding.ASCII
+
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown,
                 [new CandidateData(WireCandidateKind.Relay, Endpoint(IPAddress.Loopback, 1), Endpoint(IPAddress.Loopback, 2), "u\u00E9", "p", null, null)], null, null), buffer));
-        // knocks: zero-length and over-length are programmer errors, and a knock always
-        // requires the static key it is published with
+
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], new byte[32], null, []), buffer));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], new byte[32], null, new byte[65]), buffer));
         Assert.Throws<ArgumentException>(() =>
             ConnectionStringCodec.Write(new ConnectionStringData(1, WireNatHint.Unknown, [good], null, null, new byte[16]), buffer));
-        // destination too small is a programmer error for Write
+
         var value = new ConnectionStringData(1, WireNatHint.Unknown, [good, good2], null, null);
         int needed = ConnectionStringCodec.Write(value, buffer);
         Assert.Throws<ArgumentException>(() => ConnectionStringCodec.Write(value, buffer[..(needed - 1)]));
@@ -172,8 +157,6 @@ public sealed class ConnectionStringCodecTests
         Assert.False(ConnectionStringCodec.TryWrite(default, buffer, out _));
         Assert.False(ConnectionStringCodec.TryEncodeText(default, new char[8], out _));
     }
-
-    // ---------- shape (b): totality fuzz ----------
 
     [Fact]
     public void TotalityFuzz_BinaryTryRead_NeverThrowsOrReturnsOutOfRange()
@@ -195,7 +178,7 @@ public sealed class ConnectionStringCodecTests
             ReadOnlySpan<byte> input;
             switch (rng.Next(4))
             {
-                case 0: // raw random bytes
+                case 0:
                 {
                     int len = rng.Next(0, 700);
                     rng.NextBytes(scratch.AsSpan(0, len));
@@ -203,7 +186,7 @@ public sealed class ConnectionStringCodecTests
                     break;
                 }
 
-                case 1: // valid encoding, one bit flipped
+                case 1:
                 {
                     source.AsSpan().CopyTo(scratch);
                     int bit = rng.Next(source.Length * 8);
@@ -212,13 +195,13 @@ public sealed class ConnectionStringCodecTests
                     break;
                 }
 
-                case 2: // valid encoding, truncated
+                case 2:
                 {
                     input = source.AsSpan(0, rng.Next(source.Length));
                     break;
                 }
 
-                default: // valid encoding, one byte replaced
+                default:
                 {
                     source.AsSpan().CopyTo(scratch);
                     scratch[rng.Next(source.Length)] = (byte)rng.Next(256);
@@ -238,7 +221,6 @@ public sealed class ConnectionStringCodecTests
             Assert.Equal(input.Length, consumed);
             AssertInvariants(value);
 
-            // canonical acceptance must be a strict subset of the reference parser
             string text = "pinhole1:" + Convert.ToBase64String(input).TrimEnd('=').Replace('+', '-').Replace('/', '_');
             Assert.True(ConnectionString.TryParse(text, out ConnectionString? reference), text);
             Assert.Equal(value.Candidates!.Length, reference!.Candidates.Count);
@@ -265,7 +247,7 @@ public sealed class ConnectionStringCodecTests
             string text;
             switch (rng.Next(4))
             {
-                case 0: // raw random characters, sometimes behind a real prefix
+                case 0:
                 {
                     int len = rng.Next(0, 80);
                     for (int j = 0; j < len; j++)
@@ -282,7 +264,7 @@ public sealed class ConnectionStringCodecTests
                     break;
                 }
 
-                case 1: // one character replaced
+                case 1:
                 {
                     var chars = source.ToCharArray();
                     chars[rng.Next(chars.Length)] = alphabet[rng.Next(alphabet.Length)];
@@ -290,13 +272,13 @@ public sealed class ConnectionStringCodecTests
                     break;
                 }
 
-                case 2: // truncated anywhere (prefix included)
+                case 2:
                 {
                     text = source[..rng.Next(source.Length)];
                     break;
                 }
 
-                default: // one character inserted
+                default:
                 {
                     int at = rng.Next(source.Length + 1);
                     text = source[..at] + alphabet[rng.Next(alphabet.Length)] + source[at..];
@@ -316,8 +298,6 @@ public sealed class ConnectionStringCodecTests
         }
     }
 
-    // ---------- shape (c): explicit non-canonical rejections ----------
-
     [Fact]
     public void NonCanonicalBodies_AreRejected()
     {
@@ -334,13 +314,11 @@ public sealed class ConnectionStringCodecTests
         Assert.True(ConnectionStringCodec.TryRead(e, out _, out _));
         Assert.True(ConnectionStringCodec.TryRead(f, out _, out _));
 
-        // unknown versions
         Reject(Patch(a, 0, 0));
         Reject(Patch(a, 0, 4));
         Reject(Patch(a, 0, 5));
         Reject(Patch(a, 0, 0xFF));
 
-        // flags must be exactly the key-presence bits of the version
         Reject(Patch(a, 1, 1));
         Reject(Patch(a, 1, 3));
         Reject(Patch(b, 1, 0));
@@ -348,53 +326,42 @@ public sealed class ConnectionStringCodecTests
         Reject(Patch(c, 1, 1));
         Reject(Patch(c, 1, 2));
 
-        // v4 flags: only static+knock (5) and static+endpoint+knock (7) are canonical
         Reject(Patch(e, 1, 0));
         Reject(Patch(e, 1, 1));
-        Reject(Patch(e, 1, 3)); // static+endpoint without the knock — that is a v3 body
-        Reject(Patch(e, 1, 4)); // knock without the static key it requires
-        Reject(Patch(e, 1, 6)); // endpoint+knock without static
-        Reject(Patch(e, 1, 7)); // claims an endpoint key the tail does not carry
+        Reject(Patch(e, 1, 3));
+        Reject(Patch(e, 1, 4));
+        Reject(Patch(e, 1, 6));
+        Reject(Patch(e, 1, 7));
 
-        // v4 knock tail: length 0 is non-canonical, 65 exceeds the bound, and the tail
-        // must tile exactly (no trailing bytes after the knock)
-        Reject(Patch(e, e.Length - 17, 0));  // knock length byte claims zero
-        Reject(Patch(e, e.Length - 17, 65)); // claims 65, tail carries 16
-        Reject([.. e, 0]);                   // one byte past the knock
+        Reject(Patch(e, e.Length - 17, 0));
+        Reject(Patch(e, e.Length - 17, 65));
+        Reject([.. e, 0]);
 
-        // unknown NAT hints
         Reject(Patch(a, 10, 3));
         Reject(Patch(a, 10, 200));
 
-        // empty candidate list is not canonical (v2/v3 too, where the
-        // reference parser happens to accept them)
         Reject(Patch(a, 11, 0));
         Reject(Patch(b, 11, 0));
         Reject(Patch(c, 11, 0));
         Reject(Patch(a, 11, 33));
 
-        // unknown address families
         Reject(Patch(a, 12, 0));
         Reject(Patch(a, 12, 5));
         Reject(Patch(a, 12, 15));
         Reject(Patch(a, 12, 17));
 
-        // unknown candidate kinds
         Reject(Patch(a, 19, 0));
         Reject(Patch(a, 19, 6));
-        Reject(Patch(d, 19, 3)); // https-relay kind switched to TURN: field layout mismatch
+        Reject(Patch(d, 19, 3));
 
-        // trailing bytes after the body
         Reject([.. a, 0]);
         Reject([.. c, 0xFF]);
 
-        // wrong key-tail lengths (v2 must end with 32 bytes, v3 with 64)
-        Reject([.. b[..^1]]); // 31-byte static key
-        Reject([.. b, 0]);    // 33-byte static key
-        Reject([.. c[..^1]]); // 63-byte tail
-        Reject([.. c, 0]);    // 65-byte tail
+        Reject([.. b[..^1]]);
+        Reject([.. b, 0]);
+        Reject([.. c[..^1]]);
+        Reject([.. c, 0]);
 
-        // every truncation of a valid body fails
         foreach (byte[] body in new[] { a, b, c, d, e, f })
         {
             for (int keep = 0; keep < body.Length; keep++)
@@ -403,19 +370,15 @@ public sealed class ConnectionStringCodecTests
             }
         }
 
-        // duplicated candidates
         byte[] twice = [.. a[..12], 2, .. a[12..], .. a[12..]];
         Reject(twice);
 
-        // short texts over 64 bytes
         Reject(RelayBody(65, 3));
-        // short texts with bytes above 0x7F (the reference decodes them to '?')
+
         Reject(RelayBody(2, 3, highByte: true));
-        // relay credentials truncated mid-way
+
         Reject([.. c[..^33]]);
 
-        // https relay URLs must be absolute https (or loopback http) without
-        // userinfo, query or fragment
         Assert.True(ConnectionStringCodec.TryRead(IrohBody("https://x.example/k"), out _, out _));
         Assert.True(ConnectionStringCodec.TryRead(IrohBody("http://127.0.0.1:99/k"), out _, out _));
         Reject(IrohBody("http://relay.example/k"));
@@ -447,17 +410,15 @@ public sealed class ConnectionStringCodecTests
                      "pinhole1:+" + payload,
                      "pinhole1:" + payload + "+",
                      "pinhole1:" + payload + "====",
-                     "pinhole1:AAAAA",                       // length % 4 == 1
-                     "pinhole1:" + dPayload + "Q",           // pushes length % 4 to 1
-                     "pinhole1:" + new string('A', 8000),    // far beyond any canonical body
+                     "pinhole1:AAAAA",
+                     "pinhole1:" + dPayload + "Q",
+                     "pinhole1:" + new string('A', 8000),
                  })
         {
             Assert.False(ConnectionStringCodec.TryParse(bad, out ConnectionStringData v), bad);
             Assert.Null(v.Candidates);
         }
 
-        // the URL-safe alphabet is strict: '+' and '/' never appear, and '=' is
-        // not part of the canonical (unpadded) form
         string mixed = Convert.ToBase64String([0xFB, 0xFF, 0xFE, 0xFB, 0xFF, 0xFE]).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         Assert.Contains('-', mixed);
         Assert.Contains('_', mixed);
@@ -465,8 +426,6 @@ public sealed class ConnectionStringCodecTests
         Assert.False(ConnectionStringCodec.TryDecodeBase64Url(mixed.Replace('_', '/'), new byte[8], out _));
         Assert.True(ConnectionStringCodec.TryDecodeBase64Url(mixed, new byte[8], out _));
 
-        // '='-padded and slack-bit forms decode to the very same bytes under the
-        // reference parser, so they are accepted there and rejected here.
         Assert.True(ConnectionString.TryParse(GoldenAText + "=", out _));
         Assert.False(ConnectionStringCodec.TryParse(GoldenAText + "=", out _));
         Assert.False(ConnectionString.TryParse(GoldenAText + "==", out _));
@@ -474,14 +433,13 @@ public sealed class ConnectionStringCodecTests
 
         char[] bumped = payload.ToCharArray();
         bumped[^1] = NextBase64Char(bumped[^1]);
-        Assert.True(ConnectionString.TryParse("pinhole1:" + new string(bumped), out _)); // same decoded bytes
+        Assert.True(ConnectionString.TryParse("pinhole1:" + new string(bumped), out _));
         Assert.False(ConnectionStringCodec.TryParse("pinhole1:" + new string(bumped), out _));
 
-        // the strict-charset rules hold for the primitive layer as well
         Assert.False(ConnectionStringCodec.TryDecodeBase64Url("AB=C", new byte[3], out _));
         Assert.False(ConnectionStringCodec.TryDecodeBase64Url("=ABC", new byte[3], out _));
         Assert.False(ConnectionStringCodec.TryDecodeBase64Url("A B", new byte[3], out _));
-        Assert.True(ConnectionStringCodec.TryDecodeBase64Url("ABB".Replace("B", "A"), new byte[3], out _)); // "AAA"
+        Assert.True(ConnectionStringCodec.TryDecodeBase64Url("ABB".Replace("B", "A"), new byte[3], out _));
     }
 
     [Fact]
@@ -514,30 +472,27 @@ public sealed class ConnectionStringCodecTests
                 char[] slack = expected.ToCharArray();
                 slack[^1] = NextBase64Char(slack[^1]);
                 Assert.False(ConnectionStringCodec.TryDecodeBase64Url(slack, decoded, out _));
-                // the reference decoder recovers the same bytes from that form
+
                 string padded = new string(slack).Replace('-', '+').Replace('_', '/');
                 padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
                 Assert.True(decoded.AsSpan(0, len).SequenceEqual(Convert.FromBase64String(padded)));
             }
             else if (expected.Length > 0)
             {
-                // full quantum: bumping a char is still canonical, just different bytes
+
                 char[] bumped = expected.ToCharArray();
                 bumped[0] = NextBase64Char(bumped[0]);
                 Assert.True(ConnectionStringCodec.TryDecodeBase64Url(bumped, decoded, out _));
             }
         }
 
-        // length % 4 == 1 can never be valid base64
         Assert.False(ConnectionStringCodec.TryDecodeBase64Url(new string('A', 5), new byte[8], out _));
-        // empty payload round-trips as zero bytes
+
         Assert.True(ConnectionStringCodec.TryEncodeBase64Url([], new char[1], out int zero));
         Assert.Equal(0, zero);
         Assert.True(ConnectionStringCodec.TryDecodeBase64Url([], new byte[1], out int zeroBytes));
         Assert.Equal(0, zeroBytes);
     }
-
-    // ---------- shape (d): differential against Pinhole.ConnectionString ----------
 
     [Fact]
     public void Differential_MyEncodedBytes_AreParsedIdenticallyByTheReference()
@@ -579,8 +534,6 @@ public sealed class ConnectionStringCodecTests
             Assert.Equal(text, ConnectionStringCodec.Encode(mine));
         }
     }
-
-    // ---------- helpers: golden values ----------
 
     private static ConnectionStringData GoldenA() => new(
         0x1122334455667788UL,
@@ -650,8 +603,6 @@ public sealed class ConnectionStringCodecTests
         AssertMatchesReference(value, reference);
         Assert.Equal(text, reference.ToString());
     }
-
-    // ---------- helpers: value construction ----------
 
     private static IPEndPoint Endpoint(IPAddress address, int port) => new(address, port);
 
@@ -793,8 +744,6 @@ public sealed class ConnectionStringCodecTests
         return alphabet[(index + 1) % alphabet.Length];
     }
 
-    // ---------- helpers: seeded random values ----------
-
     private static ConnectionStringData RandomValue(Random rng)
     {
         int count = rng.Next(1, 7);
@@ -819,7 +768,7 @@ public sealed class ConnectionStringCodecTests
                 break;
             case 3:
                 staticKey = RandomBytes(rng, 32);
-                // both v4 shapes, and the full knock length range
+
                 if (rng.Next(2) == 0)
                 {
                     endpointKey = RandomBytes(rng, 32);
@@ -948,8 +897,6 @@ public sealed class ConnectionStringCodecTests
 
         return new string(chars);
     }
-
-    // ---------- helpers: assertions ----------
 
     private static void AssertInvariants(in ConnectionStringData value)
     {

@@ -31,9 +31,7 @@ internal sealed class SystemUdpSocket : IUdpSocket
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         try
         {
-            // Blocked receives must wake up periodically: closing a socket while a sync receive
-            // holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so disposal needs the
-            // receive loop to come back and observe the disposed state.
+
             udp.ReceiveTimeout = 200;
             udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, bufferBytes);
             udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, bufferBytes);
@@ -43,8 +41,6 @@ internal sealed class SystemUdpSocket : IUdpSocket
                 udp.IOControl(sioUdpConnreset, new byte[] { 0 }, null);
             }
 
-            // A dual-mode socket cannot bind a bare IPv4 address; map it so a caller's
-            // IPAddress.Loopback/Any bind option works instead of throwing.
             IPEndPoint? bindV6 = bind is { Address.AddressFamily: AddressFamily.InterNetwork }
                 ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
                 : bind;
@@ -65,10 +61,6 @@ internal sealed class SystemUdpSocket : IUdpSocket
         return n;
     }
 
-    // BSD can report sockaddr_in for a socket bound to an IPv4-mapped IPv6 address.
-    // The dual-mode send path and probe comparisons both require the mapped form.
-    // Preserve the port/address bytes in place, without allocating per datagram. The
-    // template supplies the platform's family and sockaddr length representation.
     internal static void NormalizeReceivedAddress(SocketAddress from)
     {
         if (from.Family != AddressFamily.InterNetwork || from.Size < 16) return;

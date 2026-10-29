@@ -21,7 +21,7 @@ internal static class CandidateSelection
         PinholeCandidate[] turn = candidates.Where(c => c.Kind == CandidateKind.Relay).ToArray();
         PinholeCandidate[] iroh = candidates.Where(c => c.Kind == CandidateKind.IrohRelay).ToArray();
         PinholeCandidate[] derp = candidates.Where(c => c.Kind == CandidateKind.DerpRelay).ToArray();
-        // Keep every provider type even when one has many configured allocations.
+
         Keep(turn.FirstOrDefault()); Keep(iroh.FirstOrDefault()); Keep(derp.FirstOrDefault());
         foreach (PinholeCandidate candidate in iroh.Skip(1).Concat(derp.Skip(1)).Concat(turn.Skip(1)).Take(Math.Max(0, 8 - chosen.Count(c => c.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay))))
             Keep(candidate);
@@ -35,7 +35,7 @@ internal static class CandidateSelection
         }
         foreach (PinholeCandidate candidate in candidates.Where(c => c.Kind == CandidateKind.Reflexive).DistinctBy(c => c.Address.AddressFamily)) Keep(candidate);
         foreach (PinholeCandidate candidate in candidates) Keep(candidate);
-        // Preserve probe ordering; priority only determines membership of the bound.
+
         return candidates.Where(chosen.Contains).Distinct().Take(ConnectionString.MaxCandidates).ToArray();
     }
 }

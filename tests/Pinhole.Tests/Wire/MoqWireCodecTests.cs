@@ -1,6 +1,5 @@
-// Pinhole.Moq builds with EnablePreviewFeatures on net8.0, so its internal
-// MoqWriter/MoqReader/MoqStreamWire carry RequiresPreviewFeatures; this test
-// file is the opted-in consumer for the differential oracle.
+
+
 #pragma warning disable CA2252
 
 using Pinhole.Moq;
@@ -9,26 +8,14 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// Three shapes per the WirePrimitives exemplar, plus the differential oracle
-// against Pinhole.Moq's internal MoqWriter/MoqReader/MoqStreamWire (reachable
-// through InternalsVisibleTo):
-//   1. golden byte vectors + Write -> TryRead round trips for every form,
-//   2. a >= 200k seeded totality fuzz (bit flips, truncations, raw bytes) that
-//      also checks the read-then-write identity on accepted inputs,
-//   3. explicit non-canonical rejections (padded varints, bad UTF-8, oversized
-//      counts, trailing bytes, invalid stream-type bits),
-//   4. differentials: byte-exact and value-exact agreement both directions,
-//      and the documented non-minimal-varint acceptance divergence.
 public sealed class MoqWireCodecTests
 {
-    private const ulong BigId = 151_288_809_941_952_652UL; // RFC 9000 8-byte sample
-
-    // ---------- golden vectors + round trips ----------
+    private const ulong BigId = 151_288_809_941_952_652UL;
 
     [Fact]
     public void ControlFrame_GoldenBytes()
     {
-        // varint type + fixed two-byte big-endian length + payload
+
         byte[] framed = [0x0a, 0x00, 0x01, 0x2a];
         Assert.True(MoqWireCodec.TryReadControlFrame(framed, out var frame));
         Assert.Equal(MoqControlTypes.Unsubscribe, frame.Type);
@@ -36,11 +23,10 @@ public sealed class MoqWireCodecTests
         Assert.Equal(4, frame.Consumed);
         Assert.True(frame.Payload(framed).SequenceEqual((ReadOnlySpan<byte>)[0x2a]));
 
-        // empty payload, multi-byte type varint, and concatenated frames
         Span<byte> buffer = new byte[16];
         Assert.Equal(3, MoqWireCodec.WriteControlFrame(buffer, MoqControlTypes.Unsubscribe, []));
         Assert.True(buffer[..3].SequenceEqual((ReadOnlySpan<byte>)[0x0a, 0x00, 0x00]));
-        Assert.Equal(7, MoqWireCodec.WriteControlFrame(buffer, 0x4000, [0xaa])); // 4-byte type varint
+        Assert.Equal(7, MoqWireCodec.WriteControlFrame(buffer, 0x4000, [0xaa]));
         Assert.True(MoqWireCodec.TryReadControlFrame(buffer[..7], out frame));
         Assert.Equal(0x4000UL, frame.Type);
         Assert.Equal(1, frame.PayloadLength);
@@ -75,7 +61,7 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void MaxRequestId_GoldenRoundTrip()
     {
-        byte[] golden = [0x15, 0x00, 0x02, 0x41, 0x2c]; // 300 as a 2-byte varint
+        byte[] golden = [0x15, 0x00, 0x02, 0x41, 0x2c];
         Assert.True(MoqWireCodec.TryReadMaxRequestId(golden, out var message, out int consumed));
         Assert.Equal(300UL, message.Maximum);
         Assert.Equal(5, consumed);
@@ -102,13 +88,13 @@ public sealed class MoqWireCodecTests
         byte[] golden =
         [
             0x03, 0x00, 0x13,
-            0x05,                             // request id 5
-            0x01, 0x02, 0x6e, 0x73,           // namespace: one element "ns"
-            0x04, 0x64, 0x65, 0x6d, 0x6f,     // track name "demo"
-            0x03,                             // 3 parameters
-            0x20, 0x40, 0x80,                 // key 0x20 (number) = 128
-            0x01, 0x01, 0x02,                 // key 0x21 (blob) = [0x02]
-            0x01, 0x01,                       // key 0x22 (number) = 1
+            0x05,
+            0x01, 0x02, 0x6e, 0x73,
+            0x04, 0x64, 0x65, 0x6d, 0x6f,
+            0x03,
+            0x20, 0x40, 0x80,
+            0x01, 0x01, 0x02,
+            0x01, 0x01,
         ];
         Assert.True(MoqWireCodec.TryReadSubscribe(golden, out var message, out int consumed));
         Assert.Equal(5UL, message.RequestId);
@@ -313,7 +299,6 @@ public sealed class MoqWireCodecTests
         Assert.Equal(3, MoqWireCodec.WriteExtensionBlock(buffer, [new MoqParameter(3, new byte[] { 0xaa })]));
         Assert.True(buffer[..3].SequenceEqual((ReadOnlySpan<byte>)[0x03, 0x01, 0xaa]));
 
-        // multibyte UTF-8 survives with byte-exact re-encoding
         Assert.True(MoqWireCodec.TryReadTrackName([0x03, 0xe4, 0xb8, 0xad], out name, out _));
         Assert.Equal("\u4e2d", name);
         Assert.Equal(4, MoqWireCodec.WriteTrackName(buffer, "\u4e2d"));
@@ -323,9 +308,7 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void StreamHeader_GoldenRoundTrip()
     {
-        // the exact header shape the SessionPumpTests fixture and
-        // CloudflareMoqClient.SendObjectAsync use: 0x18 = object stream,
-        // no subgroup id, priority byte present
+
         byte[] plain = [0x18, 0x01, 0x07, 0x80];
         Assert.True(MoqWireCodec.TryReadStreamHeader(plain, out var header, out int consumed));
         Assert.Equal(0x18UL, header.StreamType);
@@ -336,14 +319,14 @@ public sealed class MoqWireCodecTests
         Assert.Equal(0x80, header.Priority);
         Assert.Equal(4, consumed);
 
-        byte[] subgroup = [0x14, 0x01, 0x02, 0x03, 0x80]; // (type & 0x6) == 4 -> subgroup id
+        byte[] subgroup = [0x14, 0x01, 0x02, 0x03, 0x80];
         Assert.True(MoqWireCodec.TryReadStreamHeader(subgroup, out header, out consumed));
         Assert.True(header.HasSubgroupId);
         Assert.Equal(3UL, header.SubgroupId);
         Assert.True(header.HasPriority);
         Assert.Equal(5, consumed);
 
-        byte[] noPriority = [0x38, 0x05, 0x06]; // (type & 0x20) != 0 -> no priority byte
+        byte[] noPriority = [0x38, 0x05, 0x06];
         Assert.True(MoqWireCodec.TryReadStreamHeader(noPriority, out header, out consumed));
         Assert.False(header.HasPriority);
         Assert.Equal(3, consumed);
@@ -381,7 +364,7 @@ public sealed class MoqWireCodecTests
         Assert.Equal(0UL, header.Status);
         Assert.Equal(3, consumed);
 
-        byte[] endMarker = [0x05, 0x00, 0x03]; // nonzero status: the pump skips these objects
+        byte[] endMarker = [0x05, 0x00, 0x03];
         Assert.True(MoqWireCodec.TryReadObjectHeader(endMarker, extensionsPresent: false, out header, out consumed));
         Assert.Equal(3UL, header.Status);
         Assert.Equal(3, consumed);
@@ -396,48 +379,46 @@ public sealed class MoqWireCodecTests
         Assert.True(buffer[..3].SequenceEqual(endMarker));
     }
 
-    // ---------- non-canonical rejections ----------
-
     [Fact]
     public void NonMinimalVarints_RejectedInEveryFieldPosition()
     {
-        // padded type varint
+
         Assert.False(MoqWireCodec.TryReadControlFrame([0x40, 0x0a, 0x00, 0x01, 0x2a], out _));
         Assert.False(MoqWireCodec.TryReadUnsubscribe([0x40, 0x0a, 0x00, 0x01, 0x2a], out _, out _));
-        // padded request id inside the payload
+
         Assert.False(MoqWireCodec.TryReadUnsubscribe([0x0a, 0x00, 0x02, 0x40, 0x2a], out _, out _));
-        // padded track-name length
+
         Assert.False(MoqWireCodec.TryReadTrackName([0x40, 0x01, 0x61], out _, out _));
-        // padded namespace count
+
         Assert.False(MoqWireCodec.TryReadNamespace([0x40, 0x01, 0x00], out _, out _));
-        // padded parameter count
+
         Assert.False(MoqWireCodec.TryReadParameters([0x40, 0x00], out _, out _));
-        // padded stream type
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x40, 0x40, 0x01, 0x02, 0x80], out _, out _));
-        // padded object id
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x40, 0x00, 0x01], false, out _, out _));
-        // padded payload-length varint inside an object header
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x40, 0x01], false, out _, out _));
     }
 
     [Fact]
     public void TrackName_InvalidUtf8_OrOversized_Rejected()
     {
-        Assert.False(MoqWireCodec.TryReadTrackName([0x01, 0xff], out _, out _)); // stray continuation
-        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xc0, 0x80], out _, out _)); // overlong 2-byte
-        Assert.False(MoqWireCodec.TryReadTrackName([0x03, 0xe0, 0x80, 0x80], out _, out _)); // overlong 3-byte
-        Assert.False(MoqWireCodec.TryReadTrackName([0x03, 0xed, 0xa0, 0x80], out _, out _)); // lone surrogate
-        Assert.False(MoqWireCodec.TryReadTrackName([0x04, 0xf4, 0x90, 0x80, 0x80], out _, out _)); // > U+10FFFF
-        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xc3, 0x28], out _, out _)); // bad continuation
-        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xe2, 0x82], out _, out _)); // truncated sequence
-        Assert.False(MoqWireCodec.TryReadTrackName([0x05, 0x61], out _, out _)); // length beyond remaining
+        Assert.False(MoqWireCodec.TryReadTrackName([0x01, 0xff], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xc0, 0x80], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x03, 0xe0, 0x80, 0x80], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x03, 0xed, 0xa0, 0x80], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x04, 0xf4, 0x90, 0x80, 0x80], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xc3, 0x28], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x02, 0xe2, 0x82], out _, out _));
+        Assert.False(MoqWireCodec.TryReadTrackName([0x05, 0x61], out _, out _));
     }
 
     [Fact]
     public void TrackName_MaxLengthBoundary()
     {
         var valid = new byte[2 + 4096];
-        valid[0] = 0x50; // varint 4096 = [0x50, 0x00]
+        valid[0] = 0x50;
         valid[1] = 0x00;
         valid.AsSpan(2).Fill(0x61);
         Assert.True(MoqWireCodec.TryReadTrackName(valid, out string name, out int consumed));
@@ -445,7 +426,7 @@ public sealed class MoqWireCodecTests
         Assert.Equal(valid.Length, consumed);
 
         var tooLong = new byte[2 + 4097];
-        tooLong[0] = 0x50; // varint 4097 = [0x50, 0x01]
+        tooLong[0] = 0x50;
         tooLong[1] = 0x01;
         tooLong.AsSpan(2).Fill(0x61);
         Assert.False(MoqWireCodec.TryReadTrackName(tooLong, out _, out _));
@@ -461,19 +442,17 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void ControlFrame_TruncatedLengthOrOversizedPayload_Rejected()
     {
-        Assert.False(MoqWireCodec.TryReadControlFrame([], out _)); // no type varint
-        Assert.False(MoqWireCodec.TryReadControlFrame([0x40], out _)); // truncated type varint
-        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x00], out _)); // truncated u16 length
-        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x00, 0x05, 0x2a], out _)); // payload shorter than declared
-        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x40, 0x00, 0x01, 0x2a], out _)); // padded type
+        Assert.False(MoqWireCodec.TryReadControlFrame([], out _));
+        Assert.False(MoqWireCodec.TryReadControlFrame([0x40], out _));
+        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x00], out _));
+        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x00, 0x05, 0x2a], out _));
+        Assert.False(MoqWireCodec.TryReadControlFrame([0x0a, 0x40, 0x00, 0x01, 0x2a], out _));
     }
 
     [Fact]
     public void UnknownType_NotParseableAsAMessage()
     {
-        // Framing tolerates any type (callers slice with it), but the client's
-        // reader throws "Unsupported MoQ control type" — so no known-message
-        // TryRead accepts one, and IsKnown reports false.
+
         byte[] unknown = [0x0f, 0x00, 0x01, 0x2a];
         Assert.True(MoqWireCodec.TryReadControlFrame(unknown, out var frame));
         Assert.Equal(0x0fUL, frame.Type);
@@ -492,28 +471,27 @@ public sealed class MoqWireCodecTests
         Assert.False(MoqWireCodec.TryReadMaxRequestId(unknown, out _, out _));
         Assert.False(MoqWireCodec.TryReadGoAway(unknown, out _, out _));
 
-        // a known type in the wrong message slot is equally rejected
         Assert.False(MoqWireCodec.TryReadUnsubscribe([0x0b, 0x00, 0x04, 0x09, 0x00, 0x00, 0x00], out _, out _));
     }
 
     [Fact]
     public void StrictMessages_RejectTrailingBytes()
     {
-        // trailing byte inside the payload (the client calls MoqReader.End())
+
         Assert.False(MoqWireCodec.TryReadUnsubscribe([0x0a, 0x00, 0x02, 0x2a, 0x00], out _, out _));
         Assert.False(MoqWireCodec.TryReadAnnounceOk([0x07, 0x00, 0x02, 0x2a, 0x03], out _, out _));
         Assert.False(MoqWireCodec.TryReadMaxRequestId([0x15, 0x00, 0x03, 0x41, 0x2c, 0x00], out _, out _));
         Assert.False(MoqWireCodec.TryReadGoAway([0x10, 0x00, 0x02, 0x01, 0x61, 0x00], out _, out _));
-        // a whole second frame after the first (slice with TryReadControlFrame instead)
+
         Assert.False(MoqWireCodec.TryReadUnsubscribe([0x0a, 0x00, 0x01, 0x2a, 0x0a, 0x00, 0x01, 0x2a], out _, out _));
     }
 
     [Fact]
     public void SubscribeOk_ExtensionBlockRules()
     {
-        // well-formed extensions after the parameters are accepted (unique to SUBSCRIBE_OK)
+
         Assert.True(MoqWireCodec.TryReadSubscribeOk([0x04, 0x00, 0x06, 0x09, 0x11, 0x00, 0x03, 0x01, 0xaa], out _, out _));
-        // malformed extension pairs in the tail are rejected
+
         Assert.False(MoqWireCodec.TryReadSubscribeOk([0x04, 0x00, 0x05, 0x09, 0x11, 0x00, 0x03, 0x01], out _, out _));
         Assert.False(MoqWireCodec.TryReadSubscribeOk([0x04, 0x00, 0x04, 0x09, 0x11, 0x00, 0xff], out _, out _));
     }
@@ -521,21 +499,20 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void Parameters_NonCanonicalForms_Rejected()
     {
-        // count above 128 ([0x40, 0x81] is the minimal encoding of 129)
+
         Assert.False(MoqWireCodec.TryReadParameters([0x40, 0x81], out _, out _));
-        // duplicate keys (delta 0 after the first)
+
         Assert.False(MoqWireCodec.TryReadParameters([0x02, 0x04, 0x00, 0x00, 0x00], out _, out _));
-        // odd key whose blob length is beyond the remaining bytes
+
         Assert.False(MoqWireCodec.TryReadParameters([0x01, 0x03, 0x05, 0x61], out _, out _));
-        // cumulative key above the varint range (delta VarintMax then +1)
+
         Span<byte> huge = new byte[16];
         int w = WirePrimitives.WriteVarint(huge, 2);
         w += WirePrimitives.WriteVarint(huge[w..], WirePrimitives.VarintMax);
-        w += WirePrimitives.WriteVarint(huge[w..], 0); // even key -> number value
+        w += WirePrimitives.WriteVarint(huge[w..], 0);
         w += WirePrimitives.WriteVarint(huge[w..], 1);
         Assert.False(MoqWireCodec.TryReadParameters(huge[..w], out _, out _));
 
-        // exactly 128 pairs is the accepted maximum
         Span<byte> buffer = new byte[1024];
         var maximum = new MoqParameter[128];
         for (int i = 0; i < 128; i++)
@@ -553,15 +530,15 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void ExtensionBlock_NonCanonicalForms_Rejected()
     {
-        // dangling key delta with no value
+
         Assert.False(MoqWireCodec.TryReadExtensionBlock([0x03], out _, out _));
-        // blob length beyond the block
+
         Assert.False(MoqWireCodec.TryReadExtensionBlock([0x03, 0x02, 0xaa], out _, out _));
-        // duplicate keys (1 then delta 0)
+
         Assert.False(MoqWireCodec.TryReadExtensionBlock([0x01, 0x00, 0x00, 0x00], out _, out _));
-        // truncated 4-byte sequence
+
         Assert.False(MoqWireCodec.TryReadExtensionBlock([0x80, 0x00], out _, out _));
-        // empty block is fine
+
         Assert.True(MoqWireCodec.TryReadExtensionBlock([], out var empty, out int consumed));
         Assert.Empty(empty);
         Assert.Equal(0, consumed);
@@ -570,15 +547,15 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void StreamHeader_TypeBitRules()
     {
-        // type >= 0x40 (0x40 0x40 is the minimal encoding of 64)
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x40, 0x40, 0x01, 0x02, 0x80], out _, out _));
-        // marker bit 0x10 missing
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x08, 0x01, 0x02, 0x80], out _, out _));
-        // both bits of 0x6 set
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x16, 0x01, 0x02, 0x80], out _, out _));
-        // subgroup id required ((type & 0x6) == 4) but truncated
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x14, 0x01, 0x02], out _, out _));
-        // priority byte required ((type & 0x20) == 0) but missing
+
         Assert.False(MoqWireCodec.TryReadStreamHeader([0x18, 0x01, 0x02], out _, out _));
         Assert.False(MoqWireCodec.TryReadStreamHeader([], out _, out _));
     }
@@ -586,22 +563,20 @@ public sealed class MoqWireCodecTests
     [Fact]
     public void ObjectHeader_NonCanonicalForms_Rejected()
     {
-        // extension length above 65535 (the pump's ushort cap)
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x80, 0x01, 0x00, 0x00], true, out _, out _));
-        // extension length beyond the remaining bytes
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x64], true, out _, out _));
-        // malformed extension block (dangling delta)
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x01, 0x01, 0x01], true, out _, out _));
-        // payload length above 65536 (CloudflareMoqClient.MaximumObjectBytes)
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x80, 0x01, 0x00, 0x01], false, out _, out _));
-        Assert.True(MoqWireCodec.TryReadObjectHeader([0x00, 0x80, 0x01, 0x00, 0x00], false, out _, out _)); // 65536 exactly
-        // zero payload length requires a status varint
+        Assert.True(MoqWireCodec.TryReadObjectHeader([0x00, 0x80, 0x01, 0x00, 0x00], false, out _, out _));
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x00, 0x00], false, out _, out _));
-        // truncated object id
+
         Assert.False(MoqWireCodec.TryReadObjectHeader([0x80], false, out _, out _));
     }
-
-    // ---------- write-side validation ----------
 
     [Fact]
     public void Write_ArgumentValidation()
@@ -624,7 +599,6 @@ public sealed class MoqWireCodecTests
         Assert.Throws<ArgumentException>(() => MoqWireCodec.WriteObjectHeader(buffer, new MoqObjectHeader(0, [0x01], 1, 0), false));
         Assert.Throws<ArgumentException>(() => MoqWireCodec.WriteObjectHeader(buffer, new MoqObjectHeader(0, [0x01], 1, 0), true));
 
-        // a message whose payload exceeds the u16 frame length (FinishControlMessage cap)
         var blobs = new MoqParameter[12];
         var body = new byte[6000];
         for (int i = 0; i < blobs.Length; i++)
@@ -647,8 +621,6 @@ public sealed class MoqWireCodecTests
         return result;
     }
 
-    // ---------- totality fuzz ----------
-
     [Fact]
     public void TotalityFuzz_NeverThrows_NeverOutOfRange()
     {
@@ -662,11 +634,11 @@ public sealed class MoqWireCodecTests
             int len;
             switch (rng.Next(4))
             {
-                case 0: // raw random bytes
+                case 0:
                     len = rng.Next(0, 41);
                     rng.NextBytes(mutated.AsSpan(0, len));
                     break;
-                case 1: // one to three bit flips over the sample
+                case 1:
                     len = sample.Length;
                     sample.AsSpan().CopyTo(mutated.AsSpan(0, len));
                     for (int f = 0, flips = 1 + rng.Next(3); f < flips && len > 0; f++)
@@ -675,11 +647,11 @@ public sealed class MoqWireCodecTests
                     }
 
                     break;
-                case 2: // truncation at a random point
+                case 2:
                     len = rng.Next(sample.Length + 1);
                     sample.AsSpan(0, len).CopyTo(mutated.AsSpan(0, len));
                     break;
-                default: // random byte spliced in
+                default:
                     len = sample.Length;
                     sample.AsSpan().CopyTo(mutated.AsSpan(0, len));
                     if (len > 0)
@@ -870,18 +842,15 @@ public sealed class MoqWireCodecTests
 
         if (MoqWireCodec.TryReadExtensionBlock(input, out var extensions, out int extensionsConsumed))
         {
-            Assert.Equal(input.Length, extensionsConsumed); // 0 only when the input itself is empty
+            Assert.Equal(input.Length, extensionsConsumed);
             Assert.True(extensions.Length <= 128);
         }
     }
 
-    // On success the message must re-encode to exactly the consumed bytes:
-    // read-then-write is the identity on canonical inputs. Callers only invoke
-    // the Write after a successful TryRead (a default struct would throw).
     private static void AssertRewritten(ReadOnlySpan<byte> input, byte[] scratch, int written, int consumed)
     {
         Assert.InRange(consumed, 1, input.Length);
-        Assert.Equal(input.Length, consumed); // message TryReads take exactly one frame
+        Assert.Equal(input.Length, consumed);
         Assert.Equal(consumed, written);
         Assert.True(input[..written].SequenceEqual(scratch.AsSpan(0, written)));
     }
@@ -922,8 +891,6 @@ public sealed class MoqWireCodecTests
         [0x0f, 0x00, 0x01, 0x2a],
     ];
 
-    // ---------- differential oracle against Pinhole.Moq ----------
-
     [Fact]
     public void Differential_ControlMessages_Match_MoqWriterExactly_BothWays()
     {
@@ -934,7 +901,7 @@ public sealed class MoqWireCodecTests
             (MoqParameter[] mine, (ulong Key, object Value)[] theirs) = RandomParameters(rng);
             switch (rng.Next(13))
             {
-                case 0: // SUBSCRIBE
+                case 0:
                 {
                     ulong id = RandomVarint(rng);
                     string ns = RandomText(rng);
@@ -962,7 +929,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 1: // SUBSCRIBE_OK (with random extensions where present)
+                case 1:
                 {
                     ulong id = RandomVarint(rng);
                     ulong alias = RandomVarint(rng);
@@ -987,7 +954,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 2: // ANNOUNCE
+                case 2:
                 {
                     ulong id = RandomVarint(rng);
                     string ns = RandomText(rng);
@@ -1006,7 +973,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 3: // PUBLISH
+                case 3:
                 {
                     ulong id = RandomVarint(rng);
                     string ns = RandomText(rng);
@@ -1031,7 +998,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 4: // ANNOUNCE_OK / PUBLISH_OK share the id+params shape
+                case 4:
                 case 5:
                 {
                     ulong id = RandomVarint(rng);
@@ -1059,7 +1026,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 6: // SUBSCRIBE_ERROR / SUBSCRIBE_DONE share the shape
+                case 6:
                 case 7:
                 {
                     ulong id = RandomVarint(rng);
@@ -1085,7 +1052,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 8: // SUBSCRIBE_UPDATE
+                case 8:
                 {
                     var message = new MoqSubscribeUpdate(RandomVarint(rng), RandomVarint(rng), mine);
                     int n = MoqWireCodec.WriteSubscribeUpdate(buffer, in message);
@@ -1102,7 +1069,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 9: // UNSUBSCRIBE
+                case 9:
                 {
                     ulong id = RandomVarint(rng);
                     int n = MoqWireCodec.WriteUnsubscribe(buffer, new MoqUnsubscribe(id));
@@ -1113,7 +1080,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 10: // MAX_REQUEST_ID
+                case 10:
                 {
                     ulong maximum = RandomVarint(rng);
                     int n = MoqWireCodec.WriteMaxRequestId(buffer, new MoqMaxRequestId(maximum));
@@ -1124,7 +1091,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                case 11: // GOAWAY
+                case 11:
                 {
                     string reason = RandomText(rng);
                     int n = MoqWireCodec.WriteGoAway(buffer, new MoqGoAway(reason));
@@ -1135,7 +1102,7 @@ public sealed class MoqWireCodecTests
                     break;
                 }
 
-                default: // CLIENT_SETUP / SERVER_SETUP
+                default:
                 {
                     ulong type = rng.Next(2) == 0 ? MoqControlTypes.ClientSetup : MoqControlTypes.ServerSetup;
                     var message = new MoqSetup(type, mine);
@@ -1230,8 +1197,7 @@ public sealed class MoqWireCodecTests
             }
             else
             {
-                // MoqReader accepted a form WirePrimitives rejects: it must
-                // still be the naive (non-minimal-tolerant) decoding.
+
                 Assert.Equal(NaiveDecode(slice, out int naiveLength), moqValue);
                 Assert.Equal(len - naiveLength, moqRemaining);
             }
@@ -1282,10 +1248,7 @@ public sealed class MoqWireCodecTests
     [Fact]
     public async Task Discrepancy_NonMinimalVarints_MoqAcceptsWhileCanonicalCodecRejects()
     {
-        // MoqReader.Integer and MoqStreamWire.ReadIntegerAsync accept padded
-        // varints; WirePrimitives (and therefore every MoqWireCodec TryRead)
-        // rejects them. Documented divergence: this codec stays RFC 9000
-        // canonical.
+
         Assert.Equal(42UL, new MoqReader([0x40, 0x2a]).Integer());
         Assert.False(WirePrimitives.TryReadVarint([0x40, 0x2a], out _, out _));
         Assert.Equal(42UL, await MoqStreamWire.ReadIntegerAsync(new MemoryStream([0x80, 0x00, 0x00, 0x2a]), CancellationToken.None));
@@ -1293,10 +1256,8 @@ public sealed class MoqWireCodecTests
 
         byte[] framed = [0x0a, 0x00, 0x02, 0x40, 0x2a];
         Assert.False(MoqWireCodec.TryReadUnsubscribe(framed, out _, out _));
-        Assert.True(MoqWireCodec.TryReadControlFrame(framed, out _)); // framing only sees a canonical type varint
+        Assert.True(MoqWireCodec.TryReadControlFrame(framed, out _));
     }
-
-    // ---------- random generators and differential helpers ----------
 
     private static void AssertTrueAndCompare(MoqWriter writer, ulong type, byte[] buffer, int n)
     {
@@ -1308,8 +1269,6 @@ public sealed class MoqWireCodecTests
 
     private static MoqReader PayloadReader(byte[] buffer, int n) => new(buffer[3..n]);
 
-    // MoqWriter has no extension API; emit the count-free pair list manually,
-    // delta-encoded like MoqWireCodec.WriteExtensionBlock does.
     private static void WriteRawPairs(MoqWriter writer, (ulong Key, object Value)[] pairs)
     {
         ulong previous = 0;
@@ -1383,7 +1342,7 @@ public sealed class MoqWireCodecTests
             int len = WirePrimitives.WriteVarint(buf, value);
             if (rng.Next(4) == 0)
             {
-                // re-encode with the next larger form: well-formed but non-minimal
+
                 len = PadVarint(buf, value);
             }
 
@@ -1445,7 +1404,7 @@ public sealed class MoqWireCodecTests
         ulong key = 0;
         for (int i = 0; i < count; i++)
         {
-            key += (ulong)rng.Next(1, 40); // strictly ascending, mixed parity
+            key += (ulong)rng.Next(1, 40);
             if ((key & 1) == 0)
             {
                 ulong number = RandomVarint(rng);

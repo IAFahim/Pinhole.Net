@@ -79,7 +79,7 @@ public sealed class InterfaceCandidateTests
         await using var b = await lab.BindNodeAsync(hostAddress: new(IPAddress.Parse("192.0.2.20"), 0), tweak: o => o with { ReceiveBufferCapacity = 8 });
         await Until(() => a.InterfaceCandidates.Count == 1 && a.InterfaceCandidates[0].ReflexiveEndpoints.Count == 1);
         Assert.Equal(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 40110), a.InterfaceCandidates[0].LocalEndpoint);
-        Assert.Equal(NatHint.Cone, a.InterfaceCandidates[0].MappingHint); // two servers, same source socket
+        Assert.Equal(NatHint.Cone, a.InterfaceCandidates[0].MappingHint);
         var ticket = ConnectionString.Parse(a.ConnectionString);
         Assert.Contains(ticket.Candidates, c => c.Kind == CandidateKind.Reflexive && c.Address.Port == 40110);
         Task<PinholeConnection> accepting = b.AcceptAsync();
@@ -198,7 +198,7 @@ public sealed class InterfaceCandidateTests
         PinholeInterfaceCandidates symmetric = node.InterfaceCandidates.Single(s => s.InterfaceIndex == 20);
         Assert.Equal(NatHint.Cone, cone.MappingHint); Assert.Single(cone.ReflexiveEndpoints);
         Assert.Equal(NatHint.Symmetric, symmetric.MappingHint); Assert.Equal(2, symmetric.ReflexiveEndpoints.Count);
-        Assert.Equal(NatHint.Cone, node.NatHint); // the wildcard socket's own two-server observation
+        Assert.Equal(NatHint.Cone, node.NatHint);
     }
 
     [Fact]
@@ -214,14 +214,13 @@ public sealed class InterfaceCandidateTests
         Task<IPEndPoint> probe = node.Engine.ProbeStunAsync(server.LocalEndPoint, deadline.Token);
         byte[] request = new byte[256]; var origin = new SocketAddress(AddressFamily.InterNetworkV6);
         Assert.Equal(20, await Task.Run(() => server.ReceiveFrom(request, origin)).WaitAsync(Budget));
-        // Independent RFC response for 203.0.113.88:44444. Only the request's random
-        // transaction bytes are copied; no production STUN encoder/decoder is used.
+
         byte[] response = Convert.FromHexString("0101000C2112A4420000000000000000000000000020000800018C8EEA12D51A");
         request.AsSpan(8, 12).CopyTo(response.AsSpan(8));
-        attacker.SendTo(response, origin); // correct nonce, wrong sender
-        server.SendTo(response, new IPEndPoint(source.LocalEndPoint.Address.MapToIPv6(), source.LocalEndPoint.Port).Serialize()); // correct nonce/server, wrong local socket
+        attacker.SendTo(response, origin);
+        server.SendTo(response, new IPEndPoint(source.LocalEndPoint.Address.MapToIPv6(), source.LocalEndPoint.Port).Serialize());
         byte[] wrongNonce = (byte[])response.Clone(); wrongNonce[19] ^= 1;
-        server.SendTo(wrongNonce, origin); // same first 64 bits, changed last transaction byte
+        server.SendTo(wrongNonce, origin);
         byte[] wrongType = (byte[])response.Clone(); wrongType[0] = 0;
         server.SendTo(wrongType, origin);
         await Task.Delay(100); Assert.False(probe.IsCompleted);

@@ -75,9 +75,7 @@ public sealed class TurnClient : IAsyncDisposable
         Username = username;
         Credential = credential;
         _udp = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-        // Blocked receives must wake up periodically: closing the socket while a sync
-        // receive holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so
-        // disposal needs the receive loop to come back and observe the disposed flag.
+
         _udp.ReceiveTimeout = 200;
         if (OperatingSystem.IsWindows())
         {
@@ -176,8 +174,7 @@ public sealed class TurnClient : IAsyncDisposable
         }
         catch (SocketException)
         {
-            // Indications are unacknowledged; a transient ICMP-reported error must not
-            // kill the caller's send pump. The next indication goes out as usual.
+
         }
     }
 
@@ -234,8 +231,7 @@ public sealed class TurnClient : IAsyncDisposable
                 await Task.Delay(TimeSpan.FromSeconds(tickSeconds), _shutdown.Token).ConfigureAwait(false);
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
-                // Due with two spare ticks before expiry, so one misaligned tick can
-                // never let the allocation lapse.
+
                 TimeSpan refreshDue = TimeSpan.FromSeconds(Math.Max(1, _lifetime - 2 * tickSeconds));
                 if (now - _lastAllocate >= refreshDue)
                 {
@@ -250,8 +246,7 @@ public sealed class TurnClient : IAsyncDisposable
             }
             catch (Exception ex) when (ex is SocketException or InvalidOperationException or TimeoutException or ObjectDisposedException)
             {
-                // A failed refresh tick must not stop the loop; three in a row close the
-                // socket inside RefreshAllocationAsync so the failure surfaces visibly.
+
             }
         }
     }
@@ -284,8 +279,7 @@ public sealed class TurnClient : IAsyncDisposable
         }
         catch (Exception)
         {
-            // After repeated failed refreshes the allocation is gone; close the socket
-            // so the connection fails visibly instead of silently black-holing traffic.
+
             if (Interlocked.Increment(ref _refreshFailures) >= 3)
             {
                 CloseSocket();
@@ -340,8 +334,7 @@ public sealed class TurnClient : IAsyncDisposable
         byte[] resp = await SendAuthenticatedAsync(build, ct).ConfigureAwait(false);
         if (TryAdoptRotatedAuth(resp))
         {
-            // 438 stale nonce: the server rotated its nonce; rebuild with the fresh
-            // realm/nonce (the builders read the updated fields) and retry once.
+
             resp = await SendAuthenticatedAsync(build, ct).ConfigureAwait(false);
         }
 
@@ -438,8 +431,7 @@ public sealed class TurnClient : IAsyncDisposable
             }
             catch (SocketException)
             {
-                // Transient errors (ICMP-reported unreachable, interface flap) must not
-                // stop the receive loop; pace briefly so a persistent error cannot spin.
+
                 Thread.Sleep(20);
                 continue;
             }
@@ -479,8 +471,7 @@ public sealed class TurnClient : IAsyncDisposable
                     }
                     catch (Exception)
                     {
-                        // A throwing handler must cost only its own indication: this thread
-                        // also completes every permission and refresh transaction.
+
                     }
                 }
             }
@@ -518,9 +509,7 @@ public sealed class TurnClient : IAsyncDisposable
 
         if (integrityOffset >= 0 && pending.IntegrityKey is { } key)
         {
-            // RFC 8489: the HMAC covers the header through the attribute preceding MI,
-            // with header length adjusted to the end of MI. Attributes after MI cannot
-            // contribute allocation addresses, lifetime, errors, realm, or nonce.
+
             byte[] covered = response[..integrityOffset];
             BinaryPrimitives.WriteUInt16BigEndian(covered.AsSpan(2), (ushort)(integrityOffset + 24 - 20));
             byte[] expected = HMACSHA1.HashData(key, covered);
@@ -534,8 +523,7 @@ public sealed class TurnClient : IAsyncDisposable
         else if (integrityOffset < 0 && (IsError(response, 401) || pending.IntegrityKey is not null && IsError(response, 438))
             && Attributes(response).Any(a => a.Type == AttrRealm) && Attributes(response).Any(a => a.Type == AttrNonce))
         {
-            // These bootstrap/stale-nonce challenges are unsigned in the STUN protocol.
-            // They permit a bounded retry, never a definitive allocation condemnation.
+
             accepted = response;
             return true;
         }
@@ -723,8 +711,7 @@ public sealed class TurnClient : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            // Cancel the loop with the socket: otherwise it keeps waking every tick just
-            // to send on the disposed socket — one live timer and task per lost allocation (A-06).
+
             _shutdown.Cancel();
             _udp.Dispose();
         }

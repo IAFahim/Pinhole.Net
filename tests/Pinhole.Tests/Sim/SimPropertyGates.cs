@@ -4,10 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Sim;
 
-// R3 property gates at machine level (Roadmap.md section 6, R3): P4 determinism
-// (same seed => identical effect-log hash), a P2-flavored recovery bound counted
-// in ticks — never wall time — and a guard that the digest actually tracks the
-// log. Nothing here sleeps; the only Stopwatch measures the sweep budget itself.
 public sealed class SimPropertyGates
 {
     private const int SweepSeeds = 1000;
@@ -49,11 +45,7 @@ public sealed class SimPropertyGates
     [InlineData(144)]
     public void P2_EventuallyGoodPath_PmtuConfirmsTheWire_WithinBoundedTicks(int seed)
     {
-        // Heavy loss (60% of pongs) that stops at tick 20 s. The recovery budget is
-        // tick arithmetic, not a stopwatch: at most one full 60 s reprobe cooldown
-        // can be pending when the path turns good (60 500 ms worst case), plus the
-        // remaining climb — re-verify 1328 and confirm/re-verify 1456 and 1472 —
-        // at under 220 ms per exchange. 70 000 ms covers it with margin.
+
         const long lossStopsAtMs = 20_000;
         const long recoveryBudgetMs = 70_000;
         int ticks = (int)((lossStopsAtMs + recoveryBudgetMs) / MachineSimScenarios.TickStepMs) + 10;
@@ -71,8 +63,7 @@ public sealed class SimPropertyGates
     [Fact]
     public void DifferentSeeds_ProduceDifferentLogs_SomewhereInTheSweep()
     {
-        // A digest that ignored its log (empty-log hash, constant hash) would
-        // collapse the sweep to a single value; the seeds do differ here.
+
         HashSet<string> pmtu = [];
         HashSet<string> keepalive = [];
         for (int seed = 0; seed < SweepSeeds; seed++)

@@ -203,7 +203,7 @@ public sealed class IPv6FirewallTests
         await TestPoll.UntilAsync(Budget, () => service.Snapshot(ProtocolType.Udp).Count == 2 && service.Snapshot(ProtocolType.Tcp).Count == 2);
         Assert.Equal(4, calls.Count);
         Assert.All(calls, c => Assert.InRange(c.Source.InterfaceIndex, 1, 2));
-        service.Refresh(sources, 53317, 53318); Assert.Equal(4, calls.Count); // no redundant request/lease renewal
+        service.Refresh(sources, 53317, 53318); Assert.Equal(4, calls.Count);
         service.Refresh([sources[4]], 54417, null);
         Assert.Empty(service.Snapshot(ProtocolType.Tcp));
         await TestPoll.UntilAsync(Budget, () => service.Snapshot(ProtocolType.Udp).SingleOrDefault()?.Port == 54417 && leases.Take(4).All(l => l.Releases == 1));
@@ -235,7 +235,7 @@ public sealed class IPv6FirewallTests
         using var service = new IPv6FirewallService(new(), () => { }, async (source, port, _, _) =>
         {
             var lease = new Lease(new IPEndPoint(source.Address, port)); calls.Enqueue(lease);
-            await resume.Task; // deliberately model an uncancellable late gateway response
+            await resume.Task;
             return lease;
         });
         try

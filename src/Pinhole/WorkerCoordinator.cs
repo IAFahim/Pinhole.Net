@@ -109,8 +109,7 @@ internal sealed class WorkerCoordinator
     internal async Task<PinholeConnection> ConnectHostAsync(PinholeNode node, CancellationToken ct)
     {
         string invitation = await WaitForPeerAsync(ct).ConfigureAwait(false);
-        // Seeding both nodes with both relay candidates creates the remote data-IP
-        // permissions before a strict TURN server receives the initial handshake.
+
         return await node.ConnectAsync(invitation, ct).ConfigureAwait(false);
     }
 
@@ -155,7 +154,7 @@ internal sealed class WorkerCoordinator
         catch (Exception ex) when (ex is WebSocketException or HttpRequestException or IOException
             || ex is OperationCanceledException && !ct.IsCancellationRequested)
         {
-            // HTTPS polling also works behind proxies that refuse WebSocket upgrades.
+
         }
         while (true)
         {

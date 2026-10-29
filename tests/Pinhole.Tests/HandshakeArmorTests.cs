@@ -7,11 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-// R5 phase 1 armor: mac1, a keyed BLAKE3 over the versioned initiation frame, gates key
-// agreement on the receiving peer. These pin the wire shapes (94/114-byte frames, marker
-// 0x04, the MAC input), the silence and zero-DH proof under forged floods, the v4↔v4
-// handshake over a raw oracle socket, the v4→v3 first-answer fallback, and the v3
-// pass-through of the support window.
 public sealed class HandshakeArmorTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
@@ -40,13 +35,11 @@ public sealed class HandshakeArmorTests
         CryptoWire.WriteMac1Ext(frame, mac1Key);
         if (!goodMac1)
         {
-            frame[^1] ^= 0xFF; // a well-formed extension whose MAC bytes are garbage
+            frame[^1] ^= 0xFF;
         }
 
         return frame;
     }
-
-    // ------------------------------------------------------------------ the mac1 codec
 
     [Fact]
     public void Mac1_IsKeyedBlake3OverTheFrameMinusTheMac_TruncatedToWireGuardSize()
@@ -57,8 +50,8 @@ public sealed class HandshakeArmorTests
 
         Assert.Equal(94, frame.Length);
         Assert.Equal(CryptoWire.HandshakeV4Marker, frame[^CryptoWire.Mac1ExtLength]);
-        Assert.Equal(16, CryptoWire.Mac1Length); // WireGuard's mac1 size
-        // Independent recomputation: keyed BLAKE3 over everything but the 16 MAC bytes.
+        Assert.Equal(16, CryptoWire.Mac1Length);
+
         byte[] expected = Blake3.HashKeyed(key, frame.AsSpan(0, frame.Length - CryptoWire.Mac1Length));
         Assert.Equal(expected[..16], frame[^CryptoWire.Mac1Length..].ToArray());
 
@@ -72,8 +65,6 @@ public sealed class HandshakeArmorTests
         Assert.False(CryptoWire.VerifyMac1(new byte[9 + CryptoWire.PuncCryptoBody], key), "v3 shape has no extension");
     }
 
-    // ------------------------------------------------------------------ (a) forged floods
-
     [Fact]
     public async Task ForgedMac1Flood_EarnsSilenceZeroStateAndZeroKeyAgreements_WhileAV4DialStillCompletes()
     {
@@ -83,8 +74,6 @@ public sealed class HandshakeArmorTests
         using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
 
-        // Half the flood is random MAC bytes; half is a correctly-formed mac1 computed
-        // under a key that is not the listener's — both must fall to the same gate.
         byte[] wrongKey = RandomNumberGenerator.GetBytes(32);
         const int flood = 64;
         for (int i = 0; i < flood; i++)
@@ -99,15 +88,11 @@ public sealed class HandshakeArmorTests
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => listener.Engine.Mac1Refused >= flood);
 
-        // The no-DH proof: every key agreement an inbound handshake frame triggers moves
-        // this engine counter, and the whole flood moved it by exactly zero.
         Assert.Equal(0, listener.Engine.HandshakeKeyAgreements);
-        Assert.Empty(listener.Connections); // no stranger state materialized
+        Assert.Empty(listener.Connections);
 
-        // Silence: nothing at all came back to the attacker.
         Assert.False(attacker.Poll(500_000, SelectMode.SelectRead), "responder emitted bytes to a forged source");
 
-        // A legitimate v4 dial in the same listener still completes and seals.
         await using PinholeNode dialer = await PinholeNode.BindAsync(Opts());
         Task<PinholeConnection> accept = listener.AcceptAsync();
         PinholeConnection conn = await dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout);
@@ -122,8 +107,6 @@ public sealed class HandshakeArmorTests
         Assert.Equal("through the flood"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
-    // ------------------------------------------------------------------ (b) v4 dialer ↔ v4 responder
-
     [Fact]
     public async Task V4Dialer_V4Responder_PuncCarriesMac1_AndTheHandshakeSealsEndToEnd()
     {
@@ -134,8 +117,6 @@ public sealed class HandshakeArmorTests
         Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
         byte[] punc = await oracle.AwaitV4PuncAsync(node);
 
-        // The frame on the wire: 94 B, marker, and mac1 keyable with the oracle's own
-        // static key — the answering node's key, straight from the connection string.
         Assert.Equal(9 + CryptoWire.PuncCryptoBodyV4, punc.Length);
         Assert.Equal(CryptoWire.HandshakeV4Marker, punc[^CryptoWire.Mac1ExtLength]);
         Assert.True(CryptoWire.VerifyMac1(punc, oracle.Identity.PublicKey));
@@ -143,13 +124,12 @@ public sealed class HandshakeArmorTests
         uint dialerToken = BinaryPrimitives.ReadUInt32LittleEndian(punc.AsSpan(9));
         Assert.True(oracle.TryPeerKeys(node.PeerId, punc.AsSpan(13, 32), punc.AsSpan(45, 32)));
         await oracle.Sock.SendToAsync(oracle.Pack(dialerToken, v4: true), nodeEp);
-        await oracle.Sock.SendToAsync(oracle.SealFrame(0x53, new byte[8]), nodeEp); // adopt the UDP path
+        await oracle.Sock.SendToAsync(oracle.SealFrame(0x53, new byte[8]), nodeEp);
 
         PinholeConnection conn = await dial.WaitAsync(Timeout);
         Assert.True(conn.IsEncrypted);
-        Assert.Equal(0, node.Engine.Mac1Refused); // no false positive on the genuine frames
+        Assert.Equal(0, node.Engine.Mac1Refused);
 
-        // Sealed traffic flows end to end under the keys the v4 handshake agreed.
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         conn.Received += p => got.TrySetResult(p.ToArray());
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x52, "v4 sealed"u8), nodeEp);
@@ -168,10 +148,6 @@ public sealed class HandshakeArmorTests
         uint dialerToken = BinaryPrimitives.ReadUInt32LittleEndian(punc.AsSpan(9));
         Assert.True(oracle.TryPeerKeys(node.PeerId, punc.AsSpan(13, 32), punc.AsSpan(45, 32)));
 
-        // A PACK whose body would verify, whose echo is right, but whose mac1 is garbage:
-        // the gate fires before the echo verdict or key agreement — no HSCK comes back.
-        // (The dialer's retried PUNCs keep flowing — any shape, since nothing counted as
-        // an answer and the v4 fallback may fire mid-check; silence means no HSCK/PACK.)
         byte[] forged = oracle.Pack(dialerToken, v4: true);
         forged[^1] ^= 0xFF;
         await oracle.Sock.SendToAsync(forged, nodeEp);
@@ -193,7 +169,6 @@ public sealed class HandshakeArmorTests
         {
         }
 
-        // The genuine PACK completes the same dial.
         await oracle.Sock.SendToAsync(oracle.Pack(dialerToken, v4: true), nodeEp);
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x53, new byte[8]), nodeEp);
         PinholeConnection conn = await dial.WaitAsync(Timeout);
@@ -204,9 +179,7 @@ public sealed class HandshakeArmorTests
     [Fact]
     public async Task V4PackMac1KeyedWithTheDialersOwnStaticKey_AlsoVerifies()
     {
-        // Simultaneous-dial cross-conn replies arrive keyed with the receiver's own
-        // static key; the accept-either rule lets them through (both keys are public
-        // material — the gate still filters everything random).
+
         await using PinholeNode node = await PinholeNode.BindAsync(Opts());
         using var oracle = new V4Oracle();
         var nodeEp = new IPEndPoint(IPAddress.Loopback, node.LocalPort);
@@ -216,20 +189,18 @@ public sealed class HandshakeArmorTests
         uint dialerToken = BinaryPrimitives.ReadUInt32LittleEndian(punc.AsSpan(9));
         Assert.True(oracle.TryPeerKeys(node.PeerId, punc.AsSpan(13, 32), punc.AsSpan(45, 32)));
 
-        byte[] pack = oracle.Pack(dialerToken, v4: true, mac1Key: punc.AsSpan(45, 32).ToArray()); // the node's own static pub
+        byte[] pack = oracle.Pack(dialerToken, v4: true, mac1Key: punc.AsSpan(45, 32).ToArray());
         await oracle.Sock.SendToAsync(pack, nodeEp);
         await oracle.Sock.SendToAsync(oracle.SealFrame(0x53, new byte[8]), nodeEp);
         PinholeConnection conn = await dial.WaitAsync(Timeout);
         Assert.True(conn.IsEncrypted);
     }
 
-    // ------------------------------------------------------------------ (c) v4 dialer → v3-only responder
-
     [Fact]
     public async Task V4Dialer_LegacyV3Responder_FallsBackToUnversionedOnceAndCompletes()
     {
         await using PinholeNode listener = await PinholeNode.BindAsync(Opts());
-        listener.Engine.LegacyHandshakeV3Only = true; // emulates a pre-v4 peer: ignores the v4 shapes
+        listener.Engine.LegacyHandshakeV3Only = true;
         await using PinholeNode dialer = await PinholeNode.BindAsync(Opts());
 
         Task<PinholeConnection> accept = listener.AcceptAsync();
@@ -240,8 +211,8 @@ public sealed class HandshakeArmorTests
         ConnState state = dialer.Engine.Lookup(listener.PeerId)!;
         Assert.True(state.PuncFrameDowngraded, "the one-shot fallback fired");
         Assert.False(state.PuncFrameV4);
-        Assert.Equal(9 + CryptoWire.PuncCryptoBody, state.PuncFrame.Length); // unversioned retries from here on
-        Assert.Equal(0, listener.Engine.Mac1Refused); // the v3-only peer never even parsed the v4 frames
+        Assert.Equal(9 + CryptoWire.PuncCryptoBody, state.PuncFrame.Length);
+        Assert.Equal(0, listener.Engine.Mac1Refused);
         Assert.True(listener.Engine.HandshakeKeyAgreements >= 1, "the fallback handshake agreed keys");
 
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -250,21 +221,19 @@ public sealed class HandshakeArmorTests
         Assert.Equal("after fallback"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
-    // ------------------------------------------------------------------ (d) v3 dialer → v4 responder
-
     [Fact]
     public async Task LegacyV3Dialer_V4Responder_IsUnchangedByTheSupportWindow()
     {
         await using PinholeNode listener = await PinholeNode.BindAsync(Opts());
         await using PinholeNode dialer = await PinholeNode.BindAsync(Opts());
-        dialer.Engine.LegacyHandshakeV3Only = true; // unversioned PUNCs only
+        dialer.Engine.LegacyHandshakeV3Only = true;
 
         Task<PinholeConnection> accept = listener.AcceptAsync();
         PinholeConnection conn = await dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout);
         PinholeConnection atListener = await accept.WaitAsync(Timeout);
 
         Assert.True(conn.IsEncrypted);
-        Assert.Equal(0, listener.Engine.Mac1Refused); // v3 frames pass vacuously through the gate
+        Assert.Equal(0, listener.Engine.Mac1Refused);
         Assert.True(listener.Engine.HandshakeKeyAgreements >= 1);
         Assert.False(dialer.Engine.Lookup(listener.PeerId)!.PuncFrameV4);
 
@@ -274,8 +243,6 @@ public sealed class HandshakeArmorTests
         Assert.Equal("v3 bridge"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
-    // A v4-capable raw responder: receives the node's versioned PUNC, answers a versioned
-    // PACK (mac1 keyed with its own static key — the answering node's), seals after.
     private sealed class V4Oracle : IDisposable
     {
         public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);

@@ -12,9 +12,6 @@ public sealed class BottleneckTests(ITestOutputHelper output)
     private const long FlowBytes = 512 * 1024;
     private static readonly TimeSpan FlowBudget = TimeSpan.FromSeconds(75);
 
-    // The lab's bottleneck: 16 Mbit/s (2 MiB/s), 20 ms each way → ~157 packets of
-    // bandwidth-delay product; the deep-queue rung holds a full RTT of it, the thin-queue
-    // rung barely holds a burst.
     private const long LinkBits = 16_000_000;
     private static readonly TimeSpan OneWay = TimeSpan.FromMilliseconds(20);
 
@@ -25,12 +22,7 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // A 6 MiB flow, not the class's 512 KiB default: the receive window opens small
-            // and ramps over ~40 ms RTTs, and on a slow runner the ramp alone can eat a
-            // quarter of a short flow (observed 435 KiB/s vs the 1953 ceiling, zero loss,
-            // queue depth 1). The saturation claim needs the sustained phase to dominate,
-            // and the measured window below skips the first 1 MiB entirely so window
-            // ramp-up and runner scheduling stalls during it cannot dilute the rate.
+
             const long bytes = 6 * 1024 * 1024;
             using var lab = new VirtualLab();
             await using BlobServer server = await ServeAsync(lab, dir, bytes);
@@ -38,9 +30,7 @@ public sealed class BottleneckTests(ITestOutputHelper output)
 
             var transfer = new TransferProgress(startAfterBytes: bytes / 6);
             var stats = new BlobTransferStats();
-            // Controller forensics: the collapse/restore timeline is the first thing
-            // wanted when the floor fails on a slow runner, and it only exists in the
-            // job log if the test collected it before the assertion threw.
+
             var timeline = new List<string>();
             BlobTestHooks.Trace = line => { lock (timeline) timeline.Add(line); };
             BlobDownloadResult result;
@@ -73,10 +63,7 @@ public sealed class BottleneckTests(ITestOutputHelper output)
 
             Assert.True(kibPerSecond <= LinkBits / 8 / 1024 * 1.05,
                 $"measured {kibPerSecond:F0} KiB/s exceeds the 16 Mbit/s link — the shaper is not shaping");
-            // The floor keeps its 25%-of-ceiling meaning but is asserted over the sustained
-            // window (last 5 MiB): a loaded runner stretches the ramp and the first data
-            // far more than the steady drain, which is exactly what must not read as a
-            // broken baseline (the CI flake measured ~110 KiB/s with the ramp included).
+
             Assert.True(kibPerSecond >= LinkBits / 8 / 1024 * 0.25,
                 $"goodput collapsed to {kibPerSecond:F0} KiB/s on a clean 16 Mbit/s link — the baseline is broken. " +
                 $"Controller timeline:{Environment.NewLine}{string.Join(Environment.NewLine, timeline.TakeLast(80))}");
@@ -154,8 +141,6 @@ public sealed class BottleneckTests(ITestOutputHelper output)
         {
             using var lab = new VirtualLab();
 
-            // Two servers, two downloaders, one shared bottleneck; the near flow crosses at
-            // 5 ms, the far one at 120 ms — the classic thin-RTT-fattens-first contest.
             const string nearServer = "198.51.100.10", farServer = "198.51.100.11";
             const string nearClient = "198.51.100.20", farClient = "198.51.100.21";
             await using BlobServer near = await ServeAtAsync(lab, dir, nearServer, 41010, "near.bin");
@@ -185,8 +170,6 @@ public sealed class BottleneckTests(ITestOutputHelper output)
             Directory.Delete(dir, recursive: true);
         }
     }
-
-    // ------------------------------------------------------------------ plumbing
 
     private static bool IsAny(IPEndPoint ep, string a, string b) =>
         ep.Address.ToString() == a || ep.Address.ToString() == b;
@@ -243,10 +226,6 @@ public sealed class BottleneckTests(ITestOutputHelper output)
 
     private static void AssertVerified(string dir, BlobDownloadResult result) => Assert.Equal(FlowBytes, result.Bytes);
 
-    // Measures the SUSTAINED window only: recording starts once VerifiedBytes crosses
-    // startAfterBytes, so the receive window's ramp (and any scheduler stall inside it)
-    // stays out of the goodput math; the elapsed span is still first-recorded to
-    // last-report, as before.
     private sealed class TransferProgress(long startAfterBytes) : IProgress<BlobProgress>
     {
         private long _firstTick;

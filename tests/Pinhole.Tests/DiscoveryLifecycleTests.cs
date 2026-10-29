@@ -58,7 +58,6 @@ public sealed class DiscoveryLifecycleTests
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
 
-        // A cancelled bind must not leave its socket behind while discovery is enabled.
         using var replacement = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         replacement.Bind(new IPEndPoint(IPAddress.Loopback, port));
     }

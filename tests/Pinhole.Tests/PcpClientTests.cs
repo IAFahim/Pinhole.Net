@@ -7,9 +7,7 @@ namespace Pinhole.Tests;
 
 public sealed class PcpClientTests
 {
-    // Hand-encoded from RFC 6887 figures 2, 3, 9 and 10, independently of the
-    // production encoder and FakeGateway. Source 192.0.2.10, nonce 00..0b,
-    // UDP port 53317, lifetime 30 seconds, assigned 203.0.113.66:44444.
+
     private static byte[] Request => Convert.FromHexString(
         "020100000000001E" + "00000000000000000000FFFFC000020A" +
         "000102030405060708090A0B" + "11000000D0450000" +
@@ -56,12 +54,12 @@ public sealed class PcpClientTests
     }
 
     [Theory]
-    [InlineData(0, 1)] // wrong version
-    [InlineData(1, 130)] // PEER instead of MAP
-    [InlineData(3, 8)] // NO_RESOURCES, at the PCP result-code offset
-    [InlineData(24, 255)] // different nonce
-    [InlineData(36, 6)] // TCP instead of UDP
-    [InlineData(40, 0)] // another internal port
+    [InlineData(0, 1)]
+    [InlineData(1, 130)]
+    [InlineData(3, 8)]
+    [InlineData(24, 255)]
+    [InlineData(36, 6)]
+    [InlineData(40, 0)]
     public void MapResponse_RejectsErrorsAndUnrelatedMappings(int offset, byte value)
     {
         byte[] response = Response;
@@ -109,7 +107,6 @@ public sealed class PcpClientTests
         byte[] response = Response;
         request.Buffer.AsSpan(24, 12).CopyTo(response.AsSpan(24));
 
-        // A correct nonce and body must not make another UDP source authoritative.
         await attacker.SendAsync(response, request.RemoteEndPoint, timeout.Token);
         Assert.NotSame(pending, await Task.WhenAny(pending, Task.Delay(100, timeout.Token)));
         byte[] unrelated = (byte[])response.Clone();

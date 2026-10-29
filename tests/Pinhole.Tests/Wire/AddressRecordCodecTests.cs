@@ -6,17 +6,9 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// Codec tests for AddressRecordCodec, following the three required shapes: (a) round-trip
-// + golden vectors, (b) seeded totality fuzz (never throws, no out-of-range values, and
-// accept => exact canonical re-encode), (c) explicit non-canonical rejections, plus (d) a
-// differential oracle against the existing Pinhole.AddressRecord implementation — including
-// the signature-compatibility check that a body re-serialized by this codec is byte-equal
-// to the bytes the legacy signer actually signed.
 public sealed class AddressRecordCodecTests
 {
-    // The committed signed vector from WireGoldenTests.AddressRecord_EncodeSigned_GoldenBytes:
-    // body = version 1, peerId 0x0102030405060708, key of seed 1..32, sequence
-    // 0x8877665544332211, expiry 1_800_000_000, one endpoint 203.0.113.7:3478.
+
     private const string GoldenSignedHex =
         "0108070605040302016106F86AA1C86018EB49133492B1E3B99FCCCF8CE782210631D35ED00462EDD8"
         + "112233445566778800D2496B000000000104CB0071070D96"
@@ -26,23 +18,16 @@ public sealed class AddressRecordCodecTests
         "0108070605040302016106F86AA1C86018EB49133492B1E3B99FCCCF8CE782210631D35ED00462EDD8"
         + "112233445566778800D2496B000000000104CB0071070D96";
 
-    // version 2, peerId 0xFEDCBA9876543210, key 0x00..0x1F, sequence 1, expiry
-    // long.MaxValue (raw seconds, LE 0x7FFFFFFFFFFFFFFF), direct [192.0.2.1:1,
-    // 2001:db8::1:65535], relayed [[::1]:443]
     private const string GoldenV2BodyHex =
         "021032547698BADCFE000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F"
         + "0100000000000000FFFFFFFFFFFFFF7F0204C000020100011020010DB8000000000000000000000001FFFF"
         + "01100000000000000000000000000000000101BB";
-
-    // ------------------------------------------------------------------ shape (a): round-trip + goldens
 
     [Fact]
     public void Golden_CommittedSignedVector_FramesAndReserializesByteExact()
     {
         byte[] golden = Convert.FromHexString(GoldenSignedHex);
 
-        // The legacy encoder reproduces these exact bytes from the same inputs; re-deriving
-        // here validates the transcription of the committed vector.
         RelayIdentity identity = Identity(1);
         var record = new AddressRecord
         {
@@ -54,7 +39,6 @@ public sealed class AddressRecordCodecTests
         };
         Assert.Equal(golden, record.EncodeSigned(identity));
 
-        // The committed vector is a genuinely verifiable record, not just bytes.
         Assert.True(AddressRecord.TryParseVerified(golden, record.PeerId, identity.PublicKey,
             DateTimeOffset.FromUnixTimeSeconds(1_700_000_000), out _));
 
@@ -96,7 +80,6 @@ public sealed class AddressRecordCodecTests
         Assert.Equal(new IPEndPoint(IPAddress.Parse("203.0.113.7"), 3478), body1.Endpoints.Single());
         Assert.Empty(body1.RelayedEndpoints);
 
-        // v2 pins the relayed list and a long.MaxValue expiry travelling as a raw integer
         Assert.True(AddressRecordCodec.TryReadBody(v2, out AddressRecordBody body2, out int consumed2));
         Assert.Equal(v2.Length, consumed2);
         Assert.Equal(0xFEDCBA9876543210UL, body2.PeerId);
@@ -110,7 +93,6 @@ public sealed class AddressRecordCodecTests
         ], body2.Endpoints);
         Assert.Equal(new[] { new IPEndPoint(IPAddress.Parse("::1"), 443) }, body2.RelayedEndpoints);
 
-        // The minimal v1 body: zero fields and a canonical empty direct list
         Assert.True(AddressRecordCodec.TryReadBody(minimal, out AddressRecordBody body3, out int consumed3));
         Assert.Equal(minimal.Length, consumed3);
         Assert.Equal(0UL, body3.PeerId);
@@ -153,7 +135,6 @@ public sealed class AddressRecordCodecTests
                 $"peer={peerId} expiry={expiry} relayed={relayedCount}");
         }
 
-        // Port edges and an IPv4-mapped IPv6 address travel as plain 16-byte addresses
         var mapped = new IPEndPoint(new IPAddress([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 1, 2, 3, 4]), 65535);
         RoundTrip(buffer, again,
             new AddressRecordBody(1, Key(0x42), 1, 1, [new IPEndPoint(IPAddress.Loopback, 0), mapped], []),
@@ -196,8 +177,6 @@ public sealed class AddressRecordCodecTests
         Assert.Equal(AddressRecordCodec.MaxRelayedEndpoints, decoded.RelayedEndpoints.Length);
     }
 
-    // ------------------------------------------------------------------ shape (b): totality fuzz
-
     [Fact]
     public void TotalityFuzz_NeverThrows_AcceptImpliesExactReencode()
     {
@@ -212,7 +191,7 @@ public sealed class AddressRecordCodecTests
             hostileExpiry = i % 997 == 0;
             switch (i % 6)
             {
-                case 0: // raw random bytes at arbitrary lengths
+                case 0:
                 {
                     int len = rng.Next(scratch.Length + 1);
                     rng.NextBytes(scratch.AsSpan(0, len));
@@ -220,7 +199,7 @@ public sealed class AddressRecordCodecTests
                     ExerciseSigned(scratch.AsSpan(0, len), rewrite);
                     break;
                 }
-                case 1: // valid body with 1..3 bit flips
+                case 1:
                 {
                     int written = AddressRecordCodec.WriteBody(RandomBody(rng, hostileExpiry), bodyBuffer);
                     bodyBuffer.AsSpan(0, written).CopyTo(scratch);
@@ -232,13 +211,13 @@ public sealed class AddressRecordCodecTests
                     ExerciseBody(scratch.AsSpan(0, written), rewrite);
                     break;
                 }
-                case 2: // valid body truncated at a random length
+                case 2:
                 {
                     int written = AddressRecordCodec.WriteBody(RandomBody(rng, hostileExpiry), bodyBuffer);
                     ExerciseBody(bodyBuffer.AsSpan(0, rng.Next(written + 1)), rewrite);
                     break;
                 }
-                case 3: // valid body plus trailing garbage
+                case 3:
                 {
                     int written = AddressRecordCodec.WriteBody(RandomBody(rng, hostileExpiry), bodyBuffer);
                     bodyBuffer.AsSpan(0, written).CopyTo(scratch);
@@ -247,7 +226,7 @@ public sealed class AddressRecordCodecTests
                     ExerciseBody(scratch.AsSpan(0, written + extra), rewrite);
                     break;
                 }
-                case 4: // valid signed wire with a bit flip anywhere (body or signature)
+                case 4:
                 {
                     int written = AddressRecordCodec.WriteBody(RandomBody(rng, hostileExpiry), bodyBuffer);
                     bodyBuffer.AsSpan(0, written).CopyTo(scratch);
@@ -257,7 +236,7 @@ public sealed class AddressRecordCodecTests
                     ExerciseSigned(scratch.AsSpan(0, total), rewrite);
                     break;
                 }
-                default: // valid signed wire truncated
+                default:
                 {
                     int written = AddressRecordCodec.WriteBody(RandomBody(rng, hostileExpiry), bodyBuffer);
                     bodyBuffer.AsSpan(0, written).CopyTo(scratch);
@@ -269,8 +248,6 @@ public sealed class AddressRecordCodecTests
             }
         }
     }
-
-    // ------------------------------------------------------------------ shape (c): non-canonical rejection
 
     [Fact]
     public void Rejects_NonCanonicalBodies()
@@ -319,20 +296,16 @@ public sealed class AddressRecordCodecTests
         byte[] v1 = Convert.FromHexString(GoldenV1BodyHex);
         byte[] signature = Enumerable.Repeat((byte)0xAB, AddressRecordCodec.SignatureLength).ToArray();
 
-        // Signature tail one byte short: the body slice loses its last byte instead
         Assert.False(AddressRecordCodec.TryReadSigned([.. v1, .. signature[..^1]], out _, out int consumed));
         Assert.Equal(0, consumed);
 
-        // Bytes appended after the signature shift the split and become trailing body bytes
         Assert.False(AddressRecordCodec.TryReadSigned([.. v1, .. signature, 0xAA], out _, out consumed));
         Assert.Equal(0, consumed);
 
-        // Shorter than header + signature can never frame a record
         Assert.False(AddressRecordCodec.TryReadSigned(
             new byte[AddressRecordCodec.MinimumBodyLength + AddressRecordCodec.SignatureLength - 1], out _, out consumed));
         Assert.Equal(0, consumed);
 
-        // The exact framing is accepted and splits at the right boundary
         Assert.True(AddressRecordCodec.TryReadSigned([.. v1, .. signature], out SignedAddressRecord framed, out consumed));
         Assert.Equal(v1.Length + AddressRecordCodec.SignatureLength, consumed);
         Assert.True(framed.Signature.AsSpan().SequenceEqual(signature));
@@ -341,10 +314,7 @@ public sealed class AddressRecordCodecTests
     [Fact]
     public void Expiry_HostileRawValues_DecodeTotal_NeverConvert()
     {
-        // Audit C-06: expiry bytes are hostile input. The codec returns the raw 64-bit
-        // integer for every bit pattern and never calls DateTimeOffset.FromUnixTimeSeconds
-        // on wire data, so no value can throw; the legacy verified parser keeps its
-        // documented typed-false behavior on a forged expiry.
+
         long[] hostile =
         [
             long.MinValue, long.MinValue + 1, -62135596801, -62135596800, -1, 0,
@@ -400,8 +370,6 @@ public sealed class AddressRecordCodecTests
         Assert.Throws<ArgumentException>(() => AddressRecordCodec.WriteBody(good, tiny));
     }
 
-    // ------------------------------------------------------------------ shape (d): differential oracle
-
     [Fact]
     public void Differential_LegacySignedRecords_DecodeMatchAndReserializeByteExact()
     {
@@ -423,7 +391,6 @@ public sealed class AddressRecordCodecTests
             };
             byte[] wire = record.EncodeSigned(identity);
 
-            // Fixture sanity: the legacy verified parser accepts its own encoding
             Assert.True(AddressRecord.TryParseVerified(wire, record.PeerId, identity.PublicKey, now, out AddressRecord? legacy),
                 $"i={i}");
 
@@ -437,13 +404,10 @@ public sealed class AddressRecordCodecTests
             Assert.Equal(record.RelayedEndpoints, mine.Body.RelayedEndpoints);
             Assert.True(mine.Signature.AsSpan().SequenceEqual(wire[^AddressRecordCodec.SignatureLength..]));
 
-            // Signature compatibility: the codec's re-serialized body equals the exact bytes
-            // the legacy signer signed, so signatures keep verifying over codec output.
             int rewritten = AddressRecordCodec.WriteBody(mine.Body, rewrite);
             Assert.Equal(wire.Length - AddressRecordCodec.SignatureLength, rewritten);
             Assert.True(rewrite[..rewritten].SequenceEqual(wire.AsSpan()[..^AddressRecordCodec.SignatureLength]), $"i={i}");
 
-            // The unsigned legacy path emits the same body bytes
             Assert.True(record.Encode().AsSpan().SequenceEqual(rewrite[..rewritten]), $"i={i}");
         }
     }
@@ -485,10 +449,7 @@ public sealed class AddressRecordCodecTests
     [Fact]
     public void Differential_LegacyParserLeniency_V2EmptyRelayedList_CanonicalCodecRejects()
     {
-        // Documented discrepancy: AddressRecord.Encode never emits version 2 without relayed
-        // endpoints, but the legacy TryParseVerified accepts such a body when it is otherwise
-        // well formed and signed. The canonical codec is stricter and rejects the empty v2
-        // relayed list. Legacy code is intentionally left untouched.
+
         RelayIdentity identity = Identity(1);
         byte[] v1 = Convert.FromHexString(GoldenV1BodyHex);
         byte[] v2EmptyRelay = [.. v1];
@@ -514,8 +475,6 @@ public sealed class AddressRecordCodecTests
         Assert.Equal(58 + 64, AddressRecordCodec.MinimumBodyLength + AddressRecordCodec.SignatureLength);
         Assert.Equal(439, AddressRecordCodec.MaxEncodedLength);
     }
-
-    // ------------------------------------------------------------------ fixtures
 
     private static byte[] SeedBytes(int start) => Enumerable.Range(start, 32).Select(i => (byte)i).ToArray();
 
@@ -583,14 +542,13 @@ public sealed class AddressRecordCodecTests
         Assert.InRange(body.RelayedEndpoints.Length, 0, AddressRecordCodec.MaxRelayedEndpoints);
         if (input[0] == 2)
         {
-            Assert.NotEmpty(body.RelayedEndpoints); // v2 must carry at least one relayed endpoint
+            Assert.NotEmpty(body.RelayedEndpoints);
         }
         else
         {
             Assert.Empty(body.RelayedEndpoints);
         }
 
-        // Acceptance implies canonical exactness: the decoded body re-encodes to the input
         int rewritten = AddressRecordCodec.WriteBody(body, rewrite);
         Assert.Equal(input.Length, rewritten);
         Assert.True(rewrite[..rewritten].SequenceEqual(input));
@@ -609,7 +567,6 @@ public sealed class AddressRecordCodecTests
         Assert.Equal(AddressRecordCodec.SignatureLength, record.Signature.Length);
         Assert.True(record.Signature.AsSpan().SequenceEqual(input[^AddressRecordCodec.SignatureLength..]));
 
-        // Body invariants and the exact re-encode property carry over to the framed record
         ExerciseBody(input[..^AddressRecordCodec.SignatureLength], rewrite);
     }
 }

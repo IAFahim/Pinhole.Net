@@ -27,7 +27,7 @@ public sealed class IPv6FirewallSocketTests
         string description = await http.GetStringAsync(new Uri($"http://[::1]:{((IPEndPoint)listener.LocalEndpoint).Port}/device.xml"), deadline.Token);
         Assert.Equal("<root/>", description);
         await server.WaitAsync(deadline.Token);
-        // A different literal must be refused by the pinned connector before dialing it.
+
         await Assert.ThrowsAsync<HttpRequestException>(() => http.GetStringAsync(new Uri("http://[::2]/device.xml"), deadline.Token));
     }
 
@@ -46,7 +46,7 @@ public sealed class IPv6FirewallSocketTests
             {
                 var query = await router.ReceiveFromAsync(bytes, SocketFlags.None, new IPEndPoint(IPAddress.IPv6Any, 0), deadline.Token);
                 queries.Add(Encoding.ASCII.GetString(bytes, 0, query.ReceivedBytes));
-                // A peer-supplied remote control URL must not become a discovered router.
+
                 byte[] bad = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nLOCATION: http://[2001:db8::99]/device.xml\r\n\r\n");
                 await router.SendToAsync(bad, SocketFlags.None, query.RemoteEndPoint, deadline.Token);
                 byte[] good = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nLOCATION: http://[::1]:5000/device.xml\r\n\r\n");

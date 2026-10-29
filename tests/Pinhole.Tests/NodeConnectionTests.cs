@@ -39,7 +39,7 @@ public sealed class ConnectionStringTests
         string b64 = encoded["pinhole1:".Length..].Replace('-', '+').Replace('_', '/');
         b64 += new string('=', (4 - b64.Length % 4) % 4);
         byte[] payload = Convert.FromBase64String(b64);
-        payload[0] = 9; // wrong version
+        payload[0] = 9;
         string bad = "pinhole1:" + Convert.ToBase64String(payload).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         Assert.Throws<FormatException>(() => ConnectionString.Parse(bad));
         Assert.False(ConnectionString.TryParse("pinhole1:AAAA", out _));
@@ -79,8 +79,8 @@ public sealed class NodeConnectionTests
         Task<PinholeConnection> accept = listener.AcceptAsync();
         PinholeConnection dialerSide = await dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout);
         PinholeConnection listenerSide = await accept.WaitAsync(Timeout);
-        Assert.Equal(listener.PeerId, dialerSide.PeerId);   // dialer holds a conn TO the listener
-        Assert.Equal(dialer.PeerId, listenerSide.PeerId);   // listener holds a conn TO the dialer
+        Assert.Equal(listener.PeerId, dialerSide.PeerId);
+        Assert.Equal(dialer.PeerId, listenerSide.PeerId);
         return (dialerSide, listenerSide);
     }
 
@@ -128,26 +128,24 @@ public sealed class NodeConnectionTests
 
         List<Task<PinholeConnection>> accepts =
         [
-            n0.AcceptAsync(), n0.AcceptAsync(), // from 1 and 2
-            n1.AcceptAsync(),                   // from 2
+            n0.AcceptAsync(), n0.AcceptAsync(),
+            n1.AcceptAsync(),
         ];
         PinholeConnection c01 = await n1.ConnectAsync(n0.ConnectionString).WaitAsync(Timeout);
         PinholeConnection c02 = await n2.ConnectAsync(n0.ConnectionString).WaitAsync(Timeout);
         PinholeConnection c12 = await n2.ConnectAsync(n1.ConnectionString).WaitAsync(Timeout);
         await Task.WhenAll(accepts).WaitAsync(Timeout);
 
-        // Every pair proves itself with an exchange.
         await ExchangeAsync(n1, c01, n0);
         await ExchangeAsync(n2, c02, n0);
         await ExchangeAsync(n2, c12, n1);
 
-        // A late fourth peer joins; the existing pairings keep flowing.
         await using PinholeNode n3 = await PinholeNode.BindAsync(Opts());
         Task<PinholeConnection> lateAccept = n0.AcceptAsync();
         PinholeConnection c03 = await n3.ConnectAsync(n0.ConnectionString).WaitAsync(Timeout);
         await lateAccept.WaitAsync(Timeout);
         await ExchangeAsync(n3, c03, n0);
-        await ExchangeAsync(n1, c01, n0); // unaffected by the join
+        await ExchangeAsync(n1, c01, n0);
     }
 
     private static async Task ExchangeAsync(PinholeNode from, PinholeConnection conn, PinholeNode peer)
@@ -169,17 +167,12 @@ public sealed class NodeConnectionTests
         await using PinholeNode a = await PinholeNode.BindAsync(Opts(relays: [relay]));
         await using PinholeNode b = await PinholeNode.BindAsync(Opts(relays: [relay]));
 
-        // A connection string with the direct candidates withheld: the punch has nothing to
-        // try, so the connection can only live on the relay — and must still exist.
         string relayOnlyString = new ConnectionString(a.PeerId, RelayCandidatesOf(a), staticKey: a.StaticPublicKey).ToString();
         Assert.True(ConnectionString.Parse(relayOnlyString).Candidates.All(c => c.Kind == CandidateKind.Relay));
 
         Task<PinholeConnection> accept = a.AcceptAsync();
         PinholeConnection conn = await b.ConnectAsync(relayOnlyString).WaitAsync(Timeout);
 
-        // The meet was necessarily on the relay (the string carries no direct candidates);
-        // on fast loopbacks the engine's direct-upgrade probing can land within the dial
-        // itself, so the post-dial state is Degraded or already Open.
         Assert.Contains(conn.State, new[] { PinholeConnectionState.Degraded, PinholeConnectionState.Open });
 
         PinholeConnection atA = await accept.WaitAsync(Timeout);
@@ -200,8 +193,7 @@ public sealed class NodeConnectionTests
     [Fact]
     public async Task MaxPayload_Guards_InsteadOfDyingInTheNetwork()
     {
-        // PMTUD off: this test pins the STATIC floor. With discovery on, the ceiling would
-        // climb past 1200 within the first maintenance ticks and legitimately accept more.
+
         await using PinholeNode a = await PinholeNode.BindAsync(Opts() with { EnablePmtud = false });
         await using PinholeNode b = await PinholeNode.BindAsync(Opts() with { EnablePmtud = false });
         (PinholeConnection conn, PinholeConnection atA) = await ConnectPairAsync(a, b);
@@ -227,7 +219,6 @@ public sealed class NodeConnectionTests
             staticKey: a.StaticPublicKey).ToString();
         Task<PinholeConnection> dial = b.ConnectAsync(deadString).WaitAsync(TimeSpan.FromSeconds(15));
 
-        // While the doomed dial is in flight, sending on it is a clear error, not a mystery.
         PinholeConnection? unopened = b.Connections.FirstOrDefault();
         if (unopened is { } eager)
         {

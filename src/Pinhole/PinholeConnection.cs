@@ -56,7 +56,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
 
     private readonly NodeEngine _engine;
     private readonly ConnState _c;
-    private int _readInFlight; // single-reader guard for the buffered API
+    private int _readInFlight;
 
     internal PinholeConnection(NodeEngine engine, ConnState c)
     {
@@ -171,8 +171,7 @@ public sealed class PinholeConnection : IAsyncDisposable, IDisposable
         try
         {
             byte[]? datagram = await buffer.ReadAsync(ct).ConfigureAwait(false);
-            // Branch, don't ternary: "cond ? null : struct" targeting a nullable struct
-            // compiles the null arm to default(struct) — an empty memory, not EOF.
+
             if (datagram is null)
             {
                 return null;

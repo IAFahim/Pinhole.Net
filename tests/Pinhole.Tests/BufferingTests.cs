@@ -34,8 +34,6 @@ public sealed class BufferingTests
         await using var dialer = await PinholeNode.BindAsync(Opts(0));
         (PinholeConnection atDialer, Task<PinholeConnection> accept) = await PairAsync(listener, dialer);
 
-        // The datagram crosses before the app ever touches the accepted connection — the
-        // exact window where the Received event would have dropped it.
         atDialer.Send("before you subscribed"u8);
         await Task.Delay(200);
 
@@ -63,7 +61,7 @@ public sealed class BufferingTests
             _ = await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout);
         }
 
-        Assert.Equal(firstSent, first.ToArray()); // ownership moved to the reader, no reuse
+        Assert.Equal(firstSent, first.ToArray());
     }
 
     [Fact]
@@ -87,14 +85,12 @@ public sealed class BufferingTests
             for (int i = 0; i < arrivals.Length; i++)
             {
                 atDialer.Send([(byte)('0' + i)]);
-                // The queue is tested in arrival order. UDP sends can reach different
-                // local source sockets and reorder; the callback follows enqueue.
+
                 await arrivals[i].Task.WaitAsync(Timeout);
             }
 
             Assert.Equal(3, atListener.DroppedDatagrams);
 
-            // The newest datagrams are what a reader finds; the queue kept flowing.
             byte[] third = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
             byte[] fourth = (await atListener.ReceiveAsync().AsTask().WaitAsync(Timeout))!.Value.ToArray();
             Assert.Equal("3"u8.ToArray(), third);
@@ -157,8 +153,7 @@ public sealed class BufferingTests
             atListener.Received += Received;
             try
             {
-                // This test checks local FIFO drain. The transport can reorder during
-                // a path change, so establish enqueue order through its receive event.
+
                 atDialer.Send(Encoding.UTF8.GetBytes(text));
                 await enqueued.Task.WaitAsync(Timeout);
             }
@@ -167,9 +162,6 @@ public sealed class BufferingTests
         await atDialer.CloseAsync();
         await atListener.Closed.WaitAsync(Timeout);
 
-        // EOF only after the buffered three come out. Collect with labels so a rare
-        // ordering failure names its mode (early EOF? a fourth frame? a swap?) instead
-        // of leaving a bare assert-equal behind.
         string[] reads = new string[4];
         for (int i = 0; i < reads.Length; i++)
         {
@@ -183,7 +175,7 @@ public sealed class BufferingTests
 
         int yielded = 0;
         await foreach (ReadOnlyMemory<byte> _ in atListener.ReadAllAsync()) { yielded++; }
-        Assert.Equal(0, yielded); // drained: the enumeration ends immediately
+        Assert.Equal(0, yielded);
     }
 
     [Fact]
@@ -213,7 +205,7 @@ public sealed class BufferingTests
         await using PinholeConnection atListener = await accept.WaitAsync(Timeout);
 
         Task<ReadOnlyMemory<byte>?> pending = atListener.ReceiveAsync().AsTask();
-        await dialer.Engine.SimulateInterfaceLossAsync().WaitAsync(Timeout); // the sender's whole network changed
+        await dialer.Engine.SimulateInterfaceLossAsync().WaitAsync(Timeout);
 
         await TestPoll.UntilAsync(Timeout, () =>
         {
@@ -223,7 +215,7 @@ public sealed class BufferingTests
             }
             catch (InvalidOperationException)
             {
-                return false; // mid-recovery; the engine re-punches on its own
+                return false;
             }
 
             return pending.IsCompleted;
@@ -265,7 +257,7 @@ public sealed class BufferingTests
 
         ValueTask<ReadOnlyMemory<byte>?> first = atListener.ReceiveAsync();
         await Assert.ThrowsAsync<InvalidOperationException>(() => atListener.ReceiveAsync().AsTask());
-        Assert.False(first.IsCompleted); // the first receive is still pending, untouched
+        Assert.False(first.IsCompleted);
 
         atDialer.Send("first reader wins"u8);
         byte[] got = (await first.AsTask().WaitAsync(Timeout))!.Value.ToArray();

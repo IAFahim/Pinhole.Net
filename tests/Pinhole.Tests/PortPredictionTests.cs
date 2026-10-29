@@ -25,15 +25,15 @@ public sealed class PortPredictionTests
     }
 
     [Theory]
-    [InlineData(0)] // constant observed mapping: no allocation sequence
-    [InlineData(1)] // random/inconsistent steps
-    [InlineData(2)] // decreasing sequence
-    [InlineData(3)] // large jump
-    [InlineData(4)] // port wrapping
-    [InlineData(5)] // different public IPs
-    [InlineData(6)] // unresolved private mapped IP
-    [InlineData(7)] // unresolved shared carrier address
-    [InlineData(8)] // insufficient sample count
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
     public void UnreliableOrInapplicableEvidence_IsRefused(int variant)
     {
         IPEndPoint[] observations = [Endpoint(41000), Endpoint(41001), Endpoint(41002), Endpoint(41003)];
@@ -101,7 +101,7 @@ public sealed class PortPredictionTests
         using var an = lab.Nat(VirtualNatKind.Symmetric, "203.0.113.10", "172.31.10.0/24");
         using var bn = lab.Nat(VirtualNatKind.Symmetric, "203.0.113.20", "172.31.20.0/24");
         await using var a = await Node(lab, an, relay, servers.All()); await using var b = await Node(lab, bn, relay, servers.All());
-        Assert.Equal(2, an.MappingsCreated); Assert.Equal(2, bn.MappingsCreated); // four destinations remain uncontacted
+        Assert.Equal(2, an.MappingsCreated); Assert.Equal(2, bn.MappingsCreated);
         Task<PinholeConnection> accepting = b.AcceptAsync();
         await using var outgoing = await a.ConnectAsync(b.ConnectionString).WaitAsync(Budget);
         await using var incoming = await accepting.WaitAsync(Budget);
@@ -121,7 +121,7 @@ public sealed class PortPredictionTests
         outgoing.Send([7, 8]); Assert.Equal(new byte[] { 7, 8 }, (await incoming.ReceiveAsync().AsTask().WaitAsync(Budget))!.Value.ToArray());
         incoming.Send([9]); Assert.Equal(new byte[] { 9 }, (await outgoing.ReceiveAsync().AsTask().WaitAsync(Budget))!.Value.ToArray());
         Assert.Equal(8, a.Engine.Lookup(b.PeerId)!.Prediction!.LocalTargets!.Length);
-        // Guesses never become public reflexive candidates, even after one proves usable.
+
         Assert.DoesNotContain(ConnectionString.Parse(a.ConnectionString).Candidates,
             c => a.Engine.Lookup(b.PeerId)!.Prediction!.LocalTargets!.Contains(c.Address));
     }
@@ -171,7 +171,7 @@ public sealed class PortPredictionTests
         using var bn = lab.Nat(VirtualNatKind.Symmetric, "203.0.113.20", "172.31.20.0/24");
         var configured = servers.All();
         await using var a = await Node(lab, an, relay, configured); await using var b = await Node(lab, bn, relay, configured);
-        await a.Engine.ProbeStunAsync(configured[^1]); // consumes a reserved mapping before the negotiated round
+        await a.Engine.ProbeStunAsync(configured[^1]);
         Task<PinholeConnection> accepting = b.AcceptAsync();
         await using var outgoing = await a.ConnectAsync(b.ConnectionString).WaitAsync(Budget);
         await using var incoming = await accepting.WaitAsync(Budget);

@@ -11,9 +11,6 @@ using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 
 namespace Pinhole;
 
-// Windows SslStream can reject DERP's extra metadata certificate before exposing
-// the normal HTTPS certificate for validation. Use the existing managed crypto
-// dependency for the TLS record layer, retaining OS trust and hostname checks.
 internal static class DerpTls
 {
     internal static readonly HttpMessageInvoker Http = new(new SocketsHttpHandler
@@ -31,7 +28,7 @@ internal static class DerpTls
         {
             await tcp.ConnectAsync(host, port, ct).ConfigureAwait(false);
             tcp.NoDelay = true;
-            var protocol = new TlsClientProtocol(); // nonblocking TLS records
+            var protocol = new TlsClientProtocol();
             protocol.Connect(new Client(host, testChain));
             var stream = new OwnedStream(protocol, tcp);
             await stream.HandshakeAsync(ct).ConfigureAwait(false);
@@ -56,12 +53,10 @@ internal static class DerpTls
             loaded.Add(leaf);
             if (!leaf.MatchesHostname(host, allowWildcards: true, allowCommonName: true))
                 throw new AuthenticationException("DERP TLS HTTPS certificate does not match the relay hostname");
-            chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1")); // TLS server authentication
-            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck; // matches ClientWebSocket's default
+            chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
             chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
-            // Only CA certificates help build the HTTPS chain. DERP appends an
-            // unrelated self-signed Ed25519 non-CA certificate for key metadata;
-            // it participates in the TLS transcript, never in the trust decision.
+
             var parser = new Org.BouncyCastle.X509.X509CertificateParser();
             foreach (TlsCertificate certificate in certificates.Skip(1))
             {
@@ -108,9 +103,6 @@ internal static class DerpTls
         public TlsCredentials? GetClientCredentials(Org.BouncyCastle.Tls.CertificateRequest request) => null;
     }
 
-    // Feed the managed TLS record layer with async socket I/O. Idle relays do
-    // not occupy worker threads. Serialize crypto state and output ordering,
-    // while permitting one socket read and one write to run at the same time.
     private sealed class OwnedStream(TlsClientProtocol protocol, TcpClient tcp) : Stream
     {
         private readonly NetworkStream _network = tcp.GetStream();
@@ -147,7 +139,7 @@ internal static class DerpTls
                 if (count == 0) protocol.CloseInput();
                 else protocol.OfferInput(_input, 0, count);
             }
-            await FlushAsync(ct).ConfigureAwait(false); // handshake replies, key updates, alerts
+            await FlushAsync(ct).ConfigureAwait(false);
             return count != 0;
         }
 
@@ -197,7 +189,7 @@ internal static class DerpTls
             await _write.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                // Bound the TLS output queue even when a caller supplies a large write.
+
                 while (!buffer.IsEmpty)
                 {
                     int count = Math.Min(buffer.Length, 16384);

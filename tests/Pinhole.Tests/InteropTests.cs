@@ -15,14 +15,11 @@ public sealed class InteropTests
     private const string ReleaseName = "1.9.0";
 
     private static readonly TimeSpan Budget = TimeSpan.FromMinutes(2);
-    // The release traces each packet. Exceed typical pipe capacities in both
-    // directions so these transfers also guard against an undrained child pipe.
+
     private const int TransferBytes = 2 * 1024 * 1024;
     private readonly ITestOutputHelper _output;
 
     public InteropTests(ITestOutputHelper output) => _output = output;
-
-    // ------------------------------------------------------------------ tests
 
     [InteropFact]
     public async Task CurrentDownloader_OldProvider_CompletesVerifiedTransfer()
@@ -60,10 +57,7 @@ public sealed class InteropTests
     [InteropFact]
     public async Task OldDownloader_CurrentProvider_V2Ticket_CompletesVerifiedTransfer()
     {
-        // A current node with no endpoint identity (no seed, relays, or publication) still
-        // produces v2 connection strings — which old clients consume. The whole stack
-        // is then compatible: v2 conn string, node handshake pinned to the static key,
-        // blob wire v3 on both sides.
+
         string host = EnsureReleaseHost();
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -100,10 +94,7 @@ public sealed class InteropTests
     [InteropFact]
     public async Task OldDownloader_CurrentProvider_V3Ticket_RefusedCleanly()
     {
-        // The intentional break: seeding the provider's identity produces a v3
-        // (endpoint-keyed) connection string that the 1.9.0 parser rejects. Interop
-        // here means the refusal is a clean parse failure, never a crash or silent
-        // accept of a key the old peer cannot authenticate.
+
         string host = EnsureReleaseHost();
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-interop-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -138,8 +129,6 @@ public sealed class InteropTests
         }
     }
 
-    // ------------------------------------------------------------------ datagram interop
-
     [InteropFact]
     public async Task CurrentDialer_OldEchoServer_ExchangesUdpDatagrams()
     {
@@ -164,8 +153,7 @@ public sealed class InteropTests
                 Assert.Equal(payload, echo.Value.ToArray());
             }
             Assert.Equal(3, conn.Stats.DatagramsSent);
-            // Path labels follow confirmed traffic; after real datagrams crossed, the
-            // route the current tree selected must be direct UDP — not TCP, not relay.
+
             Assert.Equal(PathKind.Direct, conn.Path.Kind);
             Assert.Equal(DirectTransport.Udp, conn.Path.Transport);
         }
@@ -205,8 +193,6 @@ public sealed class InteropTests
             await StopHostAsync(proc);
         }
     }
-
-    // ------------------------------------------------------------------ worktree + build
 
     private static string RepoRoot()
     {
@@ -259,15 +245,14 @@ public sealed class InteropTests
 
         if (!Directory.Exists(Path.Combine(worktree, "src")))
         {
-            // Prune only when registering a new tree; cached trees need no git writes.
+
             Git("worktree prune", root);
             Git($"worktree add --force \"{worktree}\" {ReleaseRef}", root, TimeSpan.FromMinutes(2));
         }
 
         File.Copy(Path.Combine(hostSrc, "InteropHost.cs"), Path.Combine(worktree, "InteropHost.cs"), true);
         File.Copy(Path.Combine(hostSrc, "InteropHost.csproj"), Path.Combine(worktree, "InteropHost.csproj"), true);
-        // Regenerate shims from the immutable release, rather than retaining an older
-        // patch merely because its marker still appears in a cached source file.
+
         foreach (string file in new[] { "NodeEngine.cs", "UdpSocket.cs" })
             File.WriteAllText(Path.Combine(worktree, "src", "Pinhole", file),
                 Git($"show {ReleaseRef}:src/Pinhole/{file}", root));
@@ -388,11 +373,9 @@ public sealed class InteropTests
     {
         if (!File.Exists(path)) return;
         string text = File.ReadAllText(path);
-        if (text.Contains(marker, StringComparison.Ordinal)) return; // already patched
+        if (text.Contains(marker, StringComparison.Ordinal)) return;
         File.WriteAllText(path, apply(text));
     }
-
-    // ------------------------------------------------------------------ process plumbing
 
     private static string? _tracePath;
 
@@ -457,9 +440,6 @@ public sealed class InteropTests
         }
     }
 
-    // Both pipes must be consumed from launch until exit. The release logs each
-    // received packet: an unread stdout fills the smaller Windows/BSD pipes and
-    // blocks its receive thread, manufacturing an interoperability failure.
     private sealed class HostProcess
     {
         private const int CaptureLimit = 64 * 1024;
@@ -508,7 +488,7 @@ public sealed class InteropTests
         EnablePortMapping = false,
         EnableLanDiscovery = false,
         EnablePathValidation = false,
-        ReceiveBufferCapacity = 16, // the datagram interop cases use ReceiveAsync
+        ReceiveBufferCapacity = 16,
     };
 
     private static void KillQuietly(Process? p)

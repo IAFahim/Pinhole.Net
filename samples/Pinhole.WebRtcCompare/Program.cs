@@ -3,16 +3,6 @@ using System.Net;
 using Pinhole;
 using SIPSorcery.Net;
 
-// WebRTC-vs-Pinhole feasibility probe (#45 M1). Runs both stacks in this process over
-// loopback with the same payloads and reports machine-readable key=value lines:
-//   connect_ms: offer/first-dial -> first application payload echoed
-//   rtt_p50_us / rtt_p95_us: request/response round trips, 32-byte payloads
-//   tput_msg_s / tput_bytes_s: one-way message firehose, 1200-byte payloads
-//   alloc_mb: GC allocations across the whole scenario
-//   workingset_mb: process working set at scenario end
-// Noninteractive, offline, no STUN/TURN (host candidates only). Not a NAT experiment:
-// it measures the same-version managed stacks on identical loopback paths.
-
 const int RttRounds = 500;
 const int TputMessages = 10_000;
 const int TputPayload = 1200;
@@ -25,14 +15,12 @@ await RunWebRtcAsync(reliable: false, tag: "webrtc_unreliable");
 await RunPinholeAsync(tag: "pinhole_udp");
 return 0;
 
-// ------------------------------------------------------------------ WebRTC side
-
 async Task RunWebRtcAsync(bool reliable, string tag)
 {
     long allocBefore = GC.GetTotalAllocatedBytes(precise: true);
     var sw = Stopwatch.StartNew();
 
-    var config = new RTCConfiguration { iceServers = [] }; // loopback host candidates only
+    var config = new RTCConfiguration { iceServers = [] };
     using var server = new RTCPeerConnection(config);
     using var client = new RTCPeerConnection(config);
 
@@ -41,7 +29,7 @@ async Task RunWebRtcAsync(bool reliable, string tag)
     var serverOpen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     client.ondatachannel += ch =>
     {
-        if (ch.IsOpened) serverOpen.TrySetResult(); // onopen can fire before delivery
+        if (ch.IsOpened) serverOpen.TrySetResult();
         else ch.onopen += () => serverOpen.TrySetResult();
         echoReady.TrySetResult(ch);
     };
@@ -51,7 +39,6 @@ async Task RunWebRtcAsync(bool reliable, string tag)
         : new RTCDataChannelInit { ordered = false, maxRetransmits = 0 };
     RTCDataChannel hostChannel = await server.createDataChannel("pinhole-probe", channelInit);
 
-    // Bounded in-memory signaling: full SDP offer/answer exchange, no trickle, no network.
     var offer = server.createOffer();
     await server.setLocalDescription(offer);
     client.setRemoteDescription(offer);
@@ -70,13 +57,10 @@ async Task RunWebRtcAsync(bool reliable, string tag)
     RTCDataChannel echoChannel = await echoReady.Task.WaitAsync(Budget);
     await serverOpen.Task.WaitAsync(Budget);
 
-    // Single swap-in handler per phase: adding one delegate per round would turn the
-    // event into an O(n^2) accumulator and skew every later measurement.
     TaskCompletionSource gate = NewGate();
     echoChannel.onmessage += OnMessage;
     void OnMessage(RTCDataChannel _, DataChannelPayloadProtocols __, byte[] ___) => gate.TrySetResult();
 
-    // connect_ms: offer creation -> first application payload echoed.
     byte[] hello = new byte[RttPayload];
     hostChannel.send(hello);
     await gate.Task.WaitAsync(Budget);
@@ -107,8 +91,7 @@ async Task RunWebRtcAsync(bool reliable, string tag)
     long backpressureYields = 0;
     for (int i = 0; i < TputMessages; i++)
     {
-        // The SCTP stack buffers what the wire cannot carry; an honest firehose must
-        // respect that backpressure instead of starving the in-process event loop.
+
         if (hostChannel.bufferedAmount > 4 * 1024 * 1024)
         {
             backpressureYields++;
@@ -135,8 +118,6 @@ async Task RunWebRtcAsync(bool reliable, string tag)
 
     static TaskCompletionSource NewGate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
-
-// ------------------------------------------------------------------ Pinhole side
 
 async Task RunPinholeAsync(string tag)
 {

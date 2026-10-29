@@ -36,7 +36,7 @@ internal static class PortPrediction
         if (step is <= 0 or > MaxStep) return [];
         for (int i = 2; i < observations.Count; i++) if (observations[i].Port - observations[i - 1].Port != step) return [];
         int last = observations[^1].Port;
-        if (last + MaxTargets * step > ushort.MaxValue) return []; // no wrapping into unrelated ports
+        if (last + MaxTargets * step > ushort.MaxValue) return [];
         return Enumerable.Range(1, MaxTargets).Select(i => new IPEndPoint(observations[0].Address, last + i * step)).ToArray();
     }
 
@@ -74,8 +74,7 @@ internal static class PortPrediction
             if (!Eligible(targets[i]) || !advertisedAddresses.Contains(targets[i].Address)) return null;
         }
         if (targets.Distinct().Count() != targets.Length || targets.Any(t => !t.Address.Equals(targets[0].Address))) return null;
-        // A peer may offer a stable cone mapping, or the same bounded ascending
-        // sequence this implementation derives. Arbitrary port lists are refused.
+
         if (targets.Length != 1)
         {
             if (targets.Length != MaxTargets) return null;

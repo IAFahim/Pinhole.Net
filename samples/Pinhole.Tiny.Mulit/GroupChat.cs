@@ -98,7 +98,7 @@ internal sealed class GroupChat(PinholeNode node)
             {
                 if (_peers.TryUpdate(peer.PeerId, peer, existing))
                 {
-                    existing.Dispose(); // a fresh session replaces the old closed/dead one
+                    existing.Dispose();
                     break;
                 }
                 continue;
@@ -162,7 +162,6 @@ internal sealed class GroupChat(PinholeNode node)
         return queued;
     }
 
-    // Bound memory and prevent forwarding loops if friends also connect to each other.
     private bool Remember(Guid id)
     {
         lock (_seen)

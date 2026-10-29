@@ -53,7 +53,6 @@ internal sealed class VirtualBehaviorStunServer : IDisposable
         }
     }
 
-    // The fixture encoder deliberately does not use the production message codec.
     internal static byte[] Response(ReadOnlySpan<byte> transaction, IPEndPoint mapped, IPEndPoint origin, IPEndPoint? other)
     {
         int valueLength = mapped.AddressFamily == AddressFamily.InterNetwork ? 8 : 20;

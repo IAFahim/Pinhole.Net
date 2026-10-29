@@ -71,8 +71,6 @@ internal static class Program
                 }
             }
 
-            // Check before creating an account resource: an executor that cannot create
-            // internet sockets cannot test TURN, regardless of account authentication.
             stage = "udp_socket";
             using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) { }
 
@@ -92,7 +90,6 @@ internal static class Program
                 }
             }
 
-            // An owned temporary key has been deleted before a live PASS is emitted.
             Write(new { status = "PASS", stage = "encrypted_relay", relayTested = true,
                 encrypted = true, path = "Relay", provider = "Cloudflare", transport = "udp",
                 result.RawRoundTrips, result.RoundTripsEachDirection, result.SendAttempts,

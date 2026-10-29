@@ -3,20 +3,9 @@ using Pinhole.Sim;
 
 namespace Pinhole.Tests.Sim;
 
-// Seeded, tick-driven scenarios over the Sim machine driver. A run is a pure
-// function of its seed: logical time comes from SimClock, every stochastic
-// decision from the handed-in IRandom. Each scenario plays the shell for one
-// machine — it interprets Transmit effects, decides the reply's fate from the
-// seeded RNG, and feeds PongAcked/ProbeAcked back at the drawn delay.
 internal static class MachineSimScenarios
 {
     public const int TickStepMs = 10;
-
-    // ------------------------------------------------------------------ PMTU
-    // Probes climb the engine's numbers (base 1200, step 128, attempts 3,
-    // ceilings 1472/1452, reprobe 60 s, timeout 500 ms — the same profile as
-    // MachineTests and the shells). Each probe's pong is lost with probability
-    // pongLoss while loss is active, else delivered 30..199 ms later.
 
     internal sealed record PmtuRun(byte[] Hash, long ConfirmedAtTickMs, int ProbesSent, int PongsDelivered);
 
@@ -93,12 +82,6 @@ internal static class MachineSimScenarios
         }
     }
 
-    // ------------------------------------------------------------- Keepalive
-    // Maintenance keepalives every 1000 ms plus a continuous validation-probe
-    // cadence on the direct path (timeout 300 ms, 3 unanswered => Notify).
-    // Nonce-carrying probes get a pong with probability 1 - pongLoss, delivered
-    // 30..119 ms later; every other probe's reply is eaten by the path.
-
     internal sealed record KeepaliveRun(byte[] Hash, int ProbesSent, int PongsDelivered, int PathLostNotifications);
 
     internal static KeepaliveRun Keepalive(int seed, int ticks, double pongLoss = 0.35)
@@ -139,7 +122,6 @@ internal static class MachineSimScenarios
                     notifications++;
                 }
 
-                // Nonce-carrying Transmit = a validation probe the pong must echo.
                 if (effect.Kind == EffectKind.Transmit && effect.Value != 0)
                 {
                     probes++;

@@ -1,11 +1,5 @@
 namespace Pinhole.Crypto;
 
-// A 64-counter sliding replay window as one immutable value: Highest is the newest
-// marked counter, Bitmap bit i records whether counter Highest - i is already marked
-// (bit 0 = Highest itself). Admits accepts anything above Highest and, within the 64
-// below it, anything whose bit is clear. Mark on a counter below the window is a
-// no-op (the caller checked Admits first); the caller contract is check-then-mark.
-// Two windows can be compared for equality to snapshot receive state.
 public readonly struct ReplayWindow : IEquatable<ReplayWindow>
 {
     public readonly ulong Highest;
@@ -24,7 +18,7 @@ public readonly struct ReplayWindow : IEquatable<ReplayWindow>
         ? new ReplayWindow(counter, (counter - Highest >= 64 ? 0UL : Bitmap << (int)(counter - Highest)) | 1UL)
         : Highest - counter < 64
             ? new ReplayWindow(Highest, Bitmap | (1UL << (int)(Highest - counter)))
-            : this; // below the window: already rejected, no state change
+            : this;
 
     public bool Equals(ReplayWindow other) => Highest == other.Highest && Bitmap == other.Bitmap;
 

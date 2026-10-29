@@ -12,9 +12,7 @@ public sealed class RendezvousServer : IAsyncDisposable
     public const int MaxNodes = 4096;
     public const int MaxWaitersPerTarget = 64;
     public const int MaxRecordLength = 1024;
-    // A code holds a whole connection string, then base64url wraps it again.
-    // Keep the peer-ID lookup's smaller record bound separate from invitations.
-    // Leave space for framing within macOS's ordinary UDP datagram limit.
+
     public const int MaxCodeRecordLength = 8 * 1024;
     public const int MaxCodes = 4096;
     public const int MaxCodeLength = 16;
@@ -47,7 +45,7 @@ public sealed class RendezvousServer : IAsyncDisposable
     public static RendezvousServer Start(int port = 0, TimeSpan? ttl = null)
     {
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-        // An introducer receives registration bursts; the default buffer drops them.
+
         udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
         udp.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
         return new RendezvousServer(udp, ttl ?? TimeSpan.FromSeconds(120));
@@ -113,13 +111,10 @@ public sealed class RendezvousServer : IAsyncDisposable
                     return;
                 }
 
-                // One undeliverable reply must not stop the introducer for everyone else.
             }
             catch (Exception)
             {
-                // A-07: any other fault while handling one datagram — the sweeper racing
-                // the introduction loop, or an edge the parser missed — is charged to that
-                // datagram alone. The introducer keeps serving everyone else.
+
                 Interlocked.Increment(ref _datagramFaults);
             }
         }
@@ -142,9 +137,7 @@ public sealed class RendezvousServer : IAsyncDisposable
                 await Say(remote, $"OBS {remote}").ConfigureAwait(false);
                 if (_wants.TryRemove(id, out List<(ulong Id, IPEndPoint Ep, DateTimeOffset At)>? waiters))
                 {
-                    // Snapshot under the list's lock: the TTL sweeper mutates the same
-                    // list under that lock, and enumerating it unlocked throws when the
-                    // sweep lands mid-introduction (the concrete A-07 loop-killer).
+
                     (ulong Id, IPEndPoint Ep, DateTimeOffset At)[] matched;
                     lock (waiters)
                     {
@@ -199,11 +192,10 @@ public sealed class RendezvousServer : IAsyncDisposable
 
                 break;
             case ["PUTC", var code, var record] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
-                // First registration claims the code and issues its delete/replace token.
+
                 if (_codes.TryGetValue(code, out _))
                 {
-                    // A live code belongs to whoever claimed it: only the token holder
-                    // may replace the record, so a code holder cannot hijack a host.
+
                     await Say(remote, "TokB").ConfigureAwait(false);
                     break;
                 }
@@ -220,8 +212,7 @@ public sealed class RendezvousServer : IAsyncDisposable
             case ["PUTC", var code, var record, var oldToken] when ValidCode(code) && ValidRecord(record, MaxCodeRecordLength):
                 if (!_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) held))
                 {
-                    // The code vanished — restart or eviction, not a wrong token. NOCODE
-                    // tells the rightful host its registration must reconcile (re-claim).
+
                     await Say(remote, "NOCODE").ConfigureAwait(false);
                     break;
                 }
@@ -232,16 +223,14 @@ public sealed class RendezvousServer : IAsyncDisposable
                     break;
                 }
 
-                _codes[code] = (record, oldToken, DateTimeOffset.UtcNow); // refresh keeps the token
+                _codes[code] = (record, oldToken, DateTimeOffset.UtcNow);
                 await Say(remote, $"OKCG {oldToken}").ConfigureAwait(false);
                 break;
             case ["GETC", var code] when ValidCode(code):
                 if (_codes.TryGetValue(code, out (string Record, string Token, DateTimeOffset Seen) entry2)
                     && entry2.Seen > DateTimeOffset.UtcNow - _ttl)
                 {
-                    // A ~14-byte GETC must not buy an 8 KiB record for a spoofed source
-                    // (A-07): prove return routability by echoing a cookie bound to the
-                    // requester's own endpoint before the record leaves.
+
                     await Say(remote, $"CHAL {code} {ChallengeCookie(remote, code)}").ConfigureAwait(false);
                 }
                 else
@@ -357,7 +346,7 @@ public sealed class RendezvousServer : IAsyncDisposable
         long minute = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
         Span<byte> mac = stackalloc byte[32];
         HMACSHA256.HashData(_cookieKey, Encoding.ASCII.GetBytes($"pinhole-chal|{src}|{code}|{minute}"), mac);
-        return Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_'); // exactly 16 chars
+        return Convert.ToBase64String(mac[..12]).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
 
     private bool ValidCookie(IPEndPoint src, string code, string presented)
@@ -479,7 +468,7 @@ public sealed class RendezvousServer : IAsyncDisposable
         }
         catch (Exception)
         {
-            // The loops end on socket disposal; a faulted loop is irrelevant at shutdown.
+
         }
     }
 }

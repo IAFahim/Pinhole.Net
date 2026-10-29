@@ -78,8 +78,7 @@ public sealed class IrohRelayTests
     {
         byte[] seed = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
         byte[] challenge = Enumerable.Range(200, 16).Select(i => (byte)i).ToArray();
-        // The signed message was historically produced by BouncyCastle's BLAKE3 derive-key
-        // mode; the real relay rejects any other 32 bytes, so this pins byte-for-byte equality.
+
         byte[] message = new byte[32];
         var hash = new Blake3Digest();
         hash.Init(Blake3Parameters.Context(Encoding.UTF8.GetBytes("iroh-relay handshake v1 challenge signature")));
@@ -88,9 +87,9 @@ public sealed class IrohRelayTests
         var identity = new RelayIdentity(seed);
         byte[] auth = identity.Authenticate(challenge);
         Assert.Equal(98, auth.Length);
-        Assert.Equal((byte)1, auth[0]); // ClientAuth, QUIC varint.
+        Assert.Equal((byte)1, auth[0]);
         Assert.Equal(identity.PublicKey, auth.AsSpan(1, 32).ToArray());
-        Assert.Equal((byte)64, auth[33]); // postcard serde_bytes signature length.
+        Assert.Equal((byte)64, auth[33]);
         var verifier = new Ed25519Signer();
         verifier.Init(false, new Ed25519PublicKeyParameters(auth.AsSpan(1, 32).ToArray()));
         verifier.BlockUpdate(message);
@@ -112,15 +111,14 @@ public sealed class IrohRelayTests
         a.Engine.SimulateDirectPathDeath(b.PeerId);
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Degraded && atB.State == PinholeConnectionState.Degraded);
-        // End the old upgrade workers, as they do after their finite probing budget.
+
         Interlocked.Increment(ref a.Engine.Lookup(b.PeerId)!.PunchGeneration);
         Interlocked.Increment(ref b.Engine.Lookup(a.PeerId)!.PunchGeneration);
         await Task.Delay(1200);
         int oldPort = b.LocalPort;
         await b.Engine.SimulateInterfaceLossAsync().WaitAsync(Timeout);
         Assert.NotEqual(oldPort, b.LocalPort);
-        // The new address arrives over the authenticated relay channel. The listener must
-        // actively probe it even though its previous upgrade worker has gone passive.
+
         await TestPoll.UntilAsync(Timeout, () => socket.PunchTargets.Any(target => target.Port == b.LocalPort));
         a.Engine.SimulateDirectPathRestore(b.PeerId);
         b.Engine.SimulateDirectPathRestore(a.PeerId);
@@ -248,8 +246,6 @@ public sealed class IrohRelayTests
         Assert.True(a.HasRelay);
         Assert.True(b.HasRelay);
 
-        // Deterministic fault injection: gate new authentications FIRST so the clients'
-        // reconnect attempts cannot win the race against observing the disconnected state.
         server.PauseNewAuthentications();
         await server.DisconnectAllAsync();
         await TestPoll.UntilAsync(Timeout, () => !a.HasRelay && !b.HasRelay);
@@ -285,8 +281,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
 
         public async Task CloseOutput(CancellationToken ct)
         {
-            // CloseOutput shares WebSocket's send lane. Use the same gate as forwarded
-            // packets so disconnect injection cannot create overlapping sends on Windows.
+
             await Gate.WaitAsync(ct);
             try { await Socket.CloseOutputAsync(WebSocketCloseStatus.EndpointUnavailable, "killed", ct); }
             finally { Gate.Release(); }
@@ -301,7 +296,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     private readonly ConcurrentQueue<byte[]> _forwarded = new();
     private int _authentications;
     private int _pongs;
-    private int _authGate; // 1 = refuse new authentications, deterministically
+    private int _authGate;
     public int Authentications => Volatile.Read(ref _authentications);
     public int Pongs => Volatile.Read(ref _pongs);
     public Uri Url { get; }
@@ -314,8 +309,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
 
     public FakeIrohRelay()
     {
-        // Same two-step port dance as FakeUpnpIgd: a concurrent test can claim the probed
-        // port between probe and bind, so a collision retries with a fresh one.
+
         for (int attempt = 0; ; attempt++)
         {
             using var port = new TcpListener(IPAddress.Loopback, 0);
@@ -422,12 +416,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
 
     public async Task DisconnectAllAsync()
     {
-        // A bare Abort() on the managed (unix) HttpListener websocket frequently leaves the
-        // loopback client completely uninformed — no FIN, no RST — so the client sits on its
-        // pending receive until its own keepalive ladder fires, far beyond any test budget.
-        // CloseOutputAsync flushes a CLOSE frame the client observes instantly without
-        // joining the session's pending receive (a full CloseAsync handshake would); the
-        // Abort backstop then covers sessions that were mid-write.
+
         foreach (Client client in _clients.Values)
         {
             try
@@ -446,9 +435,7 @@ internal sealed class FakeIrohRelay : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
-        // Close the sockets before stopping the listener: HttpListener.Stop disposes response
-        // streams that a session mid-write is still using, and that race throws from inside
-        // the runtime's own cleanup. The listener is going away either way.
+
         await DisconnectAllAsync();
         try { _listener.Stop(); }
         catch (ObjectDisposedException) { }

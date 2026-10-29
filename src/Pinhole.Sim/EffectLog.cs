@@ -4,14 +4,6 @@ using Pinhole.Crypto;
 
 namespace Pinhole.Sim;
 
-// Canonical effect-log encoding (all integers little-endian), 29 bytes per effect,
-// in emission order, nothing between records:
-//
-//   i64 tickMs | u8 kind | i32 path | i32 offset | i32 length | i64 value
-//
-// Steps that emit no effects append nothing. The byte sequence — not a structured
-// reading of it — is what gets hashed, so any drift in machine decisions, tick
-// arithmetic, or field values moves the digest.
 internal sealed class EffectLog
 {
     internal const int RecordBytes = 8 + 1 + 4 + 4 + 4 + 8;

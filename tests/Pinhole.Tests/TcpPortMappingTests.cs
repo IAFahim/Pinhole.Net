@@ -105,7 +105,7 @@ public sealed class TcpPortMappingTests
 
     [Theory]
     [InlineData(30)]
-    [InlineData(0)] // IGDv1 permanent-only fault retry must keep using permanent leases
+    [InlineData(0)]
     public async Task UpnpLease_RenewsTheGrantedPortAndReleasesTheTcpMapping(int duration)
     {
         var handler = new SoapHandler();

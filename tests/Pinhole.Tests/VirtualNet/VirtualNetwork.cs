@@ -3,10 +3,6 @@ using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
-// The wall-clock delivery vehicle around Pinhole.Sim's link pipeline: a socket
-// map, NAT registration, a scheduler thread for delayed crossings and shaper
-// drains. Rule matching, loss, shaping, and jitter all live in LinkPipeline;
-// endpoint translation lives in VirtualNat.
 internal sealed class VirtualNetwork : IDisposable
 {
     private readonly object _gate = new();
@@ -28,9 +24,6 @@ internal sealed class VirtualNetwork : IDisposable
     internal void SocketAttached() => Interlocked.Increment(ref _liveSockets);
     internal void SocketDetached() => Interlocked.Decrement(ref _liveSockets);
 
-    // The jitter stream is seeded (default 0): a hostile-network run that draws
-    // reorder delays is reproducible by rerunning it. The pre-elevation fixture
-    // drew from Random.Shared, which no seed could pin.
     public VirtualNetwork(int seed = 0)
     {
         _links = new LinkPipeline(new Random(seed));
@@ -73,7 +66,6 @@ internal sealed class VirtualNetwork : IDisposable
         }
     }
 
-    // Called by sockets: one datagram leaves an attached socket toward dest.
     internal void RouteFrom(VirtualUdpSocket sender, IPEndPoint dest, byte[] payload)
     {
         IPEndPoint source = sender.Address;
@@ -81,7 +73,7 @@ internal sealed class VirtualNetwork : IDisposable
         {
             if (!nat.TryTranslateOutbound(sender.Address, dest, out source))
             {
-                Interlocked.Increment(ref Unroutable); // a fully blocked NAT: not one direct byte leaves
+                Interlocked.Increment(ref Unroutable);
                 return;
             }
         }
@@ -89,8 +81,6 @@ internal sealed class VirtualNetwork : IDisposable
         Continue(source, dest, payload);
     }
 
-    // Post-NAT routing: the Sim pipeline decides loss/shape/delay (and may corrupt
-    // the payload or emit duplicates), this class delivers.
     private void Continue(IPEndPoint source, IPEndPoint dest, byte[] payload)
     {
         List<(byte[] Payload, TimeSpan Delay)>? duplicates = _links.AnyDuplication ? [] : null;
@@ -159,7 +149,6 @@ internal sealed class VirtualNetwork : IDisposable
             return;
         }
 
-        // No host, no mapping, or the NAT's filter refused: silence, like a real network.
         Interlocked.Increment(ref Unroutable);
     }
 
@@ -184,16 +173,11 @@ internal sealed class VirtualNetwork : IDisposable
             List<(LinkRule Rule, List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Emitted)> drained =
                 _links.DrainShapers(DateTimeOffset.UtcNow);
 
-            // Due packets were collected newest-first (backwards removal is O(1)); deliver
-            // oldest-first: chronological, causal order — exactly what loopback UDP gives.
-            // Reversed batches would trip the engine's strictly-increasing replay window
-            // and reject all but one frame per tick (found by the #27 delay rungs).
             for (int i = due.Count - 1; i >= 0; i--)
             {
                 Deliver(due[i].Source, due[i].Dest, due[i].Payload);
             }
 
-            // Drained packets left the bottleneck; propagation delay applies from now.
             foreach ((LinkRule rule, var emitted) in drained)
             {
                 foreach ((IPEndPoint source, IPEndPoint dest, byte[] payload) in emitted)

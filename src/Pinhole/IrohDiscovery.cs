@@ -7,8 +7,6 @@ using Org.BouncyCastle.Crypto.Signers;
 
 namespace Pinhole;
 
-// iroh-dns 1.x / BEP 44: the HTTP payload is signature || timestampBE || DNS.
-// The pinned key comes from the URL, not from an untrusted response body.
 internal sealed class IrohDiscovery
 {
     internal const int MaxPayloadSize = 1072;
@@ -69,9 +67,7 @@ internal sealed class IrohDiscovery
 
     private static byte[] CreatePublicationPayload(IrohAddress address, RelayIdentity identity, ulong timestamp)
     {
-        // Many active interfaces or STUN mappings can exceed pkarr's DNS size limit.
-        // Keep relay reachability and the session-key binding, then fit as many direct
-        // candidates as possible. Routable addresses take priority over LAN fallbacks.
+
         IPEndPoint[] direct = address.DirectAddresses.OrderBy(ep => PublicationPriority(ep.Address)).ToArray();
         for (int count = direct.Length; ; count--)
         {
@@ -103,8 +99,7 @@ internal sealed class IrohDiscovery
         if (!address.Key.AsSpan().SequenceEqual(identity.PublicKey)) throw new ArgumentException("the publishing key does not match the endpoint ID");
         List<string> values = address.RelayUrls.Select(x => "relay=" + x.AbsoluteUri).ToList();
         values.AddRange(address.DerpRelayUrls.Select(x => DerpTxtPrefix + x.AbsoluteUri));
-        // Native EndpointInfo parses one TransportAddr per TXT value. A grouped
-        // space-separated value verifies cryptographically but loses every address.
+
         values.AddRange(address.DirectAddresses.Select(x => "addr=" + x));
         if (address.UserData is { } userData)
         {
@@ -113,7 +108,7 @@ internal sealed class IrohDiscovery
         }
         using var dns = new MemoryStream();
         byte[] header = new byte[12];
-        header[2] = 0x80; // DNS reply
+        header[2] = 0x80;
         BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(6), (ushort)values.Count);
         dns.Write(header);
         string owner = "_iroh." + IrohEncoding.Encode32(address.Key, zbase: true);
@@ -122,7 +117,7 @@ internal sealed class IrohDiscovery
             if (dns.Position > 12)
             {
                 dns.WriteByte(0xc0);
-                dns.WriteByte(12); // owner of the first answer
+                dns.WriteByte(12);
             }
             else
             {
@@ -135,8 +130,8 @@ internal sealed class IrohDiscovery
                 dns.WriteByte(0);
             }
             byte[] rr = new byte[10];
-            BinaryPrimitives.WriteUInt16BigEndian(rr, 16); // TXT
-            BinaryPrimitives.WriteUInt16BigEndian(rr.AsSpan(2), 1); // IN
+            BinaryPrimitives.WriteUInt16BigEndian(rr, 16);
+            BinaryPrimitives.WriteUInt16BigEndian(rr.AsSpan(2), 1);
             BinaryPrimitives.WriteUInt32BigEndian(rr.AsSpan(4), 60);
             byte[] text = Utf8.GetBytes(value);
             int chunks = (text.Length + 254) / 255;
@@ -205,8 +200,7 @@ internal sealed class IrohDiscovery
                 foreach (string address in value[5..].Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 {
                     if (IPEndPoint.TryParse(address, out IPEndPoint? endpoint) && endpoint.Port > 0) direct.Add(endpoint);
-                    // Custom transport addresses need a corresponding custom transport;
-                    // IP/relay consumers may still use the other records in the packet.
+
                 }
             }
             else if (value.StartsWith("user-data=", StringComparison.Ordinal))

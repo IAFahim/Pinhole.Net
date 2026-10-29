@@ -7,18 +7,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests.Sim;
 
-// R3 property gate P3 at END-TO-END level: ledger conservation over a full
-// BlobClient/BlobServer run on the virtual network. The reservation ledger has
-// three faces that must agree at every observed step — the shared BlobFlowBudget
-// holds, the pacer's in-flight bytes, and the downloader's live outstanding holds
-// (requested chunks whose reservation has not been released at a PTO expiry or an
-// arrival) — and all three must rest at exactly zero once a transfer completes,
-// is cancelled mid-blackout, or fails its recovery budget. Observations ride the
-// same AsyncLocal discipline as BlobTestHooks.Trace: one snapshot per downloader
-// control tick, on the thread that owns every ledger mutation, so a snapshot is
-// never torn and parallel transfers never cross-observe. Every stochastic model
-// is seeded; a rerun reproduces the verdict (the shaper drains on wall time, so
-// tick-for-tick traces are not claimed — the conservation invariant is).
 public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
 {
     private const long FlowBytes = 512 * 1024;
@@ -32,9 +20,7 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
         {
             using VirtualLab lab = await LabAsync();
             await using BlobServer server = await ServeAsync(lab, dir);
-            // A shaped, lossy link: PTO expiries release holds mid-flight and re-requests
-            // come back as unbudgeted healing traffic — the exact traffic pattern the
-            // ledger accounting must survive. Both loss models are seeded.
+
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
             lab.Net.AddRule(LinkRule.Bottleneck(region, region, 8_000_000, queuePackets: 128,
                 delay: TimeSpan.FromMilliseconds(20),
@@ -57,7 +43,7 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
 
             Assert.Equal(FlowBytes, result.Bytes);
             watch.AssertConserved();
-            Assert.Equal(0, flow.UsedBytes); // quiescence: nothing pinned after Commit
+            Assert.Equal(0, flow.UsedBytes);
             output.WriteLine($"conserved over {watch.Ticks} observations, peak reservation " +
                              $"{watch.MaxReserved / 1024} KiB, {sw.Elapsed.TotalSeconds:F1}s | {lab.Net.Counters()}");
         }
@@ -86,11 +72,9 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
             Task run = Task.Run(() => DownloadAsync(lab, server, dir, flow, cts.Token));
             try
             {
-                // Mid-flight: reservations exist and the loop is ticking before the cut.
+
                 await TestPoll.UntilAsync(TimeSpan.FromSeconds(20), () => watch.Ticks > 10 && watch.MaxReserved > 0);
 
-                // The hostile case: the whole region goes dark while holds are out, then
-                // the caller cancels. The unwind (not the transfer) is under test.
                 LinkRule cut = LinkRule.Blackhole(region);
                 lab.Net.AddRule(cut);
                 cts.Cancel();
@@ -104,7 +88,7 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
             }
 
             watch.AssertConserved();
-            Assert.Equal(0, flow.UsedBytes); // a cancelled download leaks no share of the pie
+            Assert.Equal(0, flow.UsedBytes);
             output.WriteLine($"cancel-during-blackout unwound {watch.MaxReserved / 1024} KiB of holds " +
                              $"across {watch.Ticks} observations in {sw.Elapsed.TotalSeconds:F1}s");
         }
@@ -126,11 +110,6 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
             lab.Net.AddRule(LinkRule.Bottleneck(region, region, 8_000_000, queuePackets: 128,
                 delay: TimeSpan.FromMilliseconds(20)));
 
-            // The provider serves the first 100 chunks and then goes silent on a live
-            // path: the stall clock fires, the recovery loop re-dials into the same
-            // silence, and the shared allowance runs out. Every dial mints a fresh
-            // StreamDownloader against the SAME injected budget — conservation must
-            // hold across the whole ride, and the failure must leave it at zero.
             server.DropChunk = index => index >= 100;
 
             var flow = new BlobFlowBudget(2 * 1024 * 1024);
@@ -148,10 +127,8 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
             }
 
             watch.AssertConserved();
-            Assert.Equal(0, flow.UsedBytes); // a failed transfer pins nothing on its way out
-            // The stall clock is bounded by the remaining recovery allowance, so an 8 s
-            // budget is legitimately exhausted inside the FIRST stalled attempt — the
-            // dial count is context, not the property.
+            Assert.Equal(0, flow.UsedBytes);
+
             output.WriteLine($"failed transfer unwound to zero across {server.ConnectionsAccepted} dial(s), " +
                              $"{watch.Ticks} observations, peak {watch.MaxReserved / 1024} KiB, {sw.Elapsed.TotalSeconds:F1}s");
         }
@@ -161,15 +138,11 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
         }
     }
 
-    // ------------------------------------------------------------------ ledger watch
-
     private sealed class LedgerWatch : IDisposable
     {
         private readonly object _gate = new();
         private readonly List<string> _violations = [];
 
-        // Written only inside Observe's lock; polled cross-thread as plain longs —
-        // aligned 64-bit reads, and the poll only needs "has this ever moved".
         public long Ticks;
         public long MaxReserved;
 
@@ -207,8 +180,6 @@ public sealed class SimPhase2P3LedgerTests(ITestOutputHelper output)
 
         public void Dispose() => Detach();
     }
-
-    // ------------------------------------------------------------------ plumbing
 
     private static string TempDir()
     {

@@ -50,7 +50,7 @@ internal sealed class TcpTransport : IDisposable
         catch (Exception ex) when (ex is SocketException or NotSupportedException)
         {
             listener?.Dispose();
-            listener = null; // TCP bind failure does not prevent UDP or active TCP use
+            listener = null;
         }
         lock (_gate)
         {
@@ -113,7 +113,7 @@ internal sealed class TcpTransport : IDisposable
                 connected = AddLink(socket, endpoint);
                 _reservedDials--;
                 ownsReservation = false;
-                socket = null; // link now owns it
+                socket = null;
             }
             _ = connected.RunAsync(initiator: true);
             await connected.Ready.WaitAsync(deadline.Token).ConfigureAwait(false);
@@ -130,10 +130,7 @@ internal sealed class TcpTransport : IDisposable
             socket?.Dispose();
             lock (_gate)
             {
-                // Own the endpoint through greeting and cleanup. Release the failed
-                // throttle and flight together, so an old finally cannot erase the
-                // guard of a newer retry. Count the socket reservation only until
-                // AddLink takes ownership, keeping MaxLinks unchanged.
+
                 if (!succeeded) _attempts.Remove(key);
                 if (ownsReservation) _reservedDials--;
                 _dialing.Remove(key);
@@ -155,7 +152,7 @@ internal sealed class TcpTransport : IDisposable
     private void Closed(TcpLink link)
     {
         lock (_gate) _links.Remove(link.Id);
-        try { _closed(link); } catch (Exception) { } // user/session callbacks cannot strand the transport
+        try { _closed(link); } catch (Exception) { }
     }
 
     internal void ClosePeer(ulong peerId, TcpLink? graceful)
@@ -211,8 +208,6 @@ internal sealed class TcpLink : IDisposable
         Action<TcpLink, ReadOnlyMemory<byte>> receive, Action<TcpLink> closed)
         : this(id, CreateStream(socket), target, stop, receive, closed) { }
 
-    // Stream injection lets protocol/lifecycle tests exercise the production link
-    // without pretending a memory stream validates OS connect/listen behavior.
     internal TcpLink(long id, Stream stream, IPEndPoint remote, IPEndPoint? target, CancellationToken stop,
         Action<TcpLink, ReadOnlyMemory<byte>> receive, Action<TcpLink> closed)
         : this(id, (stream, remote), target, stop, receive, closed) { }
@@ -290,19 +285,17 @@ internal sealed class TcpLink : IDisposable
             while (!_stop.IsCancellationRequested)
             {
                 int length = await TcpFrameCodec.ReadAsync(_stream, size, buffer, TimeSpan.FromSeconds(5), _stop.Token).ConfigureAwait(false);
-                try { _receive(this, buffer.AsMemory(0, length)); } catch (Exception) { } // malformed frame costs one frame
+                try { _receive(this, buffer.AsMemory(0, length)); } catch (Exception) { }
             }
         }
         catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException or OperationCanceledException)
         {
-            // Accepted streams have no waiter. A canceled negotiation does not leave
-            // an unobserved fault behind; active dials treat it as a failed attempt.
+
             _ready.TrySetCanceled();
         }
         finally
         {
-            // Only the teardown winner may retire the stop source: a concurrent Dispose
-            // that already passed the guard could still be between it and Cancel.
+
             bool owner = TryDispose();
             if (writer is not null) await writer.ConfigureAwait(false);
             if (owner) _stop.Dispose();

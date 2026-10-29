@@ -33,8 +33,7 @@ public sealed class PeerSocketTests
     [Fact]
     public async Task Punch_ThreePeers_AllPairsConnect()
     {
-        // A PeerSocket is a 1:1 pinhole (one peer address slot), but it must sustain
-        // concurrent punches to several peers: all six pairings must complete.
+
         using var p0 = new PeerSocket(0xA0);
         using var p1 = new PeerSocket(0xA1);
         using var p2 = new PeerSocket(0xA2);
@@ -55,8 +54,6 @@ public sealed class PeerSocketTests
         using var a = new PeerSocket(3);
         using var b = new PeerSocket(4);
 
-        // A bogus (TEST-NET-1, never routable) candidate must not kill the punch; the
-        // loopback candidate right after it still opens the path.
         b.AddCandidate(new IPEndPoint(IPAddress.Parse("192.0.2.1"), 9));
         b.AddCandidate(new IPEndPoint(IPAddress.Loopback, a.LocalPort));
         _ = a.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, b.LocalPort));
@@ -123,11 +120,11 @@ public sealed class PeerSocketTests
     public async Task Dispose_DuringPendingPunch_CompletesPromptly()
     {
         var a = new PeerSocket(10);
-        _ = a.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, 9)); // nothing listens there
+        _ = a.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, 9));
         await Task.Delay(200);
 
         Task dispose = Task.Run(() => a.Dispose());
-        await dispose.WaitAsync(TimeSpan.FromSeconds(5)); // throws TimeoutException if it wedged
+        await dispose.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]
@@ -141,7 +138,7 @@ public sealed class PeerSocketTests
 
         var waiting = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         b.Received += span => waiting.TrySetResult(span.ToArray());
-        DisposeTwice(a); // idempotent, and a pending receive must not wedge it
+        DisposeTwice(a);
         await Task.Yield();
     }
 

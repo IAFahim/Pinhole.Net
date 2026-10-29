@@ -3,20 +3,12 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// The PATTERN EXEMPLAR for every codec in Pinhole.Wire: three test shapes that all
-// codec tests must provide —
-//   1. RoundTrip_IsCanonicalAndExact: Write -> TryRead reproduces the value and
-//      consumes exactly the written length; known fixed vectors pin the byte format.
-//   2. TotalityFuzz_NeverThrows: dense seeded mutations of valid encodings plus raw
-//      random bytes — TryRead must never throw and never produce out-of-range values.
-//   3. Rejection properties: the specific non-canonical forms for this format
-//      (here: padded varints, truncations, trailing bytes) return false.
 public sealed class WirePrimitivesTests
 {
     [Fact]
     public void Varint_Rfc9000Vectors_RoundTripExactly()
     {
-        // RFC 9000 section 16 sample encodings
+
         AssertVec([0x25], 37);
         AssertVec([0x7B, 0xBD], 15_293);
         AssertVec([0x9D, 0x7F, 0x3E, 0x7D], 494_878_333);
@@ -62,11 +54,11 @@ public sealed class WirePrimitivesTests
     [Fact]
     public void Varint_PaddedEncodings_AreRejected()
     {
-        // A value that fits one byte, padded into each longer form, is non-canonical.
+
         foreach ((int size, byte prefix) in new[] { (2, (byte)0x40), (4, (byte)0x80), (8, (byte)0xC0) })
         {
             byte[] padded = new byte[size];
-            padded[0] = prefix; // 0x40/0x80/0xC0 prefix with zero low bits encodes 0
+            padded[0] = prefix;
             Assert.False(WirePrimitives.TryReadVarint(padded, out ulong value, out _), $"size {size}");
             Assert.Equal(0UL, value);
         }
@@ -83,14 +75,14 @@ public sealed class WirePrimitivesTests
             int kind = rng.Next(3);
             switch (kind)
             {
-                case 0: // raw random bytes, lengths 0..8
+                case 0:
                 {
                     int len = rng.Next(0, 9);
                     rng.NextBytes(scratch.AsSpan(0, len));
                     Exercise(scratch.AsSpan(0, len));
                     break;
                 }
-                case 1: // valid encoding, then a bit flip
+                case 1:
                 {
                     ulong value = SampleValue(rng);
                     int written = WirePrimitives.WriteVarint(buffer, value);
@@ -100,7 +92,7 @@ public sealed class WirePrimitivesTests
                     Exercise(scratch.AsSpan(0, written));
                     break;
                 }
-                default: // valid encoding, truncated
+                default:
                 {
                     ulong value = SampleValue(rng);
                     int written = WirePrimitives.WriteVarint(buffer, value);

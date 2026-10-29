@@ -109,9 +109,7 @@ internal static class PeerEngine
     public static PeerState CreateState(ulong nodeId, IPEndPoint? bind)
     {
         var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-        // Blocked receives must wake up periodically: closing a socket while a sync
-        // receive holds it spins forever in SafeSocketHandle.CloseAsIs on macOS, so
-        // disposal needs the receive loop to come back and observe the shutdown flag.
+
         udp.ReceiveTimeout = 200;
         udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, 4 * 1024 * 1024);
         udp.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, 4 * 1024 * 1024);
@@ -124,7 +122,7 @@ internal static class PeerEngine
         udp.Bind(bind is null
             ? new IPEndPoint(IPAddress.IPv6Any, 0)
             : bind.Address.AddressFamily == AddressFamily.InterNetwork
-                ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port) // dual-mode cannot bind a bare IPv4 address
+                ? new IPEndPoint(bind.Address.MapToIPv6(), bind.Port)
                 : bind);
         return new PeerState { Udp = udp, NodeId = nodeId, Magic = BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8)) };
     }
@@ -139,8 +137,7 @@ internal static class PeerEngine
     {
         s.Shutdown.Cancel();
         s.Udp.Dispose();
-        // The CTS is deliberately not disposed: the refresh loop may still be
-        // registering on its token, and a timer-less CTS is reclaimed by the GC.
+
     }
 
     public static void AddRendezvous(PeerState s, IPEndPoint endpoint)
@@ -194,9 +191,7 @@ internal static class PeerEngine
 
     private static SocketAddress ToWire(IPEndPoint ep)
     {
-        // The socket is dual-mode IPv6: IPv4 targets must be v4-mapped or Windows
-        // sendto rejects the address family outright; the unspecified v6 address is
-        // not a valid destination anywhere but Linux tolerates it, so map it to loopback.
+
         if (ep.Address.AddressFamily == AddressFamily.InterNetwork || ep.Address.Equals(IPAddress.IPv6Any))
         {
             IPAddress mapped = ep.Address.Equals(IPAddress.IPv6Any) ? IPAddress.IPv6Loopback : ep.Address.MapToIPv6();
@@ -252,8 +247,7 @@ internal static class PeerEngine
 
     public static async Task<IPEndPoint> ProbeStun(PeerState s, IPEndPoint server, CancellationToken ct)
     {
-        // ProbeStun shares StunTxid/StunResult on the state, so concurrent probes are
-        // serialized; the later probe simply runs once the earlier one settles.
+
         await s.StunGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -263,10 +257,7 @@ internal static class PeerEngine
             RandomNumberGenerator.Fill(req.AsSpan(8));
             s.StunTxid = req.AsSpan(8).ToArray();
             s.StunResult = new TaskCompletionSource<IPEndPoint>(TaskCreationOptions.RunContinuationsAsynchronously);
-            // UDP binding transactions retransmit the same bytes at doubling intervals
-            // inside the one deadline (RFC 8489 pacing): a datagram lost in either
-            // direction costs one interval, not the serialized queue's whole budget
-            // behind this gate.
+
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(SignalTimeout);
             TimeSpan interval = TimeSpan.FromMilliseconds(500);
@@ -311,7 +302,7 @@ internal static class PeerEngine
             int attrLen = BinaryPrimitives.ReadUInt16BigEndian(frame[(pos + 2)..]);
             if (pos + 4 + attrLen > end)
             {
-                return; // a hostile or broken server claims an attribute past the message end
+                return;
             }
 
             if ((attrType is 0x0020 or 0x0001) && attrLen >= 8)
@@ -414,8 +405,7 @@ internal static class PeerEngine
             {
                 try
                 {
-                    // Frame handlers send replies on this receive thread; one failed
-                    // send (unreachable peer, interface flap) must not deafen the socket.
+
                     DispatchFrame(s, remote, buf.AsSpan(0, n));
                 }
                 catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
@@ -551,8 +541,7 @@ internal static class PeerEngine
                         }
                         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
                         {
-                            // One unroutable candidate (or a brief interface flap) must
-                            // not kill the punch; the pacing delay below bounds retries.
+
                         }
                     }
                 }
@@ -590,8 +579,7 @@ internal static class PeerEngine
             }
             catch (SocketException)
             {
-                // The rendezvous send failed (network flap); retry on the next tick
-                // so the registration does not quietly expire.
+
             }
         }
     }

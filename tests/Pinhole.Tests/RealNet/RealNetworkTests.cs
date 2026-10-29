@@ -69,7 +69,7 @@ public sealed class RealNetworkTests
         foreach (int size in new[] { 1, 1200, 60000, 65502 })
         {
             byte[] payload = RandomNumberGenerator.GetBytes(size);
-            payload[0] = 0xc0; // an arbitrary protocol packet, not a Pinhole frame
+            payload[0] = 0xc0;
             route.Send(payload);
             IrohDatagram atB = await b.ReceiveAsync().AsTask().WaitAsync(TestBudget.Io);
             Assert.Equal(a.EndpointId, atB.Path.EndpointId);
@@ -92,8 +92,7 @@ public sealed class RealNetworkTests
         await using var relayGuard = relay;
         try
         {
-            // Ticket filtering alone cannot keep a session relayed: authenticated
-            // announcements teach both peers their direct addresses immediately.
+
             PinholeOptions relayOnly = RealRelayOptions(url, listen: true) with
                 { EnableDirectUdp = false, EnableTcpTransport = false };
             await using PinholeNode a = await PinholeNode.BindAsync(relayOnly, ct);
@@ -104,8 +103,6 @@ public sealed class RealNetworkTests
             await using PinholeConnection dialer = await b.ConnectAsync(RelayOnly(a).ToString(), ct).WaitAsync(TestBudget.Handshake, ct);
             await using PinholeConnection answerer = await accept.WaitAsync(TestBudget.Handshake, ct);
 
-            // What carried the session, over a real socket and a real relay server.
-            // Relay-only is the engine's Degraded state by definition: Open means direct.
             Assert.Equal(PinholeConnectionState.Degraded, dialer.State);
             Assert.Equal(PathKind.Relay, dialer.Path.Kind);
             Assert.True(dialer.IsEncrypted, "relay-routed sessions are still end-to-end encrypted");
@@ -148,8 +145,6 @@ public sealed class RealNetworkTests
             await using PinholeNode probe = await PinholeNode.BindAsync(RealRelayOptions(url, listen: false), ct);
             await TestPoll.UntilAsync(TestBudget.Bind, () => server.Node.HasRelay && probe.HasRelay);
 
-            // Force the whole download over the relay: strip the server's loopback-direct
-            // candidates from the ticket's embedded string.
             BlobTicket full = server.Ticket;
             var ticket = new BlobTicket
             {
@@ -215,11 +210,8 @@ public sealed class RealNetworkTests
             dialer.Send("before"u8);
             Assert.Equal("before"u8.ToArray(), await before.Task.WaitAsync(TestBudget.Io, ct));
 
-            // The relay PROCESS dies — a real server restart, not a simulated fault.
             await relay.DisposeAsync();
 
-            // Same port, fresh process: the engine's relay clients reconnect on their own
-            // backoff and the LOGICAL connection (same object) carries traffic again.
             relay = await StartAsync(bin, $"--dev --config-path {config}", logDir, "iroh-relay-2", port, ct);
             var after = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
             answerer.Received += p => after.TrySetResult(p.ToArray());
@@ -234,11 +226,6 @@ public sealed class RealNetworkTests
             Assert.Equal("after"u8.ToArray(), await after.Task.WaitAsync(TestBudget.Io, ct));
             Assert.Same(dialer, b.Connections.Single(c => c.PeerId == a.PeerId));
 
-            // On loopback the engine may heal onto the direct path once the answerer has
-            // announced its full candidate list (correct resilience, honestly recorded);
-            // relay-specific healing with no direct alternative is what the topology
-            // lab's UDP-blocked-hotel scenario proves. Either way: same connection
-            // object, data flowing, over real sockets and a really-dead relay process.
             string healedPath = dialer.Path.Kind.ToString().ToLowerInvariant();
             WriteReport(logDir, "relay-restart-real-process", "iroh-relay", version,
                 nameof(SystemUdpSocket), "iroh-relay ws v1/v2 (dev http)", passed: true, sw.Elapsed.TotalSeconds,
@@ -270,8 +257,6 @@ public sealed class RealNetworkTests
         int port = FreePort();
         const string user = "pinhole", pass = "test-only-credential";
 
-        // A real TURN server: long-term credentials, UDP listener only, no TLS/CLI —
-        // exactly the RFC 5766 allocation path TurnClient speaks.
         await using var turn = await StartAsync(bin,
             $"-n --lt-cred-mech -u {user}:{pass} -p {port} --no-tls --no-dtls --no-cli",
             logDir, "turnserver", expectTcpPort: null, ct);
@@ -296,7 +281,6 @@ public sealed class RealNetworkTests
             await using PinholeNode b = await PinholeNode.BindAsync(Options(listen: true), ct);
             await TestPoll.UntilAsync(TestBudget.Bind, () => a.HasRelay && b.HasRelay);
 
-            // TURN-only: strip the answerer's loopback-direct candidates.
             ConnectionString full = Pinhole.ConnectionString.Parse(a.ConnectionString);
             var turnCandidates = full.Candidates.Where(c => c.Kind == CandidateKind.Relay).ToArray();
             Assert.NotEmpty(turnCandidates);

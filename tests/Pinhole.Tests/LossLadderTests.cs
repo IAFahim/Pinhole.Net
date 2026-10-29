@@ -7,15 +7,13 @@ using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
-// Wall-clock goodput comparisons require steady CPU availability. Other test
-// collections must not start/finish workloads between the measured rungs.
 [CollectionDefinition(nameof(LossLadderTimingCollection), DisableParallelization = true)]
 public sealed class LossLadderTimingCollection { }
 
 [Collection(nameof(LossLadderTimingCollection))]
 public sealed class LossLadderTests(ITestOutputHelper output)
 {
-    private const long RungBytes = 512 * 1024; // 512 chunks — enough for the window to cycle
+    private const long RungBytes = 512 * 1024;
     private static readonly TimeSpan RungBudget = TimeSpan.FromSeconds(60);
 
     [Theory]
@@ -89,28 +87,15 @@ public sealed class LossLadderTests(ITestOutputHelper output)
             $"15% -> {at15.Goodput:F0} B/s (served {at15.ChunksServed}), 25% -> {at25.Goodput:F0} B/s " +
             $"(served {at25.ChunksServed}); GE(10%, burst 24) -> {burst.Goodput:F0} B/s " +
             $"(served {burst.ChunksServed}) vs scattered 10% -> {at10.Goodput:F0} B/s (served {at10.ChunksServed})");
-        // The wall-clock orderings are qualitative, and under parallel suite load every
-        // rung's stopwatch stretches, compressing the differences toward equality. The
-        // ladder spacing is chosen so a load-stalled runner cannot realistically invert
-        // it: on a quiet host the rungs take roughly 0.6 s / ~3.5 s / ~10 s, so inverting
-        // an adjacent pair needs a multi-second stall that hits only the cheaper rung —
-        // uniform load cannot invert anything (the lossier rung always stays slower).
-        // The 2% band stays: it marks "measurably below", not "equal".
+
         Assert.True(at15.Goodput < at2.Goodput * 1.02,
             $"goodput at 15% loss ({at15.Goodput:F0} B/s) must fall below 2% ({at2.Goodput:F0} B/s)");
         Assert.True(at25.Goodput < at15.Goodput * 1.02,
             $"goodput at 25% loss ({at25.Goodput:F0} B/s) must fall below 15% ({at15.Goodput:F0} B/s)");
-        // Same 10% mean, different structure: long clean stretches between bursts let
-        // the window recover, so bursty loss must beat scattered loss — burst 24 widens
-        // the quiet gap to ~6x (burst 8 was ~1.8x and still inverted under load). The
-        // 15% mean was tried and rejected: its long bad stretches gut the window and the
-        // rung's wall clock swings 4x run to run.
+
         Assert.True(burst.Goodput > at10.Goodput * 0.98,
             $"bursty-loss goodput ({burst.Goodput:F0} B/s) must beat scattered 10% ({at10.Goodput:F0} B/s)");
-        // The same curve in a scheduling-immune currency: rising loss forces rising
-        // retransmission work (chunks served past the 512-chunk floor), and clustered
-        // loss wastes less than scattered loss at the same mean. These counters do not
-        // depend on the runner's clock, so a load-compressed stopwatch cannot flip them.
+
         long floor = RungBytes / BlobWire.MaxChunkData;
         Assert.True(at2.ChunksServed < at15.ChunksServed && at15.ChunksServed < at25.ChunksServed,
             $"retransmission cost must rise with loss: served {at2.ChunksServed} / {at15.ChunksServed} / "
@@ -162,7 +147,7 @@ public sealed class LossLadderTests(ITestOutputHelper output)
     [Fact]
     public async Task BeyondReorderHorizon_NoDuplicateFlood()
     {
-        const long fileBytes = 1024 * 1024; // 1024 chunks — forces the horizon to slide
+        const long fileBytes = 1024 * 1024;
         string dir = TempDir();
         try
         {
@@ -206,8 +191,6 @@ public sealed class LossLadderTests(ITestOutputHelper output)
             Directory.Delete(dir, recursive: true);
         }
     }
-
-    // ------------------------------------------------------------------ rung plumbing
 
     private static string TempDir()
     {
@@ -263,7 +246,6 @@ public sealed class LossLadderTests(ITestOutputHelper output)
         Assert.Equal(RungBytes, new FileInfo(Path.Combine(dir, "out", "rung.bin")).Length);
     }
 
-    // One measured ladder rung: wall-clock goodput plus the scheduling-immune chunk count.
     private readonly record struct Rung(double Goodput, long ChunksServed);
 
     private async Task<Rung> RunIsolatedRungAsync(double loss, int seed)

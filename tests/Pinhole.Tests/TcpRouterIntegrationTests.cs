@@ -6,10 +6,7 @@ namespace Pinhole.Tests;
 
 public sealed class TcpRouterIntegrationTests
 {
-    // Readiness polling, not a performance floor: mapping work serializes per transport
-    // with first-pass retries every 4 s, and busy Windows runners have shown the whole
-    // UDP+TCP pass taking well over 20 s under suite load. The property under test is
-    // which mappings exist and how they release, not how fast the router answers.
+
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(45);
     [Fact]
     public async Task DefaultTcpSidecar_GetsItsOwnMappedCandidateAndReleasesBothProtocols()

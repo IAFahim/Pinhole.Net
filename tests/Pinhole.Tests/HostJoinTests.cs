@@ -91,7 +91,6 @@ public sealed class HostJoinTests
         Assert.NotNull(received);
         Assert.Equal(new byte[] { 7, 7, 7 }, received.Value.ToArray());
 
-        // The joiner can verify out of band what the host displays.
         Assert.Equal(host.ConfirmationCode, joined.RemoteConfirmationCode);
     }
 
@@ -104,14 +103,10 @@ public sealed class HostJoinTests
         await using var joined = await PinholeSession.JoinAsync(host.Code, JoinSettings(server)).WaitAsync(Timeout);
         await using var hosting = await accepted.WaitAsync(Timeout);
 
-        // Both sides can compare: the joiner sees the host's code, the host sees the
-        // joiner's handshake-delivered key fingerprinted the same way.
         Assert.Equal(host.ConfirmationCode, joined.RemoteConfirmationCode);
         Assert.NotNull(hosting.RemoteConfirmationCode);
         Assert.NotEqual(host.ConfirmationCode, hosting.RemoteConfirmationCode);
 
-        // C-09: the code fingerprints identity, not candidates. A roam or STUN refresh
-        // rewrites the invitation's candidate list; host and joiner codes must not move.
         ConnectionString before = ConnectionString.Parse(host.FullInvitation);
         var roamed = new ConnectionString(
             before.PeerId,
@@ -121,7 +116,6 @@ public sealed class HostJoinTests
             host.ConfirmationCode,
             PinholeHost.FormatConfirmation(PinholeHost.ConfirmationFingerprint(roamed.PeerId, roamed.StaticKey, roamed.EndpointKey)));
 
-        // It is still a fingerprint: different identity material changes the code.
         Assert.NotEqual(
             host.ConfirmationCode,
             PinholeHost.FormatConfirmation(PinholeHost.ConfirmationFingerprint(before.PeerId + 1, before.StaticKey, before.EndpointKey)));
@@ -200,15 +194,12 @@ public sealed class HostJoinTests
         await udp.SendToAsync(stranger, SocketFlags.None, target);
         byte[] buffer = new byte[256];
         IPEndPoint any = new(IPAddress.IPv6Any, 0);
-        // The refusal itself is the verdict, so the wait must be generous: on a loaded
-        // runner the in-process directory's receive loop can sit behind other collections'
-        // work for seconds (CI once timed this out at 3 s). 10 s only bounds a lost reply.
+
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         SocketReceiveFromResult res = await udp.ReceiveFromAsync(buffer, SocketFlags.None, any, cts.Token);
         Assert.Equal("TokB", Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim());
-        Assert.Equal(1, server.CodeCount); // unchanged, not replaced by the stranger
+        Assert.Equal(1, server.CodeCount);
 
-        // The real invitation still resolves: the host's keepalive path is untouched.
         var settings = JoinSettings(server);
         await using var joined = await PinholeSession.JoinAsync(host.Code, settings).WaitAsync(Timeout);
         Assert.True(joined.IsEncrypted);
@@ -217,8 +208,7 @@ public sealed class HostJoinTests
     [Fact]
     public async Task Keepalive_RefreshesPastTheDirectoryTtl()
     {
-        // A short TTL proves the refresh loop is what keeps the code alive: without it
-        // the entry would be swept at 2s and the join would time out.
+
         await using var server = RendezvousServer.Start(ttl: TimeSpan.FromSeconds(2));
         var hostSettings = HostSettings(server) with { RefreshInterval = TimeSpan.FromMilliseconds(500) };
         await using var host = await PinholeSession.HostAsync(hostSettings).WaitAsync(Timeout);
@@ -254,16 +244,15 @@ public sealed class HostJoinTests
             }
             catch (OperationCanceledException)
             {
-                return ""; // no reply at all: the server ignored an invalid command
+                return "";
             }
         }
 
         string huge = new string('A', RendezvousServer.MaxCodeRecordLength + 1);
-        Assert.Equal(string.Empty, await Roundtrip($"PUTC ABCDEFG {huge}")); // ignored, no reply
+        Assert.Equal(string.Empty, await Roundtrip($"PUTC ABCDEFG {huge}"));
         Assert.Equal(string.Empty, await Roundtrip("PUTC has space and invalid {A}"));
         Assert.StartsWith("OKCG ", await Roundtrip("PUTC ABCDEFG AAAAAAAA"));
-        // A bare GETC proves nothing about the source: the record only leaves after the
-        // endpoint-bound cookie comes back (A-07).
+
         string challenge = await Roundtrip("GETC ABCDEFG");
         Assert.StartsWith("CHAL ABCDEFG ", challenge);
         Assert.StartsWith("OKCC ", await Roundtrip($"GETC ABCDEFG {challenge.Split(' ')[^1]}"));
@@ -293,14 +282,11 @@ public sealed class HostJoinTests
         Assert.StartsWith("OKCG ", reply);
         string token = reply["OKCG ".Length..];
 
-        // 16 random bytes are exactly 22 unpadded base64url characters: no '=', no NUL,
-        // and nothing that depends on stack zero-initialization surviving to the string.
         Assert.Equal(22, token.Length);
         Assert.All(token, c => Assert.True(
             c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_',
             $"unexpected token character '{c}' (0x{(short)c:X4})"));
 
-        // The issued token authorizes refresh and delete — the operations a token exists for.
         Assert.StartsWith("OKCG", await Roundtrip($"PUTC TOKEN01 BBBBBBBB {token}"));
         Assert.Equal("OKCD", await Roundtrip($"DELC TOKEN01 {token}"));
     }
@@ -323,13 +309,9 @@ public sealed class HostJoinTests
             return Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
         }
 
-        // A token-bearing refresh of a code the directory never saw (restart, eviction)
-        // must say so distinctly: NOCODE means "safe to claim again", TokB means "someone
-        // else owns it". Same distinction for delete.
         Assert.Equal("NOCODE", await Roundtrip("PUTC GONECOD AAAAAAAA stalenonce"));
         Assert.Equal("NOCODE", await Roundtrip("DELC GONECOD stalenonce"));
 
-        // ...while a wrong token on a LIVE code is still TokB.
         Assert.StartsWith("OKCG", await Roundtrip("PUTC LIVECODE AAAAAAAA"));
         Assert.Equal("TokB", await Roundtrip("PUTC LIVECODE BBBBBBBB wrong-token"));
         Assert.Equal("TokB", await Roundtrip("DELC LIVECODE wrong-token"));
@@ -338,10 +320,7 @@ public sealed class HostJoinTests
     [Fact]
     public async Task ForgedDirectoryReply_FromAnUnconfiguredSource_IsIgnored()
     {
-        // The "directory" the client is configured with is attacker-observed: it learns
-        // the client's ephemeral port from the request but never answers itself. A second
-        // socket on a different port then sprays the forged success — the off-path
-        // injection C-08 describes. Only replies from configured servers may count.
+
         using var fakeDirectory = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
         fakeDirectory.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
         using var spoofer = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
@@ -377,7 +356,7 @@ public sealed class HostJoinTests
     [Fact]
     public async Task DirectoryRestart_KeepaliveReClaimsTheCode()
     {
-        // Reserve a port so the restarted directory can listen where the old one did.
+
         int port;
         using (var probe = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true })
         {
@@ -399,9 +378,6 @@ public sealed class HostJoinTests
         Assert.Equal(1, server.CodeCount);
         string code = host.Code;
 
-        // The directory restarts empty (deploy, crash): the code table is gone and
-        // every refresh now draws NOCODE. Registration must reconcile — re-claim the
-        // code — or the host stays unlisted forever while believing it is listed.
         await server.DisposeAsync();
         await using var restarted = RendezvousServer.Start(port);
         Assert.Equal(0, restarted.CodeCount);
@@ -414,7 +390,6 @@ public sealed class HostJoinTests
 
         Assert.Equal(1, restarted.CodeCount);
 
-        // The re-claimed registration actually serves joiners.
         var joiner = new CodeDirectory([restarted.LocalEndPoint]);
         string? invitation = await joiner.ResolveAsync(code, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(200),
             CancellationToken.None).WaitAsync(Timeout);

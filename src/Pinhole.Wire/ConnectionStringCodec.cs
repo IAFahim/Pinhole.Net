@@ -5,9 +5,6 @@ using System.Text;
 
 namespace Pinhole.Wire;
 
-// Wire-level mirror of the values Pinhole.ConnectionString carries. The enums
-// re-declare the wire codes (they cannot be shared with the Pinhole assembly
-// without taking a reference); the numeric values are the format.
 public enum WireCandidateKind : byte
 {
     Direct = 1,
@@ -30,9 +27,6 @@ public enum WireNatHint : byte
     Symmetric = 2,
 }
 
-// One decoded candidate. Field ownership follows the wire: Address is always
-// present, Relay* fields only for the kinds that carry them. Extraneous fields
-// are ignored by Write, exactly like the reference CandidateCodec.
 public readonly record struct CandidateData(
     WireCandidateKind Kind,
     IPEndPoint? Address,
@@ -42,9 +36,6 @@ public readonly record struct CandidateData(
     string? RelayUrl,
     byte[]? RelayKey);
 
-// The decoded connection-string body. A successful TryRead materializes the
-// arrays, endpoints and strings this struct owns; rejects and the string layer
-// below allocate nothing. Version is derived from key presence, never stored.
 public readonly record struct ConnectionStringData(
     ulong PeerId,
     WireNatHint NatHint,
@@ -59,24 +50,6 @@ public readonly record struct ConnectionStringData(
         : ConnectionStringCodec.BodyVersion1;
 }
 
-// Canonical codec for the "pinhole1:<base64url>" connection string:
-//   body[0]  version (1 = bare, 2 = +static key, 3 = +static+endpoint keys,
-//            4 = +knock, optionally with the endpoint key too)
-//   body[1]  flags: exactly the key-presence bits for that version (v4 takes
-//            static+knock or static+endpoint+knock — nothing else)
-//   body[2]  peer id, u64 LE
-//   body[10] NAT hint (0..2)
-//   body[11] candidate count (1..32; zero is not canonical)
-//   candidates, then the v2/v3/v4 key tail(s); a v4 body ends with a u8 knock
-//   length and 1..64 raw knock bytes. No trailing bytes.
-// Candidate: endpoint (family byte 4|16, raw address bytes, u16 BE port),
-// kind byte, then per-kind extras (relay: server endpoint + two short ASCII
-// texts; https relays: short ASCII URL + 32-byte key).
-// Canonicality enforced on read beyond the reference parser: candidate lists
-// are non-empty and duplicate-free, short texts are strict 7-bit ASCII, and the
-// base64url layer accepts only the unpadded, zero-trailing-bit form. TryRead
-// returns false on any malformed input and never throws on wire bytes; Write
-// throws ArgumentException-family errors for programmer mistakes only.
 public static class ConnectionStringCodec
 {
     public const string Scheme = "pinhole1";
@@ -100,8 +73,6 @@ public static class ConnectionStringCodec
 
     public const int MaxEncodedLength = MaxBodyLength;
 
-    // "pinhole1:" (9 chars) plus 4 base64 characters per full 3-byte quantum and 2 or 3
-    // for a 1- or 2-byte tail — the exact unpadded worst case, no slack
     public const int MaxStringLength = 9 + 4 * (MaxBodyLength / 3) + (MaxBodyLength % 3 == 0 ? 0 : MaxBodyLength % 3 + 1);
 
     internal const byte BodyVersion1 = 1;
@@ -148,8 +119,7 @@ public static class ConnectionStringCodec
         bool hasKnock = version == BodyVersion4;
         byte wantedFlags = (byte)((hasStaticKey ? FlagsHasStaticKey : 0) | (hasEndpointKey ? FlagsHasEndpointKey : 0)
             | (hasKnock ? FlagsHasKnock : 0));
-        // v1..v3 pin the flags to the version exactly; v4 additionally allows the
-        // endpoint bit to be either way, so both knock shapes are checked by mask.
+
         if (body[1] != wantedFlags && (version != BodyVersion4
                 || (body[1] & ~FlagsHasEndpointKey) != (FlagsHasStaticKey | FlagsHasKnock)))
         {
@@ -193,7 +163,7 @@ public static class ConnectionStringCodec
             ends[i] = pos;
             for (int j = 0; j < i; j++)
             {
-                // duplicate candidates are not canonical: the encoded bytes are compared directly
+
                 if (body[starts[i]..ends[i]].SequenceEqual(body[starts[j]..ends[j]]))
                 {
                     return false;
@@ -228,7 +198,7 @@ public static class ConnectionStringCodec
         }
         else if (version == BodyVersion4)
         {
-            // keys, then u8 knock length, then exactly that many knock bytes
+
             int keyTail = StaticKeyLength + (hasEndpointKey ? EndpointKeyLength : 0);
             if (remaining < keyTail + 2)
             {
@@ -315,7 +285,7 @@ public static class ConnectionStringCodec
         }
         catch (ArgumentException)
         {
-            // value errors are programmer errors surfaced by Write; TryWrite just declines them
+
             return false;
         }
 
@@ -358,7 +328,7 @@ public static class ConnectionStringCodec
 
         Span<byte> body = stackalloc byte[MaxBodyLength];
         int bodyLength = Write(value, body);
-        // the exact unpadded char count: 4 per full quantum, 2 or 3 for the tail
+
         int total = Scheme.Length + 1 + 4 * (bodyLength / 3) + (bodyLength % 3 == 0 ? 0 : bodyLength % 3 + 1);
         if (destination.Length < total)
         {
@@ -394,10 +364,6 @@ public static class ConnectionStringCodec
         return TryRead(body[..bodyLength], out value, out int consumed) && consumed == bodyLength;
     }
 
-    // Canonical base64url (RFC 4648 section 5): unpadded URL-safe alphabet,
-    // strict charset, and the unused trailing bits of a short final quantum
-    // must be zero. The reference decoder also accepts '=' padding and
-    // non-zero trailing bits; those forms are not canonical and are rejected.
     public static bool TryDecodeBase64Url(ReadOnlySpan<char> text, Span<byte> destination, out int bytesWritten)
     {
         bytesWritten = 0;
@@ -475,9 +441,7 @@ public static class ConnectionStringCodec
     public static bool TryEncodeBase64Url(ReadOnlySpan<byte> data, Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
-        // 4 chars per full quantum, 2 or 3 for a 1- or 2-byte tail: the exact unpadded
-        // length this method writes (the old +4-for-any-tail form demanded one slot too
-        // many and refused an exactly-sized destination for 2-byte tails)
+
         int full = data.Length / 3 * 4 + (data.Length % 3 == 0 ? 0 : data.Length % 3 + 1);
         if (destination.Length < full)
         {
@@ -613,8 +577,6 @@ public static class ConnectionStringCodec
             return false;
         }
 
-        // the reference Encoding.ASCII decode silently maps >= 0x80 to '?';
-        // high bytes are not canonical and are rejected instead
         foreach (byte c in body.Slice(pos, length))
         {
             if (c > 0x7F)
@@ -634,7 +596,7 @@ public static class ConnectionStringCodec
 
     private static void WriteCandidate(Span<byte> destination, ref int pos, in CandidateData candidate)
     {
-        // fields are non-null and in range: ValidateAndMeasure ran first
+
         WriteEndpoint(destination, ref pos, candidate.Address!);
         destination[pos++] = (byte)candidate.Kind;
         if (candidate.Kind == WireCandidateKind.Relay)
@@ -668,7 +630,7 @@ public static class ConnectionStringCodec
 
     private static void WriteShortText(Span<byte> destination, ref int pos, string value)
     {
-        // value is validated 7-bit ASCII of length <= 64, so byte count == char count
+
         destination[pos++] = (byte)value.Length;
         Encoding.ASCII.GetBytes(value, destination.Slice(pos, value.Length));
         pos += value.Length;

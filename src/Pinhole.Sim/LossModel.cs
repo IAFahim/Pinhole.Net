@@ -38,9 +38,6 @@ internal sealed class GilbertElliottLoss(double meanLossRate, double meanBurstPa
     }
 }
 
-// A loss model the fixture flips at run time. Blackouts built this way live
-// inside an existing rule — the network consults only the first MATCHING
-// rule, so a dedicated blackout rule added after a shaper would never fire.
 internal sealed class ToggleLoss : LossModel
 {
     private volatile bool _dropping;
@@ -52,9 +49,6 @@ internal sealed class ToggleLoss : LossModel
     protected override bool LoseNextCore() => _dropping;
 }
 
-// The hostile-net companions to loss (R3/P1): seeded duplication and corruption.
-// Same discipline as LossModel — every draw comes from a handed-in seed so a
-// hostile-network run is reproducible by rerunning it.
 internal abstract class DuplicationModel
 {
     private readonly object _gate = new();
@@ -77,7 +71,6 @@ internal sealed class IndependentDuplication(double probability, int seed) : Dup
     protected override bool DuplicateNextCore() => _rng.NextDouble() < probability;
 }
 
-// Returns the byte offset to flip on this crossing, or -1 to pass it clean.
 internal abstract class CorruptionModel
 {
     private readonly object _gate = new();

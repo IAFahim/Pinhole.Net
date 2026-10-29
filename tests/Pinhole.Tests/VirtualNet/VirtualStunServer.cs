@@ -32,7 +32,7 @@ internal sealed class VirtualStunServer : IDisposable
             }
             catch (SocketException)
             {
-                continue; // the 200 ms poll wake
+                continue;
             }
             catch (ObjectDisposedException)
             {
@@ -56,7 +56,7 @@ internal sealed class VirtualStunServer : IDisposable
 
     private static byte[] BuildResponse(byte[] txid, IPEndPoint observed)
     {
-        // XOR-MAPPED-ADDRESS (0x0020): reserved(0) + family + port^cookie>>16 + addr^mask
+
         byte[] raw = observed.Address.GetAddressBytes();
         bool v4 = raw.Length == 4;
         byte[] value = new byte[4 + raw.Length];
@@ -70,7 +70,7 @@ internal sealed class VirtualStunServer : IDisposable
 
         int padded = (value.Length + 3) & ~3;
         byte[] msg = new byte[20 + 4 + padded];
-        BinaryPrimitives.WriteUInt16BigEndian(msg, 0x0101); // binding success
+        BinaryPrimitives.WriteUInt16BigEndian(msg, 0x0101);
         BinaryPrimitives.WriteUInt16BigEndian(msg.AsSpan(2), (ushort)(4 + padded));
         BinaryPrimitives.WriteUInt32BigEndian(msg.AsSpan(4), Cookie);
         txid.CopyTo(msg, 8);

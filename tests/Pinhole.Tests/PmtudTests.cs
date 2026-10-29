@@ -17,8 +17,8 @@ public sealed class PmtudTests
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePortMapping = false,
-        EnablePathValidation = false, // PMTUD has its own probes; these tests measure only those
-        PathValidationProbeInterval = TimeSpan.FromMilliseconds(100), // paces PMTUD attempts too
+        EnablePathValidation = false,
+        PathValidationProbeInterval = TimeSpan.FromMilliseconds(100),
         ConnectTimeout = TimeSpan.FromSeconds(8),
     };
 
@@ -57,15 +57,11 @@ public sealed class PmtudTests
         PinholeConnection atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
         PinholeConnection atA = a.Connections.Single(c => c.PeerId == b.PeerId);
 
-        // Discovery runs concurrently with the dial continuation: a probe may already
-        // have completed by the time ConnectAsync returns, but the floor is guaranteed.
         Assert.InRange(atB.PathMtu, NodeEngine.PmtuBaseWire, 1472);
 
-        // Loopback carries everything: the ladder should reach the Ethernet IPv4 plateau.
         await TestPoll.UntilAsync(Timeout, () => atB.PathMtu >= 1472 && atA.PathMtu >= 1472);
         Assert.True(b.Engine.Lookup(a.PeerId)!.PmtuProbesSent > 0, "the climb was actively probed");
 
-        // The confirmed ceiling lifts Send beyond the API floor — and one byte past it still refuses.
         var got = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         atA.Received += p => got.TrySetResult(p.Length);
         atB.Send(new byte[1472 - NodeEngine.PmtuOverhead]);
@@ -82,20 +78,16 @@ public sealed class PmtudTests
         PinholeConnection atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
         PinholeConnection atA = a.Connections.Single(c => c.PeerId == b.PeerId);
 
-        // A network that silently drops anything above 1300 wire bytes: every ladder step
-        // (1365+) vanishes in both directions, three attempts each, then the cooldown.
         a.Engine.Lookup(b.PeerId)!.DropAboveBytes = 1300;
         b.Engine.Lookup(a.PeerId)!.DropAboveBytes = 1300;
 
-        // The attempts run and give up (three tries per size, ~100 ms apart, plus tick slop).
         await TestPoll.UntilAsync(Timeout, () =>
             a.Engine.Lookup(b.PeerId)!.PmtuProbesSent >= 3 && b.Engine.Lookup(a.PeerId)!.PmtuProbesSent >= 3);
-        await Task.Delay(700); // let a would-be confirmation window pass — none can arrive
+        await Task.Delay(700);
 
         Assert.Equal(NodeEngine.PmtuBaseWire, atB.PathMtu);
         Assert.Equal(NodeEngine.PmtuBaseWire, atA.PathMtu);
 
-        // The unproven sizes stay refused; the guaranteed floor keeps flowing under the cap.
         Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(new byte[1250]));
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         atA.Received += p => got.TrySetResult(p.ToArray());

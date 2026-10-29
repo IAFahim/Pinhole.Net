@@ -8,16 +8,13 @@ namespace Pinhole.Tests;
 
 public sealed class PathRaceTests(ITestOutputHelper output)
 {
-    private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(15); // the engine default
+    private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(10);
 
     [Fact]
     public async Task DirectCrawls_RelayAnswersFirst_SessionLandsOnRelayInFractionOfDeadline()
     {
-        // Two internet hosts with a viable-but-slow direct path (3 s RTT: punch-and-answer
-        // needs at least one round trip) and a fast relay (real loopback TURN, unshaped —
-        // exactly the asymmetric hotel case). The relay must win the race long before the
-        // direct path could even complete its first exchange.
+
         using VirtualLab lab = new(withTurn: true);
         await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("198.51.100.10"), 0));
         await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("198.51.100.20"), 0));
@@ -40,12 +37,10 @@ public sealed class PathRaceTests(ITestOutputHelper output)
     [Fact]
     public async Task BothPathsViable_DirectAnswersFirst_SessionLandsDirect()
     {
-        // The race must not develop a relay bias: with both paths fast, the direct path's
-        // lower latency wins and the session opens Direct.
+
         using VirtualLab lab = new(withTurn: true);
         await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("198.51.100.10"), 0));
         await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("198.51.100.20"), 0));
-
 
         output.WriteLine($"dialer addr: {b.LocalPort}");
         Task<PinholeConnection> accept = a.AcceptAsync();
@@ -63,9 +58,7 @@ public sealed class PathRaceTests(ITestOutputHelper output)
     [Fact]
     public async Task DirectHopeless_SymmetricPair_RelayCarriesWithinDeadline()
     {
-        // Symmetric × symmetric: the physics forbid a direct path. The race's promise is
-        // that the relay leg alone connects within the SAME single deadline — no
-        // direct-first-then-fallback sequencing that burns the clock on hopeless punches.
+
         using VirtualLab lab = new(withTurn: true);
         VirtualNat aNat = lab.Nat(VirtualNatKind.Symmetric, "203.0.113.10", "172.31.10.0/24");
         VirtualNat bNat = lab.Nat(VirtualNatKind.Symmetric, "203.0.113.20", "172.31.20.0/24");

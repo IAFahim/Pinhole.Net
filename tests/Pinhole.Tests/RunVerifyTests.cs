@@ -25,8 +25,6 @@ public sealed class RunVerifyTests
             [4097], [5000],
         };
 
-    // The streaming hasher's root is the oracle: for every chunk-count shape, every
-    // run's proof must chain its leaf CVs back to exactly that root.
     [Theory]
     [MemberData(nameof(ChunkCounts))]
     public void RunProofs_ReproduceTheStreamingRoot_ForEveryRun(int chunkCount)
@@ -94,10 +92,9 @@ public sealed class RunVerifyTests
         byte[] wrong = Blake3.Hash(data);
         wrong[0] ^= 1;
         Assert.False(RunVerify.VerifySingleChunk(data, wrong));
-        // A 5-byte file is also a single chunk; its root is the plain hash.
+
         Assert.True(RunVerify.VerifySingleChunk(MakeData(5), Blake3.Hash(MakeData(5))));
 
-        // No run exists for a one-chunk file; VerifyRun must not pretend otherwise.
         var tree = new Blake3.Tree();
         tree.Update(data);
         Assert.False(RunVerify.VerifyRun(tree.ChunkCvs[0], [], 0, 1, tree.RootHash()));
@@ -129,7 +126,6 @@ public sealed class RunVerifyTests
         ReadOnlySpan<byte> honest = proof.AsSpan(0, count * RunVerify.CvSize);
         Assert.True(RunVerify.VerifyRun(leaves, honest, runIndex, chunkCount, root));
 
-        // A bit flipped in any single sibling must break the chain to the root.
         for (int i = 0; i < count; i++)
         {
             byte[] forged = honest.ToArray();
@@ -137,12 +133,10 @@ public sealed class RunVerifyTests
             Assert.False(RunVerify.VerifyRun(leaves, forged, runIndex, chunkCount, root), $"flip in sibling {i} accepted");
         }
 
-        // A lying leaf CV (self-consistent chunk, wrong position claim) must fail.
         byte[] lyingLeaves = leaves.ToArray();
         lyingLeaves[0] ^= 1;
         Assert.False(RunVerify.VerifyRun(lyingLeaves, honest, runIndex, chunkCount, root));
 
-        // Wrong run index, wrong root, wrong sibling count, and reversed siblings.
         if (runIndex + 1 < RunVerify.RunCount(chunkCount))
         {
             Assert.False(RunVerify.VerifyRun(leaves, honest, runIndex + 1, chunkCount, root));
@@ -196,7 +190,7 @@ public sealed class RunVerifyTests
     [Fact]
     public void SiblingPath_IsLogarithmic_AndSiblingsAreRunAligned()
     {
-        // 512 MiB + ragged tail: 8193 runs.
+
         const int chunks = 512 * 1024 + 37;
         Assert.Equal(8193, RunVerify.RunCount(chunks));
         Span<RunVerify.Step> path = stackalloc RunVerify.Step[RunVerify.MaxSiblings];
@@ -208,8 +202,7 @@ public sealed class RunVerifyTests
             Assert.True(count <= 24, $"run {r} needs {count} siblings");
             for (int i = 0; i < count; i++)
             {
-                // Siblings are always 64-aligned; the only short ones are ragged
-                // suffixes that run to the end of the file.
+
                 Assert.Equal(0, path[i].SibStart % RunVerify.RunChunks);
                 Assert.True(path[i].SibLen >= RunVerify.RunChunks || path[i].SibStart + path[i].SibLen == chunks);
             }

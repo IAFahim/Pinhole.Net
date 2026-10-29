@@ -70,8 +70,6 @@ internal static class NatBehaviorMeasurement
             || other.Address.Equals(server.Address) || other.Port == server.Port) return Report();
         supported = true;
 
-        // Filtering MUST precede contact with any alternate destination, or those
-        // contacts would open the very filter being measured (RFC 5780 section 4.5).
         for (int attempt = 0; attempt < 2; attempt++)
         {
             if (await Try(server, other, 6).ConfigureAwait(false) is { Origin: { } origin } && origin.Equals(other))

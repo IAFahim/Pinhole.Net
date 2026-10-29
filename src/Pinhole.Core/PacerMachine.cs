@@ -3,68 +3,49 @@ namespace Pinhole.Core;
 public enum PacerEventKind : byte
 {
     None = 0,
-    Collapsed = 1, // a loss window collapsed the window; the pre-collapse figures stay in state
-    Restored = 2,  // duplicates overturned a pending collapse
+    Collapsed = 1,
+    Restored = 2,
 }
 
 public struct PacerEvent
 {
     public PacerEventKind Kind;
-    public long Verdicts; // Restored: the spurious-verdict count that met the quorum (state resets it)
+    public long Verdicts;
 }
 
-// The blob downloader's congestion controller, decision half: congestion window with
-// slow start and congestion avoidance, RTT EWMA, PTO computation and duplicate
-// inflation, loss-window collapse with spurious-restore verdicts, and the pacer token
-// bucket. The BlobController shell owns the stats sink, the trace lines, and the
-// shared BlobFlowBudget reservation around these decisions.
 public struct PacerState
 {
-    // Shell-supplied configuration.
-    public int ChunkBytes;      // one chunk's payload; every byte figure is counted in these
-    public int MaxRequestCount; // the wire's per-request run cap; also the pacer's burst cap
-    public long MaxWindow;      // hard ceiling for Window (already clamped to the minimum)
-    public bool FixedWindow;    // the recorded #27 baseline behavior: adapt nothing, measure only
 
-    // Congestion window.
+    public int ChunkBytes;
+    public int MaxRequestCount;
+    public long MaxWindow;
+    public bool FixedWindow;
+
     public long Window;
-    public long Ssthresh;           // slow start until the first loss
+    public long Ssthresh;
     public long InFlight;
-    public long FractionalGrowth;   // CA accumulator: ~1 chunk added per RTT
+    public long FractionalGrowth;
 
-    // RTT EWMA.
     public long SrttMs;
     public long RttvarMs;
-    public long MinRttMs;           // the path's base delay; queueing only ever adds
+    public long MinRttMs;
     public bool HaveRtt;
 
-    // PTO.
-    public double PtoInflation;     // duplicate pressure pushes the timer out
+    public double PtoInflation;
 
-    // Pacer token bucket: burst credit, capped at one run.
     public long PacerCreditBytes;
     public long LastPacerMs;
 
-    // Loss window.
-    public long LossWindowStartMs;  // TickCount64 is positive; 0 is "the clock started now"
-    public long LastLossMs;         // far past: the first reduction is never rate-limited
+    public long LossWindowStartMs;
+    public long LastLossMs;
     public long ExpiriesThisLossWindow;
 
-    // Collapse verdicts.
-    public bool CollapsePending;    // a loss collapse is awaiting its duplicate verdict
-    public long CollapseExpiries;   // expiries the pending collapse consumed
+    public bool CollapsePending;
+    public long CollapseExpiries;
     public long PreCollapseWindow;
     public long PreCollapseSsthresh;
-    public long SpuriousVerdicts;   // +1 per dup-after-retransmit, -1 per fresh-after-retransmit
-    // Vote pairing: the indices that cast the fresh-retransmitted (real-loss) vote
-    // this collapse cycle. A fresh copy of a re-requested chunk votes -1, but when
-    // the ORIGINAL then straggles in as a duplicate, both copies were in flight the
-    // whole time — the straggler cancels its chunk's -1 and votes spurious (a swing
-    // of +2), making the verdict order-independent. Without the pairing the ledger
-    // nets zero exactly when the duplicates prove the collapse spurious, and the
-    // restore can never fire (the macOS hunter capture: tailDropped=0, restores=0,
-    // 52 KiB of stragglers). Ring with overwrite-oldest; a cycle's overturn quorum
-    // is max(expiries/2, 1), far under capacity in every observed collapse.
+    public long SpuriousVerdicts;
+
     public long[]? FreshVoteIndices;
     public int FreshVoteCount;
     public const int VoteRingCapacity = 32;
@@ -92,11 +73,11 @@ public struct PacerState
 
 public static class PacerMachine
 {
-    public const long InitialPtoMs = 900;  // matches the recorded fixed-window baseline
+    public const long InitialPtoMs = 900;
     public const long PtoFloorMs = 150;
     public const long PtoCeilingMs = 3_000;
     public const long GranularityMs = 50;
-    public const long MinRttMs = 20;       // pacing never assumes better than 20 ms
+    public const long MinRttMs = 20;
     public const long NoSamplePacingRttMs = 100;
     public const long LossWindowFloorMs = 250;
 
@@ -104,9 +85,6 @@ public static class PacerMachine
         ? s.MaxRequestCount
         : (int)Math.Clamp(s.Window / (8L * s.ChunkBytes), 2, s.MaxRequestCount);
 
-    // The pacer runs on the caller's clock (D-02): both credit accrual points must
-    // see the same timebase the control loop chose, not an ambient read that can
-    // jump ahead of it.
     public static int AffordableChunks(ref PacerState s, int desired, long nowMs)
     {
         if (s.FixedWindow)
@@ -118,10 +96,6 @@ public static class PacerMachine
         return (int)Math.Min(desired, s.PacerCreditBytes / s.ChunkBytes);
     }
 
-    // The window/pacer half of TryStartRun: false when the congestion window or the
-    // pacer credit refuses the run (an accrual that happened on the way persists,
-    // exactly as it did before the budget was asked). CommitStartRun consumes the
-    // credit only after the shell's budget reservation succeeded.
     public static bool CanStartRun(ref PacerState s, long bytes, long nowMs)
     {
         if (s.InFlight + bytes > s.Window)
@@ -158,14 +132,7 @@ public static class PacerMachine
 
     private static void AccruePacerCredit(ref PacerState s, long nowMs)
     {
-        // Slow start paces against the path's BASE delay (min RTT) so the window's
-        // climb is not throttled by the very queue it is building. Congestion
-        // avoidance paces at the smoothed RTT too — but queueing delay is
-        // self-inflicted: letting a built queue stretch the pacing RTT without
-        // bound collapses the issue rate quadratically (window halves AND the
-        // divisor inflates — the observed 4 MiB starvation). Delay beyond 4× the
-        // base is congestion EVIDENCE — it already halves the window — not a
-        // pacing target, so SRTT's say is capped there.
+
         long pacingRtt = !s.HaveRtt ? NoSamplePacingRttMs
             : s.Window < s.Ssthresh ? Math.Max(Math.Min(s.SrttMs, s.MinRttMs), MinRttMs)
             : Math.Max(Math.Min(s.SrttMs, s.MinRttMs * 4), MinRttMs);
@@ -183,11 +150,6 @@ public static class PacerMachine
             return InitialPtoMs;
         }
 
-        // Jacobson/Karels variance term, doubled under the same standing-queue
-        // signal the collapse quorum uses: queue-delay spikes fire PTOs before
-        // anything is lost (the re-served originals land as duplicates), so where
-        // an expiry is weak loss evidence the timer widens pre-emptively instead
-        // of waiting for duplicate pressure to inflate it after the fact.
         long varMultiplier = StandingQueue(in s) ? 8 : 4;
         return Math.Clamp(s.SrttMs + Math.Max(varMultiplier * s.RttvarMs, GranularityMs), PtoFloorMs, PtoCeilingMs);
     }
@@ -209,12 +171,6 @@ public static class PacerMachine
         {
             PacerEvent verdict = default;
 
-            // The straggler: this duplicate is the ORIGINAL of a chunk whose re-served
-            // copy already cast the real-loss vote (TakeFreshVote). Both copies were in
-            // flight the whole time, so the vote cancels and the spurious side takes
-            // it — a swing of +2 against the ledger's earlier -1, netting the same +1
-            // the dup-first ordering earns. Without the pairing, arrival order decides
-            // the verdict instead of the wire facts.
             bool overturns = s.CollapsePending && TakeFreshVote(ref s, index);
             if (overturns || (retransmitted && s.CollapsePending))
             {
@@ -231,9 +187,6 @@ public static class PacerMachine
             s.DupWindowBytes += chunkBytes;
             s.LastDupMs = nowMs;
 
-            // Duplicates beyond a quarter of the window inside one RTT mean the timer
-            // fired early — the path was moving the data, slowly. Inflate the PTO rather
-            // than shrinking the window: the loss signal proper is OnRetransmit's.
             if (s.DupWindowBytes > s.Window / 4)
             {
                 s.PtoInflation = Math.Min(s.PtoInflation * 1.5, 4.0);
@@ -244,9 +197,6 @@ public static class PacerMachine
             return verdict;
         }
 
-        // The retransmission delivered what the original never did: a real-loss vote
-        // against restoring the collapse those expiries caused. Recorded so the
-        // original can overturn it later if it was merely slow, not lost.
         if (retransmitted && s.CollapsePending)
         {
             s.SpuriousVerdicts--;
@@ -261,9 +211,7 @@ public static class PacerMachine
         Grow(ref s, chunkBytes);
         if (s.PtoInflation > 1.0 && s.LastDupMs > 0 && nowMs - s.LastDupMs > 3 * Math.Max(s.SrttMs, LossWindowFloorMs))
         {
-            // A full loss window with zero duplicates is a clean bill: the timer
-            // relaxation is immediate, not a slow crawl — an early bad orbit must not
-            // latch high PTOs for the rest of the transfer.
+
             s.PtoInflation = 1.0;
         }
 
@@ -297,7 +245,7 @@ public static class PacerMachine
     {
         if (s.Window < s.Ssthresh)
         {
-            s.Window = Math.Min(s.Window + chunkBytes, s.MaxWindow); // slow start: doubles per RTT
+            s.Window = Math.Min(s.Window + chunkBytes, s.MaxWindow);
         }
         else
         {
@@ -310,8 +258,6 @@ public static class PacerMachine
         }
     }
 
-    // ≥ 1.6× base delay. Public so the shell's collapse trace reports the same
-    // standing-queue verdict the collapse decision used.
     public static bool StandingQueue(in PacerState s) => s.HaveRtt && s.SrttMs * 5 >= s.MinRttMs * 8;
 
     public static PacerEvent OnRetransmit(ref PacerState s, long nowMs)
@@ -330,19 +276,16 @@ public static class PacerMachine
 
         s.ExpiriesThisLossWindow++;
         bool delayStanding = StandingQueue(in s);
-        // A standing queue is exactly what a deep buffer builds, so under delayStanding
-        // a PTO expiry is weaker loss evidence than on a clean path: it may be queueing
-        // delay (or a slow runner's scheduling stall) rather than a dropped frame. Two
-        // expiries still collapse — real overflow drops clusters, not single frames.
+
         long collapseQuorum = delayStanding ? 2 : 3;
         if (s.ExpiriesThisLossWindow < collapseQuorum)
         {
-            return default; // scattered loss: heal it, the window stands
+            return default;
         }
 
         if (nowMs - s.LastLossMs < lossWindow)
         {
-            return default; // already reduced inside this loss window
+            return default;
         }
 
         s.LastLossMs = nowMs;
@@ -351,46 +294,29 @@ public static class PacerMachine
         s.CollapseExpiries = s.ExpiriesThisLossWindow;
         s.SpuriousVerdicts = 0;
         s.CollapsePending = true;
-        s.FreshVoteCount = 0; // a fresh ledger cycle: stragglers of the last one vote nowhere
+        s.FreshVoteCount = 0;
         s.ExpiriesThisLossWindow = 0;
 
         s.Ssthresh = Math.Max(s.Window / 2, 2 * MinimumWindow(in s));
         if (delayStanding)
         {
-            // Standing-queue evidence is the queue itself, not a confirmed drop:
-            // at collapse the buffer holds most of the window, and ssthresh ≈ half
-            // of (BDP + queue) is still a full pipe's worth. Landing AT the
-            // threshold keeps the link fed while the excess bleeds off at the
-            // deficit rate; landing a quarter down (halve-INTO) drains the queue
-            // to empty first, idles the link for the drain, and hands slow start
-            // an empty pipe it re-overshoots within two RTTs — the ⅓-BDP sawtooth.
-            // The shallower wrong response is also the cheaper one: delay evidence
-            // can be spurious in a way a drop cluster is not, and the spurious
-            // case still has the duplicate-restore to undo it.
+
             s.Window = s.Ssthresh;
         }
         else
         {
-            // Clean-path evidence is a drop cluster the wire confirmed. Halve INTO
-            // the reduction (window below the new threshold) so slow start rebounds
-            // exponentially to the threshold instead of crawling linearly from it —
-            // the queue behind a real drop already drained, so the rebound costs
-            // nothing and a lossy path recovers faster.
+
             s.Window = Math.Max(s.Ssthresh / 2, MinimumWindow(in s));
         }
 
         return new PacerEvent { Kind = PacerEventKind.Collapsed };
     }
 
-    // Half the expiries behind a collapse arriving as duplicates overturns it: the
-    // flight those expiries buried was moving, and the window's dip (a quarter of
-    // what it was) plus the linear congestion-avoidance climb back is pure
-    // self-inflicted under-utilization on a path that never lost anything.
     private static void RememberFreshVote(ref PacerState s, long index)
     {
         if (s.FreshVoteIndices is not { Length: > 0 } ring)
         {
-            return; // a default-constructed state has no ring; Create() always allocates one
+            return;
         }
 
         if (s.FreshVoteCount < ring.Length)
@@ -435,11 +361,10 @@ public static class PacerMachine
         s.CollapsePending = false;
         long verdicts = s.SpuriousVerdicts;
         s.SpuriousVerdicts = 0;
-        s.FreshVoteCount = 0; // the cycle closed: its unclaimed fresh votes are spent
+        s.FreshVoteCount = 0;
         return new PacerEvent { Kind = PacerEventKind.Restored, Verdicts = verdicts };
     }
 
-    // True when the reset happened (the fixed-window baseline stays put).
     public static bool OnPathChanged(ref PacerState s)
     {
         if (s.FixedWindow)

@@ -8,22 +8,12 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// Differential-oracle tests for the three blob-layer codecs. The existing
-// implementations define the byte formats — BlobTicket's ToString/Parse, the
-// internal Manifest encode/decode, and BlobWire.Frame.TryParse — so every test
-// here holds the new codecs against them: byte-exact agreement on valid input,
-// identical fields both directions, and re-encode stability (the manifest is
-// BLAKE3 content-addressed; the ticket has exactly one valid encoding). The
-// codecs additionally reject non-canonical forms the legacy parsers tolerate,
-// and those divergences are pinned explicitly rather than silently assumed.
 public sealed class BlobFormatsCodecTests
 {
     private const string CommittedTicketGolden =
         "pinholeblob1:AQIBZAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fQEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8kAHBpbmhvbGUxOkFRQUJBQUFBQUFBQUFBQUJCSDhBQUFFQUJRRQ";
 
-    private const int TicketSchemePrefix = 13; // "pinholeblob1:" — Scheme.Length + 1
-
-    // ------------------------------------------------------------------ fixtures
+    private const int TicketSchemePrefix = 13;
 
     private static byte[] SeqBytes(int start, int count)
     {
@@ -59,7 +49,7 @@ public sealed class BlobFormatsCodecTests
 
     private static string RandomText(Random rng, int maxChars)
     {
-        // fragments cover 1-, 2-, 3-, and 4-byte UTF-8 forms (the last as a pair)
+
         string[] fragments = ["a", "Q", ".", "/", "µ", "ж", "日", "\U0001F600", "7"];
         var sb = new StringBuilder();
         int target = rng.Next(maxChars + 1);
@@ -105,14 +95,14 @@ public sealed class BlobFormatsCodecTests
         ulong stream = (ulong)rng.NextInt64();
         switch (rng.Next(11))
         {
-            case 0: // legacy v1 Hello: empty body, receive-only form
+            case 0:
             {
                 byte[] frame = new byte[BlobFrameCodec.HelloV1Length];
                 frame[0] = BlobFrameCodec.TypeHello;
                 BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1), stream);
                 return frame;
             }
-            case 1: // legacy v2 Hello: raw session id without a version byte
+            case 1:
             {
                 byte[] frame = new byte[BlobFrameCodec.HelloV2Length];
                 frame[0] = BlobFrameCodec.TypeHello;
@@ -188,38 +178,35 @@ public sealed class BlobFormatsCodecTests
     {
         switch (rng.Next(4))
         {
-            case 0: // raw random bytes, sometimes with a plausible ticket header
+            case 0:
             {
                 int len = rng.Next(0, Math.Min(valid.Length + 1, 128));
                 rng.NextBytes(mutation.AsSpan(0, len));
                 if (len > 1 && rng.Next(2) == 0)
                 {
-                    mutation[0] = 1; // ticket version byte
-                    mutation[1] &= 0x03; // known flag bits only
+                    mutation[0] = 1;
+                    mutation[1] &= 0x03;
                 }
 
                 return mutation.AsSpan(0, len);
             }
-            case 1: // single bit flip inside a valid encoding
+            case 1:
                 valid.CopyTo(mutation);
                 mutation[rng.Next(valid.Length)] ^= (byte)(1 << rng.Next(8));
                 return mutation.AsSpan(0, valid.Length);
-            case 2: // truncation at a random cut
+            case 2:
                 return valid[..rng.Next(valid.Length)];
-            default: // one trailing garbage byte
+            default:
                 valid.CopyTo(mutation);
                 mutation[valid.Length] = (byte)rng.Next(256);
                 return mutation.AsSpan(0, valid.Length + 1);
         }
     }
 
-    // ------------------------------------------------------------------ ticket: round-trip + goldens
-
     [Fact]
     public void Ticket_RoundTrip_AndGoldenBytes()
     {
-        // Hand-pinned: version 1, flags 0x01 (directory), name "hi",
-        // root 0x00..0x1F, no PSK, connection string "AB" (u16 LE length).
+
         byte[] golden = Convert.FromHexString(
             "0101" + "026869"
             + "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F"
@@ -238,7 +225,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Null(read.PreSharedKey);
         Assert.Equal(SeqBytes(0, 32), read.Root);
 
-        // exactly one encoding: re-encoding the decoded value reproduces the bytes
         int again = BlobTicketCodec.Write(buffer, read);
         Assert.Equal(golden, buffer[..again]);
     }
@@ -246,7 +232,7 @@ public sealed class BlobFormatsCodecTests
     [Fact]
     public void Ticket_TextLayer_MatchesCommittedGoldenAndLegacyParser()
     {
-        // The exact ticket string committed in WireGoldenTests, rebuilt the same way
+
         string csText = new ConnectionString(1,
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, 5))]).ToString();
         var blob = new BlobTicket
@@ -265,7 +251,6 @@ public sealed class BlobFormatsCodecTests
         Assert.True(BlobTicketCodec.TryReadText(CommittedTicketGolden, out BlobTicketValue read));
         AssertTicketsEqual(value, read);
 
-        // binary layer agrees byte-for-byte with the payload the legacy string carries
         byte[] legacyPayload = Pinhole.Base64Url.Decode(CommittedTicketGolden[TicketSchemePrefix..]);
         byte[] buffer = new byte[BlobTicketCodec.MaxBinaryLength];
         int written = BlobTicketCodec.Write(buffer, read);
@@ -279,7 +264,6 @@ public sealed class BlobFormatsCodecTests
         string text = BlobTicketCodec.WriteText(value);
         string payloadText = text[TicketSchemePrefix..];
 
-        // whitespace around the payload is tolerated, exactly like BlobTicket.Parse
         string padded = "pinholeblob1:  " + payloadText + "  ";
         Assert.True(BlobTicketCodec.TryReadText(padded, out BlobTicketValue paddedRead));
         AssertTicketsEqual(value, paddedRead);
@@ -287,13 +271,13 @@ public sealed class BlobFormatsCodecTests
 
         Assert.False(BlobTicketCodec.TryReadText(null, out _));
         Assert.False(BlobTicketCodec.TryReadText("", out _));
-        Assert.False(BlobTicketCodec.TryReadText(" pinholeblob1:" + payloadText, out _)); // before the scheme: not tolerated
+        Assert.False(BlobTicketCodec.TryReadText(" pinholeblob1:" + payloadText, out _));
         Assert.False(BlobTicketCodec.TryReadText("pinhole1:" + payloadText, out _));
-        Assert.False(BlobTicketCodec.TryReadText("pinholeblob1:!!!!", out _)); // strict base64url charset
+        Assert.False(BlobTicketCodec.TryReadText("pinholeblob1:!!!!", out _));
         Assert.False(BlobTicketCodec.TryReadText("pinholeblob1:" + new string('A', BlobTicketCodec.MaxTextLength), out _));
 
         byte[] payload = Pinhole.Base64Url.Decode(payloadText);
-        payload[0] = 2; // unknown ticket version
+        payload[0] = 2;
         Assert.False(BlobTicketCodec.TryReadText("pinholeblob1:" + Pinhole.Base64Url.Encode(payload), out _));
     }
 
@@ -303,15 +287,12 @@ public sealed class BlobFormatsCodecTests
         byte[] buffer = new byte[BlobTicketCodec.MaxBinaryLength];
         var value = new BlobTicketValue(WireBlobKind.File, SeqBytes(0, 32), "AB", "", null);
 
-        // 254 ASCII + a 2-byte 'µ' (0xC2 0xB5) = 256 bytes: the cut keeps 254
         value = value with { Name = new string('a', 254) + "µ" };
         int written = BlobTicketCodec.Write(buffer, value);
         Assert.Equal(254, buffer[2]);
         Assert.True(BlobTicketCodec.TryRead(buffer[..written], out BlobTicketValue read));
         Assert.Equal(new string('a', 254), read.Name);
 
-        // the legacy writer cuts at byte 255, mid-code-point; that payload is not
-        // valid UTF-8 and this codec rejects it (the legacy parser accepts it, lossily)
         var blob = new BlobTicket
         {
             Kind = BlobKind.File,
@@ -323,14 +304,12 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(255, legacyPayload[2]);
         Assert.False(BlobTicketCodec.TryRead(legacyPayload, out _));
 
-        // 252 ASCII + a 4-byte emoji = 256 bytes: the cut keeps 252
         value = value with { Name = new string('a', 252) + "\U0001F600" };
         written = BlobTicketCodec.Write(buffer, value);
         Assert.Equal(252, buffer[2]);
         Assert.True(BlobTicketCodec.TryRead(buffer[..written], out read));
         Assert.Equal(new string('a', 252), read.Name);
 
-        // a 255-byte single-byte name fits untouched, agreeing with the legacy bytes
         value = value with { Name = new string('a', 255) };
         written = BlobTicketCodec.Write(buffer, value);
         Assert.Equal(255, buffer[2]);
@@ -344,8 +323,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(Pinhole.Base64Url.Decode(blob255.ToString()[TicketSchemePrefix..]), buffer[..written]);
     }
 
-    // ------------------------------------------------------------------ ticket: differential
-
     [Fact]
     public void Ticket_Differential_MatchesLegacyEncoderAndParser()
     {
@@ -353,7 +330,7 @@ public sealed class BlobFormatsCodecTests
         byte[] buffer = new byte[BlobTicketCodec.MaxBinaryLength];
         for (int i = 0; i < 2_000; i++)
         {
-            BlobTicketValue value = RandomTicket(rng); // names stay under 255 bytes: both encoders emit them whole
+            BlobTicketValue value = RandomTicket(rng);
             var blob = new BlobTicket
             {
                 Kind = value.Kind == WireBlobKind.File ? BlobKind.File : BlobKind.Directory,
@@ -369,7 +346,6 @@ public sealed class BlobFormatsCodecTests
             int written = BlobTicketCodec.Write(buffer, value);
             Assert.Equal(Pinhole.Base64Url.Decode(legacyText[TicketSchemePrefix..]), buffer[..written]);
 
-            // each parser reads the other's output into the same fields
             Assert.True(BlobTicket.TryParse(legacyText, out BlobTicket? parsed));
             Assert.Equal(value.Name, parsed!.Name);
             Assert.Equal(value.ConnectionString, parsed.ConnectionString);
@@ -382,13 +358,11 @@ public sealed class BlobFormatsCodecTests
         }
     }
 
-    // ------------------------------------------------------------------ ticket: rejections
-
     [Fact]
     public void Ticket_RejectsNonCanonicalForms()
     {
         string rootHex = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
-        byte[] valid = Convert.FromHexString("010000" + rootHex + "02004142"); // file, empty name, cs "AB"
+        byte[] valid = Convert.FromHexString("010000" + rootHex + "02004142");
 
         foreach (byte badFlag in new byte[] { 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x83, 0xFD })
         {
@@ -400,19 +374,17 @@ public sealed class BlobFormatsCodecTests
 
         byte[] t2 = (byte[])valid.Clone();
         t2[0] = 2;
-        Assert.False(BlobTicketCodec.TryRead(t2, out _)); // version
+        Assert.False(BlobTicketCodec.TryRead(t2, out _));
 
-        Assert.False(BlobTicketCodec.TryRead([.. valid, 0x41], out _)); // trailing byte
-        Assert.False(BlobTicketCodec.TryRead(valid[..^1], out _)); // truncated
+        Assert.False(BlobTicketCodec.TryRead([.. valid, 0x41], out _));
+        Assert.False(BlobTicketCodec.TryRead(valid[..^1], out _));
 
-        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0000"), out _)); // empty connection string
-        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "03004142"), out _)); // csLen overruns
-        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0100"), out _)); // csLen promises bytes that are not there
+        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0000"), out _));
+        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "03004142"), out _));
+        Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0100"), out _));
 
-        // a name that is a lone UTF-8 lead byte is not this format's name
         Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010001C2" + rootHex + "02004142"), out _));
 
-        // the connection string is ASCII: a high byte has no decoding
         Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0100" + "80"), out _));
         Assert.False(BlobTicketCodec.TryRead(Convert.FromHexString("010000" + rootHex + "0200" + "8041"), out _));
     }
@@ -420,10 +392,7 @@ public sealed class BlobFormatsCodecTests
     [Fact]
     public void Ticket_LegacyParserLeniency_IsPinnedAsDivergence()
     {
-        // Two forms the legacy BlobTicket parser accepts and this codec rejects:
-        // unknown flag bits (silently ignored before) and non-UTF-8 names (decoded
-        // to U+FFFD before). The legacy code stays untouched; these assertions
-        // document the divergence instead of hiding it.
+
         string cs = new ConnectionString(1,
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Loopback, 5))]).ToString();
         byte[] csBytes = Encoding.ASCII.GetBytes(cs);
@@ -437,14 +406,14 @@ public sealed class BlobFormatsCodecTests
         Assert.False(BlobTicketCodec.TryReadText(text1, out _));
         Assert.True(BlobTicket.TryParse(text1, out _));
 
-        List<byte> mojibake = [1, 0, 1, 0xC2]; // name is a lone lead byte
+        List<byte> mojibake = [1, 0, 1, 0xC2];
         mojibake.AddRange(SeqBytes(0, 32));
         mojibake.AddRange([(byte)csBytes.Length, 0]);
         mojibake.AddRange(csBytes);
         string text2 = "pinholeblob1:" + Pinhole.Base64Url.Encode([.. mojibake]);
         Assert.False(BlobTicketCodec.TryReadText(text2, out _));
         Assert.True(BlobTicket.TryParse(text2, out BlobTicket? parsed));
-        Assert.Equal("\uFFFD", parsed!.Name); // the legacy decode is lossy, not strict
+        Assert.Equal("\uFFFD", parsed!.Name);
     }
 
     [Fact]
@@ -462,16 +431,13 @@ public sealed class BlobFormatsCodecTests
         Assert.Throws<ArgumentException>(() => BlobTicketCodec.Write(buffer, value with { Name = "a\ud800" }));
         Assert.Throws<ArgumentException>(() => BlobTicketCodec.Write(new byte[8], value));
 
-        // a max-size connection string has a text form longer than any parser accepts
         Assert.Throws<ArgumentException>(() => BlobTicketCodec.WriteText(value with { ConnectionString = new string('A', 65535) }));
     }
-
-    // ------------------------------------------------------------------ manifest: round-trip + goldens
 
     [Fact]
     public void Manifest_RoundTrip_AndGoldenBytes()
     {
-        // Byte-for-byte the vector committed in WireGoldenTests.Manifest_Encode_ExactLittleEndianBytes
+
         byte[] golden =
         [
             0x03, 0x00, (byte)'p', (byte)'k', (byte)'g',
@@ -504,11 +470,9 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(0, read.Entries[1].Size);
         Assert.Equal(SeqBytes(0xE0, 32), read.Entries[1].Root);
 
-        // content addressing: the re-encoded value is the identical byte string
         int again = ManifestCodec.Write(buffer, read);
         Assert.Equal(golden, buffer[..again]);
 
-        // the empty manifest is six zero bytes
         int emptyWritten = ManifestCodec.Write(buffer, new ManifestValue("", []));
         Assert.Equal(6, emptyWritten);
         Assert.Equal(new byte[6], buffer[..emptyWritten]);
@@ -516,8 +480,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal("", emptyRead.Name);
         Assert.Empty(emptyRead.Entries);
     }
-
-    // ------------------------------------------------------------------ manifest: differential
 
     [Fact]
     public void Manifest_Differential_IsByteExactWithLegacyCodec()
@@ -534,7 +496,6 @@ public sealed class BlobFormatsCodecTests
             Assert.Equal(legacy.Length, written);
             Assert.Equal(legacy, buffer[..written]);
 
-            // my decode of the legacy bytes == the legacy decode of them
             (string name, List<Manifest.Entry> entries) = Manifest.Decode(legacy);
             Assert.True(ManifestCodec.TryRead(legacy, out ManifestValue mine));
             Assert.Equal(name, mine.Name);
@@ -546,51 +507,48 @@ public sealed class BlobFormatsCodecTests
                 Assert.Equal(entries[e].Root, mine.Entries[e].Root);
             }
 
-            // BLAKE3 hashes these bytes into the ticket root: re-encode is identical
             int again = ManifestCodec.Write(buffer, mine);
             Assert.Equal(legacy, buffer[..again]);
         }
     }
 
-    // ------------------------------------------------------------------ manifest: rejections
-
     [Fact]
     public void Manifest_RejectsNonCanonicalForms()
     {
         byte[] valid = Convert.FromHexString(
-            "0100" + "6E"                       // nameLen 1, "n"
-            + "01000000"                        // entry count 1
-            + "0100" + "70"                     // pathLen 1, "p"
-            + "0100000000000000"                // size 1
+            "0100" + "6E"
+            + "01000000"
+            + "0100" + "70"
+            + "0100000000000000"
             + Convert.ToHexString(SeqBytes(0, 32)));
 
-        Assert.False(ManifestCodec.TryRead([.. valid, 0], out _)); // trailing byte
-        Assert.False(ManifestCodec.TryRead(valid[..^10], out _)); // truncated mid-entry
+        Assert.False(ManifestCodec.TryRead([.. valid, 0], out _));
+        Assert.False(ManifestCodec.TryRead(valid[..^10], out _));
         Assert.False(ManifestCodec.TryRead([], out _));
         Assert.False(ManifestCodec.TryRead(new byte[5], out _));
 
         byte[] negative = (byte[])valid.Clone();
-        Array.Fill(negative, (byte)0xFF, 10, 8); // size = -1
+        Array.Fill(negative, (byte)0xFF, 10, 8);
         Assert.False(ManifestCodec.TryRead(negative, out _));
 
         byte[] mojibake = (byte[])valid.Clone();
-        mojibake[9] = 0xC2; // path is a lone lead byte: invalid UTF-8
+        mojibake[9] = 0xC2;
         Assert.False(ManifestCodec.TryRead(mojibake, out _));
-        (string _, List<Manifest.Entry> lenient) = Manifest.Decode(mojibake); // legacy accepts, lossily
+        (string _, List<Manifest.Entry> lenient) = Manifest.Decode(mojibake);
         Assert.Equal("\uFFFD", lenient[0].Path);
 
         byte[] lyingCount = (byte[])valid.Clone();
-        BinaryPrimitives.WriteUInt32LittleEndian(lyingCount.AsSpan(3), 1000); // claims 1000 entries, one present
+        BinaryPrimitives.WriteUInt32LittleEndian(lyingCount.AsSpan(3), 1000);
         Assert.False(ManifestCodec.TryRead(lyingCount, out _));
         Assert.Throws<FormatException>(() => Manifest.Decode(lyingCount));
 
         byte[] lyingName = (byte[])valid.Clone();
         lyingName[0] = 0xFF;
-        lyingName[1] = 0xFF; // nameLen claims 65535 bytes
+        lyingName[1] = 0xFF;
         Assert.False(ManifestCodec.TryRead(lyingName, out _));
 
         byte[] lyingPath = (byte[])valid.Clone();
-        BinaryPrimitives.WriteUInt16LittleEndian(lyingPath.AsSpan(7), 500); // pathLen claims 500 bytes
+        BinaryPrimitives.WriteUInt16LittleEndian(lyingPath.AsSpan(7), 500);
         Assert.False(ManifestCodec.TryRead(lyingPath, out _));
         Assert.Throws<FormatException>(() => Manifest.Decode(lyingPath));
     }
@@ -611,8 +569,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Throws<ArgumentException>(() => ManifestCodec.Write(buffer, new ManifestValue("a\ud800", [])));
         Assert.Throws<ArgumentException>(() => ManifestCodec.Write(new byte[5], new ManifestValue("n", [])));
     }
-
-    // ------------------------------------------------------------------ frame: round-trip + goldens
 
     [Fact]
     public void Frame_Constants_MatchBlobWire()
@@ -671,7 +627,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(chunk, buffer[..w]);
         Assert.Equal(chunk, BlobWire.Chunk(3, 7, cv, [0xAB]));
 
-        // every golden parses identically on both codecs, and views expose the fields
         foreach (byte[] frame in new[] { hello, welcome, bye, head, req, chunk })
         {
             Assert.True(BlobFrameCodec.TryParse(frame, out BlobFrameView view));
@@ -697,7 +652,6 @@ public sealed class BlobFormatsCodecTests
         buffer[0] = BlobFrameCodec.TypeHello;
         BinaryPrimitives.WriteUInt64BigEndian(buffer.AsSpan(1), 1);
 
-        // v1: empty body, no session id
         Assert.True(BlobFrameCodec.TryParse(buffer[..BlobFrameCodec.HelloV1Length], out BlobFrameView v1));
         Assert.Equal(1, v1.Version);
         Assert.True(v1.SessionId.IsEmpty);
@@ -705,19 +659,16 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(1, f1.Version);
         Assert.Null(f1.SessionId);
 
-        // v2: a raw 32-byte session id, no version byte
         sid.CopyTo(buffer.AsSpan(9));
         Assert.True(BlobFrameCodec.TryParse(buffer[..BlobFrameCodec.HelloV2Length], out BlobFrameView v2));
         Assert.Equal(2, v2.Version);
         Assert.Equal(sid, v2.SessionId.ToArray());
 
-        // v3 (legacy): version byte 3 then the session id
         byte[] v3 = BlobWire.Hello(5, sid);
         Assert.True(BlobFrameCodec.TryParse(v3, out BlobFrameView v3View));
         Assert.Equal(BlobFrameCodec.ProtocolVersion, v3View.Version);
         Assert.Equal(sid, v3View.SessionId.ToArray());
 
-        // v4 (current): same shape, distinguished only by the version byte
         byte[] v4 = BlobWire.Hello(5, sid, BlobWire.CurrentVersion);
         Assert.True(BlobFrameCodec.TryParse(v4, out BlobFrameView v4View));
         Assert.Equal(BlobFrameCodec.CurrentVersion, v4View.Version);
@@ -725,7 +676,6 @@ public sealed class BlobFormatsCodecTests
         Assert.True(BlobWire.Frame.TryParse(v4, out BlobWire.Frame f4));
         Assert.Equal(BlobWire.CurrentVersion, f4.Version);
 
-        // 33-byte bodies with a version byte this protocol never spoke: reject
         foreach (byte bogus in new byte[] { 1, 2, 5, 255 })
         {
             byte[] tampered = [.. v3];
@@ -734,9 +684,8 @@ public sealed class BlobFormatsCodecTests
             Assert.False(BlobWire.Frame.TryParse(tampered, out _));
         }
 
-        // lengths that are none of the three Hello forms
-        Assert.False(BlobFrameCodec.TryParse([.. v3, 0], out _)); // 34-byte body
-        Assert.False(BlobFrameCodec.TryParse(v3[..40], out _)); // 31-byte body
+        Assert.False(BlobFrameCodec.TryParse([.. v3, 0], out _));
+        Assert.False(BlobFrameCodec.TryParse(v3[..40], out _));
     }
 
     [Fact]
@@ -745,13 +694,12 @@ public sealed class BlobFormatsCodecTests
         byte[] sid = SeqBytes(0, 32);
         byte[] cv = SeqBytes(0, 32);
 
-        Assert.False(BlobFrameCodec.TryParse(new byte[8], out _)); // short header
-        Assert.False(BlobFrameCodec.TryParse([0, .. new byte[8]], out _)); // unknown types
+        Assert.False(BlobFrameCodec.TryParse(new byte[8], out _));
+        Assert.False(BlobFrameCodec.TryParse([0, .. new byte[8]], out _));
         Assert.False(BlobFrameCodec.TryParse([8, .. new byte[8]], out _));
         Assert.False(BlobFrameCodec.TryParse([255, .. new byte[8]], out _));
-        Assert.False(BlobFrameCodec.TryParse([7, .. new byte[8]], out _)); // Proof exists now, but an empty body is not one
+        Assert.False(BlobFrameCodec.TryParse([7, .. new byte[8]], out _));
 
-        // Head: TotalChunks must be exactly ceil(TotalBytes / 1024); negatives reject
         foreach ((long totalBytes, long totalChunks) in new[] { (2048L, 1L), (0L, 1L), (1024L, 2L), (1025L, 1L), (-1L, 0L) })
         {
             Assert.False(BlobFrameCodec.TryParse(BlobWire.Head(1, totalBytes, totalChunks), out _), $"({totalBytes}, {totalChunks})");
@@ -762,20 +710,17 @@ public sealed class BlobFormatsCodecTests
             Assert.True(BlobFrameCodec.TryParse(BlobWire.Head(1, totalBytes, totalChunks), out _), $"({totalBytes}, {totalChunks})");
         }
 
-        // Req: Count in [1, 64], StartChunk >= 0
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Request(1, 0, 0), out _));
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Request(1, 0, 65), out _));
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Request(1, -1, 1), out _));
         Assert.True(BlobFrameCodec.TryParse(BlobWire.Request(1, 0, 1), out _));
 
-        // Chunk: 1..1024 data bytes, Index >= 0
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Chunk(1, 0, cv, new byte[0]), out _));
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Chunk(1, 0, cv, new byte[1025]), out _));
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Chunk(1, -1, cv, new byte[1]), out _));
         Assert.True(BlobFrameCodec.TryParse(BlobWire.Chunk(1, 0, cv, new byte[1024]), out _));
         Assert.True(BlobFrameCodec.TryParse(BlobWire.Chunk(1, long.MaxValue, cv, [1]), out _));
 
-        // Welcome: exactly 114 body bytes with leading version byte 3
         byte[] welcome = BlobWire.Welcome(1, sid, sid, new byte[49]);
         byte[] tampered = [.. welcome];
         tampered[9] = 1;
@@ -783,7 +728,6 @@ public sealed class BlobFormatsCodecTests
         Assert.False(BlobFrameCodec.TryParse(welcome[..^1], out _));
         Assert.False(BlobFrameCodec.TryParse([.. welcome, 0], out _));
 
-        // Bye carries nothing
         Assert.False(BlobFrameCodec.TryParse([BlobFrameCodec.TypeBye, .. Be64(1), 0], out _));
     }
 
@@ -801,7 +745,7 @@ public sealed class BlobFormatsCodecTests
         Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteWelcome(buffer, 1, sid, sid, new byte[48]));
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobFrameCodec.WriteWelcome(buffer, 1, sid, sid, new byte[49], 5));
         Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteBye(new byte[8], 1));
-        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteHead(buffer, 1, 2048, 1)); // lying chunk count
+        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteHead(buffer, 1, 2048, 1));
         Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteHead(buffer, 1, -1, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobFrameCodec.WriteRequest(buffer, 1, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobFrameCodec.WriteRequest(buffer, 1, 0, 65));
@@ -812,12 +756,10 @@ public sealed class BlobFormatsCodecTests
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobFrameCodec.WriteChunk(buffer, 1, 0, sid, new byte[1025]));
         Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteChunk(new byte[49], 1, 0, sid, [1]));
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobFrameCodec.WriteProof(buffer, 1, -1, sid));
-        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteProof(buffer, 1, 0, sid[..31])); // not whole CVs
-        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteProof(buffer, 1, 0, new byte[65 * 32])); // over the cap
+        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteProof(buffer, 1, 0, sid[..31]));
+        Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteProof(buffer, 1, 0, new byte[65 * 32]));
         Assert.Throws<ArgumentException>(() => BlobFrameCodec.WriteProof(new byte[BlobFrameCodec.HeaderLength + 8], 1, 0, []));
     }
-
-    // ------------------------------------------------------------------ frame: differential
 
     [Fact]
     public void Frame_Differential_MatchesBlobWireBuildersAndParser()
@@ -826,16 +768,15 @@ public sealed class BlobFormatsCodecTests
         byte[] buffer = new byte[BlobFrameCodec.ProofMaxLength];
         for (int i = 0; i < 3_000; i++)
         {
-            byte[] wire = RandomFrameWire(rng); // includes the two legacy Hello forms and the v4 forms
+            byte[] wire = RandomFrameWire(rng);
 
             Assert.True(BlobWire.Frame.TryParse(wire, out BlobWire.Frame legacy));
             Assert.True(BlobFrameCodec.TryParse(wire, out BlobFrameView view));
             AssertFramesEqual(view, legacy);
 
-            // for every frame the current writers can emit, the bytes come out identical
             if (view.Type == BlobFrameCodec.TypeHello && wire.Length != BlobFrameCodec.HelloV3Length)
             {
-                continue; // legacy receive-only Hello forms have no writer, by design
+                continue;
             }
 
             int w = view.Type switch
@@ -853,33 +794,27 @@ public sealed class BlobFormatsCodecTests
         }
     }
 
-    // ------------------------------------------------------------------ proof: round-trip + goldens
-
     [Fact]
     public void Frame_ProofRoundTrip_AndGoldenBytes()
     {
         byte[] cv = SeqBytes(0xA0, 32);
         byte[] buffer = new byte[BlobFrameCodec.ProofMaxLength];
 
-        // count 0: a run at the file root needs no siblings — 18 bytes total
         byte[] proof0 = [BlobFrameCodec.TypeProof, .. Be64(0x42), .. Le64(7), 0];
         Assert.Equal(proof0, BlobWire.Proof(0x42, 7, []));
         int w = BlobFrameCodec.WriteProof(buffer, 0x42, 7, []);
         Assert.Equal(BlobFrameCodec.ProofMinLength, w);
         Assert.Equal(proof0, buffer[..w]);
 
-        // count 1: exactly one 32-byte sibling follows the count byte
         byte[] proof1 = [BlobFrameCodec.TypeProof, .. Be64(0x42), .. Le64(7), 1, .. cv];
         Assert.Equal(proof1, BlobWire.Proof(0x42, 7, cv));
         Assert.Equal(proof1, buffer[..BlobFrameCodec.WriteProof(buffer, 0x42, 7, cv)]);
 
-        // count 3: siblings concatenated bottom-up, no padding, count byte at offset 17
         byte[] cvs3 = [.. SeqBytes(0x00, 32), .. SeqBytes(0x20, 32), .. SeqBytes(0x40, 32)];
         byte[] proof3 = [BlobFrameCodec.TypeProof, .. Be64(ulong.MaxValue), .. Le64(1_000_000), 3, .. cvs3];
         Assert.Equal(proof3, BlobWire.Proof(ulong.MaxValue, 1_000_000, cvs3));
         Assert.Equal(proof3, buffer[..BlobFrameCodec.WriteProof(buffer, ulong.MaxValue, 1_000_000, cvs3)]);
 
-        // count 64: the wire maximum, 2066 bytes total
         byte[] cvs64 = SeqBytes(0, 64 * 32);
         byte[] proof64 = BlobWire.Proof(9, 63, cvs64);
         Assert.Equal(BlobFrameCodec.ProofMaxLength, proof64.Length);
@@ -898,7 +833,6 @@ public sealed class BlobFormatsCodecTests
             Assert.Equal(BlobFrameCodec.TypeProof, view.Type);
         }
 
-        // both parsers expose the run and its siblings, per-sibling without allocation
         Assert.True(BlobFrameCodec.TryParse(proof3, out BlobFrameView p3));
         Assert.Equal(1_000_000, p3.Index);
         Assert.Equal(3, p3.Count);
@@ -921,8 +855,6 @@ public sealed class BlobFormatsCodecTests
         Assert.Empty(f0.SiblingCvs);
     }
 
-    // ------------------------------------------------------------------ v4 hello/welcome: goldens + differential
-
     [Fact]
     public void Frame_V4HelloWelcome_MatchHandComposedGoldens()
     {
@@ -931,13 +863,11 @@ public sealed class BlobFormatsCodecTests
         byte[] sealedHead = SeqBytes(0x40, 49);
         byte[] buffer = new byte[BlobFrameCodec.WelcomeLength];
 
-        // v4 Hello: identical layout to v3 except the version byte — 42 bytes total
         byte[] hello4 = [BlobFrameCodec.TypeHello, .. Be64(0x42), BlobFrameCodec.CurrentVersion, .. sid];
         Assert.Equal(BlobFrameCodec.HelloV4Length, hello4.Length);
         Assert.Equal(hello4, BlobWire.Hello(0x42, sid, BlobWire.CurrentVersion));
         Assert.Equal(hello4, buffer[..BlobFrameCodec.WriteHello(buffer, 0x42, sid, BlobFrameCodec.CurrentVersion)]);
 
-        // v4 Welcome: 123 bytes total, only the version byte differs from v3
         byte[] welcome4 =
             [BlobFrameCodec.TypeWelcome, .. Be64(7), BlobFrameCodec.CurrentVersion, .. sid, .. nonce, .. sealedHead];
         Assert.Equal(BlobFrameCodec.WelcomeV4Length, welcome4.Length);
@@ -959,24 +889,19 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(nonce, wv.ProviderNonce.ToArray());
         Assert.Equal(sealedHead, wv.SealedHead.ToArray());
 
-        // v3 and v4 agree everywhere except byte 9, and re-encoding preserves the version
         byte[] hello3From4 = [.. hello4[..9], BlobWire.ProtocolVersion, .. hello4[10..]];
         Assert.Equal(BlobWire.Hello(0x42, sid), hello3From4);
         byte[] welcome3From4 = [.. welcome4[..9], BlobWire.ProtocolVersion, .. welcome4[10..]];
         Assert.Equal(BlobWire.Welcome(7, sid, nonce, sealedHead), welcome3From4);
 
-        // the default construction is still the v3 bytes
         Assert.True(BlobWire.Frame.TryParse(BlobWire.Hello(1, sid), out BlobWire.Frame h));
         Assert.Equal(BlobWire.ProtocolVersion, h.Version);
         Assert.True(BlobWire.Frame.TryParse(BlobWire.Welcome(1, sid, sid, new byte[49]), out BlobWire.Frame w));
         Assert.Equal(BlobWire.ProtocolVersion, w.Version);
 
-        // both builders refuse versions the parsers reject
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobWire.Hello(1, sid, 5));
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobWire.Welcome(1, sid, sid, new byte[49], 5));
     }
-
-    // ------------------------------------------------------------------ v4 + proof: rejections
 
     [Fact]
     public void Frame_V4AndProof_RejectNonCanonicalForms()
@@ -985,21 +910,18 @@ public sealed class BlobFormatsCodecTests
         byte[] cvs3 = [.. SeqBytes(0, 32), .. SeqBytes(0x20, 32), .. SeqBytes(0x40, 32)];
         byte[] proof3 = BlobWire.Proof(1, 2, cvs3);
 
-        // Proof body must be exactly 9 + count*32
-        Assert.False(BlobFrameCodec.TryParse(proof3[..^1], out _)); // truncated mid-sibling
+        Assert.False(BlobFrameCodec.TryParse(proof3[..^1], out _));
         Assert.False(BlobWire.Frame.TryParse(proof3[..^1], out _));
-        Assert.False(BlobFrameCodec.TryParse([.. proof3, 0], out _)); // one trailing byte
+        Assert.False(BlobFrameCodec.TryParse([.. proof3, 0], out _));
         Assert.False(BlobWire.Frame.TryParse([.. proof3, 0], out _));
-        Assert.False(BlobFrameCodec.TryParse(proof3[..8], out _)); // short header
-        Assert.True(BlobWire.Frame.TryParse(BlobWire.Proof(1, 2, cvs3[..64]), out _)); // count 2 fits the same rule
+        Assert.False(BlobFrameCodec.TryParse(proof3[..8], out _));
+        Assert.True(BlobWire.Frame.TryParse(BlobWire.Proof(1, 2, cvs3[..64]), out _));
 
-        // count byte 65 promises 65 siblings that are not there
         byte[] lyingCount = [.. proof3];
         lyingCount[17] = 65;
         Assert.False(BlobFrameCodec.TryParse(lyingCount, out _));
         Assert.False(BlobWire.Frame.TryParse(lyingCount, out _));
 
-        // count 65 with all 65 siblings present still exceeds the wire cap
         byte[] full65 = new byte[BlobFrameCodec.HeaderLength + 9 + 65 * 32];
         full65[0] = BlobFrameCodec.TypeProof;
         BinaryPrimitives.WriteUInt64BigEndian(full65.AsSpan(1), 1);
@@ -1008,7 +930,6 @@ public sealed class BlobFormatsCodecTests
         Assert.False(BlobFrameCodec.TryParse(full65, out _));
         Assert.False(BlobWire.Frame.TryParse(full65, out _));
 
-        // count 255 in a maximally sized frame: length rule and cap both reject
         byte[] count255 = new byte[BlobFrameCodec.ProofMaxLength];
         count255[0] = BlobFrameCodec.TypeProof;
         BinaryPrimitives.WriteUInt64BigEndian(count255.AsSpan(1), 1);
@@ -1017,17 +938,14 @@ public sealed class BlobFormatsCodecTests
         Assert.False(BlobFrameCodec.TryParse(count255, out _));
         Assert.False(BlobWire.Frame.TryParse(count255, out _));
 
-        // negative runIndex
         Assert.False(BlobFrameCodec.TryParse(BlobWire.Proof(1, -1, cvs3), out _));
         Assert.False(BlobWire.Frame.TryParse(BlobWire.Proof(1, -1, cvs3), out _));
 
-        // v4 Hello with a version byte this protocol never spoke
         byte[] bogusHello = [.. BlobWire.Hello(1, sid, BlobWire.CurrentVersion)];
         bogusHello[9] = 5;
         Assert.False(BlobFrameCodec.TryParse(bogusHello, out _));
         Assert.False(BlobWire.Frame.TryParse(bogusHello, out _));
 
-        // Welcome v4 with a tampered version byte
         byte[] welcome4 = BlobWire.Welcome(1, sid, sid, new byte[49], BlobWire.CurrentVersion);
         foreach (byte bogus in new byte[] { 0, 1, 5, 255 })
         {
@@ -1037,22 +955,20 @@ public sealed class BlobFormatsCodecTests
             Assert.False(BlobWire.Frame.TryParse(tampered, out _));
         }
 
-        Assert.Throws<ArgumentException>(() => BlobWire.Proof(1, 0, new byte[33])); // partial CV
-        Assert.Throws<ArgumentException>(() => BlobWire.Proof(1, 0, new byte[65 * 32])); // over the cap
+        Assert.Throws<ArgumentException>(() => BlobWire.Proof(1, 0, new byte[33]));
+        Assert.Throws<ArgumentException>(() => BlobWire.Proof(1, 0, new byte[65 * 32]));
     }
-
-    // ------------------------------------------------------------------ v4 cipher: domain separation + watermark
 
     [Fact]
     public void Cipher_V4SessionKey_IsDomainSeparatedFromV3()
     {
         byte[] psk = SeqBytes(1, 32), root = SeqBytes(2, 32), sid = SeqBytes(3, 32), nonce = SeqBytes(4, 32);
-        var v3 = BlobWire.Cipher.For(psk, root, sid, nonce)!; // default construction stays v3
+        var v3 = BlobWire.Cipher.For(psk, root, sid, nonce)!;
         var v4 = BlobWire.Cipher.For(psk, root, sid, nonce, BlobWire.CurrentVersion)!;
 
         byte[] sealedV3 = v3.Seal(asProvider: true, 1, BlobWire.Bye(1));
         byte[] sealedV4 = v4.Seal(asProvider: true, 1, BlobWire.Bye(1));
-        Assert.False(sealedV3.SequenceEqual(sealedV4)); // identical inputs, different HKDF info
+        Assert.False(sealedV3.SequenceEqual(sealedV4));
 
         ulong watermark = 0;
         Assert.True(v3.TryOpen(fromProvider: true, sealedV3, ref watermark, out _));
@@ -1062,7 +978,6 @@ public sealed class BlobFormatsCodecTests
         Assert.True(v4.TryOpen(fromProvider: true, sealedV4, ref watermark, out _));
         Assert.False(v3.TryOpen(fromProvider: true, sealedV4, ref watermark, out _));
 
-        // the role byte and counter watermark are shared construction: v4 obeys the same replay rule
         Assert.False(v4.TryOpen(fromProvider: true, sealedV4, ref watermark, out _), "v4 replays reject exactly like v3");
 
         Assert.Throws<ArgumentOutOfRangeException>(() => BlobWire.Cipher.For(psk, root, sid, nonce, 5));
@@ -1079,25 +994,22 @@ public sealed class BlobFormatsCodecTests
 
         ulong watermark = 0;
         Assert.True(v4.TryOpen(fromProvider: true, sealedProof, ref watermark, out byte[] plain));
-        Assert.Equal(proof, plain); // a Proof frame is just bytes to seal
+        Assert.Equal(proof, plain);
         Assert.Equal(1UL, watermark);
         Assert.True(BlobWire.Frame.TryParse(plain, out BlobWire.Frame f));
         Assert.Equal(BlobWire.TypeProof, f.Type);
         Assert.Equal(4, f.Index);
         Assert.Equal(3, f.Count);
 
-        // forged far-future counter: dropped, watermark unmoved
         byte[] forged = sealedProof.ToArray();
         BinaryPrimitives.WriteUInt64LittleEndian(forged, 100);
         forged[^1] ^= 1;
         Assert.False(v4.TryOpen(fromProvider: true, forged, ref watermark, out _));
         Assert.Equal(1UL, watermark);
 
-        // replayed authenticated counter rejects without moving the watermark
         Assert.False(v4.TryOpen(fromProvider: true, sealedProof, ref watermark, out _));
         Assert.Equal(1UL, watermark);
 
-        // genuine next counter still lands
         byte[] next = v4.Seal(asProvider: true, 2, BlobWire.Proof(9, 5, []));
         Assert.True(v4.TryOpen(fromProvider: true, next, ref watermark, out byte[] nextPlain));
         Assert.True(BlobWire.Frame.TryParse(nextPlain, out BlobWire.Frame nextFrame));
@@ -1115,18 +1027,15 @@ public sealed class BlobFormatsCodecTests
         var providerV4 = BlobWire.Cipher.For(psk, root, clientNonce, providerNonce, BlobWire.CurrentVersion)!;
         ulong stream = BlobWire.StreamId(root);
 
-        // the client can see which version arrived before establishing anything
         byte[] head = providerV4.Seal(asProvider: true, 1, BlobWire.Head(stream, 500, 1));
         byte[] welcome = BlobWire.Welcome(stream, clientNonce, providerNonce, head, BlobWire.CurrentVersion);
         Assert.True(BlobWire.Frame.TryParse(welcome, out BlobWire.Frame parsed));
         Assert.Equal(BlobWire.CurrentVersion, parsed.Version);
 
-        // a v3-sealed head cannot ride a v4 Welcome: the info strings domain-separate
         byte[] v3Head = providerV3.Seal(asProvider: true, 1, BlobWire.Head(stream, 500, 1));
         Assert.False(session.TryOpen(BlobWire.Welcome(stream, clientNonce, providerNonce, v3Head, BlobWire.CurrentVersion),
             stream, out _));
 
-        // established under the v4 key: the Head lands, v3-sealed frames reject, v4-sealed ones pass
         Assert.True(session.TryOpen(welcome, stream, out BlobWire.Frame headFrame));
         Assert.Equal(BlobWire.TypeHead, headFrame.Type);
         Assert.Equal(500, headFrame.TotalBytes);
@@ -1136,14 +1045,11 @@ public sealed class BlobFormatsCodecTests
         Assert.Equal(BlobWire.TypeProof, proof.Type);
         Assert.Equal(2, proof.Count);
 
-        // wrong stream id: a well-formed v4 Welcome for another stream never binds
         ulong other = stream ^ 1;
         byte[] otherHead = providerV4.Seal(asProvider: true, 3, BlobWire.Head(other, 500, 1));
         Assert.False(session.TryOpen(BlobWire.Welcome(other, clientNonce, providerNonce, otherHead, BlobWire.CurrentVersion),
             stream, out _));
     }
-
-    // ------------------------------------------------------------------ totality fuzz across all three codecs
 
     [Fact]
     public void AllCodecs_TotalityFuzz_200KInputs_NeverThrowsOrAcceptsOutOfRange()
@@ -1193,7 +1099,6 @@ public sealed class BlobFormatsCodecTests
 
         Assert.True(read.Kind is WireBlobKind.File or WireBlobKind.Directory);
 
-        // one ticket, exactly one encoding: re-encoding what parsed is the input
         int n = BlobTicketCodec.Write(reencode, read);
         Assert.True(input.SequenceEqual(reencode.AsSpan(0, n)));
     }
@@ -1217,12 +1122,9 @@ public sealed class BlobFormatsCodecTests
             Assert.InRange(Encoding.UTF8.GetByteCount(entry.Path), 0, ManifestCodec.MaxTextBytes);
         }
 
-        // content addressing: the re-encoded manifest is the identical byte string
         int n = ManifestCodec.Write(reencode, read);
         Assert.True(input.SequenceEqual(reencode.AsSpan(0, n)));
 
-        // one-directional differential: everything this codec accepts, the legacy
-        // decoder accepts with the same values (the reverse does not hold: it is lenient)
         (string name, List<Manifest.Entry> entries) = Manifest.Decode(input);
         Assert.Equal(read.Name, name);
         Assert.Equal(read.Entries.Length, entries.Count);
@@ -1241,7 +1143,7 @@ public sealed class BlobFormatsCodecTests
         ReadOnlySpan<byte> input;
         switch (rng.Next(4))
         {
-            case 0: // raw random bytes, sometimes with a real frame type byte
+            case 0:
             {
                 int len = rng.Next(0, 128);
                 rng.NextBytes(mutation.AsSpan(0, len));
@@ -1268,7 +1170,6 @@ public sealed class BlobFormatsCodecTests
                 break;
         }
 
-        // acceptance is byte-for-byte identical to the existing parser
         bool mine = BlobFrameCodec.TryParse(input, out BlobFrameView view);
         bool legacy = BlobWire.Frame.TryParse(input, out BlobWire.Frame frame);
         Assert.Equal(legacy, mine);

@@ -1,7 +1,6 @@
 using System.Text;
 using Pinhole;
 
-// Run on both PCs. Paste either invitation; the other side accepts automatically.
 if (args.Length > 1) { Console.Error.WriteLine("Usage: pinhole-demo [invitation]"); return 1; }
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };

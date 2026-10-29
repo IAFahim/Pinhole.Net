@@ -36,8 +36,7 @@ public sealed class DerpRelayTests
     [Fact]
     public void AuthenticationBox_MatchesIndependentLibsodiumVector_AndRejectsTampering()
     {
-        // https://github.com/jedisct1/libsodium/blob/master/test/default/box.c
-        // Expected bytes: box.exp, with its legacy 16-byte zero prefix removed.
+
         byte[] secret = Convert.FromHexString("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
         byte[] peer = Convert.FromHexString("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
         byte[] nonce = Convert.FromHexString("69696ee955b62b73cd62bda875fc73d68219e0036b7a0b37");
@@ -87,10 +86,10 @@ public sealed class DerpRelayTests
         await client.StartAsync().WaitAsync(Timeout);
         await TestPoll.UntilAsync(Timeout, () => relay.Pongs == 1);
         Assert.True(client.IsAlive);
-        Assert.True(client.Send(new byte[32], new byte[27])); // 5 + 32 + 27 = full burst
-        Assert.True(client.Send(new byte[32], new byte[1])); // limited packet is dropped, not a path failure
+        Assert.True(client.Send(new byte[32], new byte[27]));
+        Assert.True(client.Send(new byte[32], new byte[1]));
         relay.Inject(identity.PublicKey, [0x12, 0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
-        await TestPoll.UntilAsync(Timeout, () => relay.Pongs == 2); // send lane has drained; pong bypasses exhausted budget
+        await TestPoll.UntilAsync(Timeout, () => relay.Pongs == 2);
         Assert.Equal(27, Assert.Single(relay.Traffic).Payload.Length);
         Assert.False(client.Send(new byte[32], new byte[DerpRelay.MaxDatagramSize + 1]));
     }
@@ -199,8 +198,7 @@ public sealed class DerpRelayTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         await using var atB = await b.ConnectAsync(RelayOnly(a));
         await using var atA = await accept.WaitAsync(Timeout);
-        // Drain the authenticated handshake lane before recording counters;
-        // a legitimate late punch is not a spoofed relay delivery.
+
         await Exchange(atA, atB, "prime the listener's authenticated relay lane");
         await Exchange(atB, atA, "prime the dialer's authenticated relay lane");
         var stranger = new NodeIdentity();
@@ -235,8 +233,7 @@ public sealed class DerpRelayTests
         CandidateKind initial = startWithDerp ? CandidateKind.DerpRelay : CandidateKind.IrohRelay;
         Assert.Equal(initial, a.Engine.Lookup(b.PeerId)!.PacketRelay!.Kind);
         await Exchange(atA, atB, "before provider outage");
-        // Bring up the alternate first, so its candidates can be exchanged on the
-        // authenticated current path. A single outage does not kill the session.
+
         blockIroh = false; derp.Paused = false;
         await TestPoll.UntilAsync(Timeout, () => ConnectionString.Parse(a.ConnectionString).Candidates.Any(c => c.Kind != initial && c.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay)
             && ConnectionString.Parse(b.ConnectionString).Candidates.Any(c => c.Kind != initial && c.Kind is CandidateKind.IrohRelay or CandidateKind.DerpRelay));

@@ -21,8 +21,7 @@ public sealed class TcpDialRetryTests
         {
             Task<TcpLink?> pending = transport.ConnectAsync(endpoint, firstAttempt.Token);
             using var accepted = await sink.AcceptSocketAsync().WaitAsync(Timeout);
-            // Receiving the preface proves AddLink already owns this socket, while
-            // the silent sink keeps greeting incomplete. It still occupies one slot.
+
             using var stream = new NetworkStream(accepted, ownsSocket: false);
             var preface = new byte[TcpTransport.Preface.Length];
             await stream.ReadExactlyAsync(preface).AsTask().WaitAsync(Timeout);
@@ -35,8 +34,7 @@ public sealed class TcpDialRetryTests
             firstAttempt.Cancel();
             Assert.Null(await pending.WaitAsync(Timeout));
             Assert.Equal(0, transport.LiveLinks);
-            // Windows exclusive listeners cannot reclaim a port while an accepted
-            // socket from the previous listener still owns it.
+
             stream.Dispose();
             accepted.Dispose();
             sink.Stop();
@@ -61,8 +59,7 @@ public sealed class TcpDialRetryTests
     [Fact]
     public async Task FailedDial_DoesNotFreezeTheEndpointForTheSuccessThrottle()
     {
-        // Phase 1 — a silent acceptor: the socket is accepted but never greets, so
-        // the initiator's 3 s negotiation deadline fails the attempt deterministically.
+
         var sink = new TcpListener(IPAddress.Loopback, 0);
         sink.Start();
         int port = ((IPEndPoint)sink.LocalEndpoint).Port;
@@ -72,10 +69,6 @@ public sealed class TcpDialRetryTests
             Assert.Null(await transport.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port),
                 CancellationToken.None).WaitAsync(Timeout));
 
-            // Phase 2 — the silent sink is replaced by a real peer on the same port.
-            // The very next dial must be able to attempt again: the old attempt-failure
-            // path kept the endpoint in the five-second throttle table, so every retry
-            // inside a normal ConnectTimeout returned null without even trying.
             sink.Stop();
             using var peer = new TcpTransport(new IPEndPoint(IPAddress.Loopback, port), (_, _) => { }, _ => { });
             var watch = Stopwatch.StartNew();
@@ -83,7 +76,7 @@ public sealed class TcpDialRetryTests
                 CancellationToken.None).WaitAsync(Timeout);
             watch.Stop();
 
-            Assert.NotNull(link); // throttled retries return null instantly instead of dialing
+            Assert.NotNull(link);
             Assert.True(link!.IsReady);
             Assert.True(watch.Elapsed < TimeSpan.FromSeconds(3),
                 $"retry took {watch.Elapsed.TotalSeconds:F1}s; a failed dial must not inherit the 5 s success throttle");

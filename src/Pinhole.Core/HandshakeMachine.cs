@@ -4,41 +4,35 @@ namespace Pinhole.Core;
 
 public enum HandshakeInputKind : byte
 {
-    PuncBegin = 0, // first pass over a PUNC: every check that needs no crypto call
-    PuncKeys = 1,  // second pass: the shell ran key agreement and reports the verdict
-    PackBegin = 2, // first pass over a PACK: every check that needs no crypto call
-    PackKeys = 3,  // second pass: key agreement and confirm-MAC verdicts
+    PuncBegin = 0,
+    PuncKeys = 1,
+    PackBegin = 2,
+    PackKeys = 3,
 }
 
 public struct HandshakeInput
 {
     public HandshakeInputKind Kind;
-    public bool CryptoBody;  // PuncBegin/PackBegin: the frame carried the v2 key body
-    public bool PinMatches;  // PuncBegin/PackBegin: the static key matches the pin (true when unpinned)
-    public bool BodyPlausible; // PackBegin: length at least a legacy PACK body
-    public bool LengthClassOk; // PackBegin: length is exactly legacy or exactly crypto
-    public bool Mac1Present; // PuncBegin/PackBegin: the frame carried the v4 mac1 extension
-    public bool Mac1Ok;      // PuncBegin/PackBegin: the shell verified the keyed MAC (v3 frames pass vacuously)
-    public bool CookieRequired; // PuncBegin: the shell reports this source as under initiation load
-    public bool CookieOk;       // PuncBegin: the frame's mac2 verified under the source's cookie (vacuously true when not under load)
-    public bool Accepted;   // PuncKeys/PackKeys: key agreement (fresh, repeat, or supersede) verdict
-    public bool ConfirmOk;  // PackKeys: the confirm MAC verified under the agreed keys
-    public uint FrameToken; // PuncBegin/PuncKeys: the PUNC's token; PackBegin/PackKeys: the echo of ours
-    public uint PeerToken;  // PackBegin/PackKeys: the responder's own token (second slot)
+    public bool CryptoBody;
+    public bool PinMatches;
+    public bool BodyPlausible;
+    public bool LengthClassOk;
+    public bool Mac1Present;
+    public bool Mac1Ok;
+    public bool CookieRequired;
+    public bool CookieOk;
+    public bool Accepted;
+    public bool ConfirmOk;
+    public uint FrameToken;
+    public uint PeerToken;
 }
 
-// The token side of the PUNC/PACK/HSCK exchange: which token the peer's frames must
-// carry, when a learned token may be replaced, which reply each inbound frame earns,
-// and the reject kind for every refusal. The KEY side (agreement, confirm MACs,
-// sealers) stays in the shell's crypto object — this machine sequences around it and
-// never touches key material. The HSCK third flight is a pure crypto verdict with no
-// sequencing state and stays in the shell entirely.
 public struct HandshakeState
 {
     public uint SelfToken;
     public uint RemoteToken;
     public bool RemoteTokenKnown;
-    public bool RemoteTokenAuthenticated; // set by the sealed-frame path, honored here
+    public bool RemoteTokenAuthenticated;
     public bool HsckSent;
     public bool OfferedCrypto;
 
@@ -53,9 +47,7 @@ public struct HandshakeState
 
 public static class HandshakeMachine
 {
-    // Replies ride Transmit effects (Value selects the frame); rejects and the two
-    // progress signals ride Notify (Value selects the kind). Numbers 1..8 are the
-    // engine's stable reject codes — diagnostics print them by kind.
+
     public const long ReplyPackLegacy = 0;
     public const long ReplyPackCrypto = 1;
     public const long ReplyHsck = 2;
@@ -69,13 +61,11 @@ public static class HandshakeMachine
     public const long RejectMixedMode = 6;
     public const long RejectPackConfirm = 7;
     public const long RejectPackPeerToken = 8;
-    // SILENT refusal: a frame that carried the v4 mac1 extension but failed its keyed
-    // MAC. The shell answers this kind with no output frame, no state change, and no
-    // key agreement — it counts the refusal and drops the frame.
+
     public const long RejectMac1 = 9;
 
-    public const long NeedKeys = 63;       // the shell runs key agreement, then steps *Keys
-    public const long PeerConfirmed = 64;  // the shell marks the crypto object confirmed
+    public const long NeedKeys = 63;
+    public const long PeerConfirmed = 64;
 
     public static int Step(ref HandshakeState state, in HandshakeInput input, Tick now, Span<Effect> effects)
     {
@@ -90,25 +80,18 @@ public static class HandshakeMachine
             case HandshakeInputKind.PackKeys:
                 return StepPackKeys(ref state, in input, effects);
             default:
-                return 0; // unknown input values are a no-op, never an exception
+                return 0;
         }
     }
 
     private static int StepPuncBegin(ref HandshakeState s, in HandshakeInput input, Span<Effect> effects)
     {
-        // The DoS armor gate runs before every other check: an extension frame whose
-        // keyed MAC failed earns nothing — no pin verdict, no token verdict, no key
-        // agreement sequencing. Unversioned (v3) frames skip it during the support window.
+
         if (input.Mac1Present && !input.Mac1Ok)
         {
             return Reject(effects, RejectMac1);
         }
 
-        // The mac2/cookie gate (R5 phase 2): when the shell reports the source as under
-        // initiation load, a PUNC that cannot prove the cookie earns only a COOKIE reply —
-        // before the pin, token, and mode checks, and before any key-agreement sequencing.
-        // An honest dialer echoes the cookie in mac2 and takes the normal path below; a
-        // spoofed source cannot, because it never sees the COOKIE it would have to echo.
         if (input.CookieRequired && !input.CookieOk)
         {
             int written = 0;
@@ -121,16 +104,11 @@ public static class HandshakeMachine
             return Reject(effects, RejectPin);
         }
 
-        // Stale frames from an older connection to the same peer ID. A token learned
-        // only from plaintext handshakes may still be replaced by the real one; a
-        // token authenticated by a sealed frame is settled.
         if (s.RemoteTokenKnown && s.RemoteToken != input.FrameToken && (!s.OfferedCrypto || s.RemoteTokenAuthenticated))
         {
             return Reject(effects, RejectPuncToken);
         }
 
-        // A plaintext PUNC on a connection that offered crypto, or a crypto PUNC on a
-        // plaintext one: neither is a state any honest peer produces.
         if (s.OfferedCrypto != input.CryptoBody)
         {
             return Reject(effects, RejectMixedMode);
@@ -138,7 +116,7 @@ public static class HandshakeMachine
 
         if (s.OfferedCrypto)
         {
-            return Reject(effects, NeedKeys); // run key agreement, then step PuncKeys
+            return Reject(effects, NeedKeys);
         }
 
         s.RemoteToken = input.FrameToken;
@@ -164,8 +142,7 @@ public static class HandshakeMachine
 
     private static int StepPackBegin(ref HandshakeState s, in HandshakeInput input, Span<Effect> effects)
     {
-        // Same gate, same position: a bad mac1 answers nothing, least of all the echo
-        // check that would tell the sender which token we hold.
+
         if (input.Mac1Present && !input.Mac1Ok)
         {
             return Reject(effects, RejectMac1);
@@ -178,18 +155,17 @@ public static class HandshakeMachine
 
         if (input.FrameToken != s.SelfToken)
         {
-            return Reject(effects, RejectPackEcho); // not an echo of our handshake token
+            return Reject(effects, RejectPackEcho);
         }
 
         if (!input.LengthClassOk)
         {
-            return 0; // neither a legacy nor a crypto body: silently ignored
+            return 0;
         }
 
         if (!input.CryptoBody && s.OfferedCrypto)
         {
-            // We dialed with a key the string vouches for; a plaintext PACK means
-            // someone stripped the handshake. Fail, never fall back to plaintext.
+
             int count = Reject(effects, RejectMixedMode);
             Effects.Add(effects, ref count, EffectKind.Close, 0, 0, RejectMixedMode);
             return count;
@@ -197,7 +173,7 @@ public static class HandshakeMachine
 
         if (input.CryptoBody && !s.OfferedCrypto)
         {
-            return 0; // we never offered crypto; a crypto PACK is bogus
+            return 0;
         }
 
         if (input.CryptoBody && !input.PinMatches)
@@ -207,8 +183,6 @@ public static class HandshakeMachine
             return count;
         }
 
-        // Confirmation binds the keys, not these token fields. A replayed PACK with an
-        // edited token must not change an authenticated session's token.
         if (s.RemoteTokenAuthenticated && input.PeerToken != s.RemoteToken)
         {
             return Reject(effects, RejectPackPeerToken);
@@ -216,11 +190,9 @@ public static class HandshakeMachine
 
         if (input.CryptoBody)
         {
-            return Reject(effects, NeedKeys); // run key agreement, then step PackKeys
+            return Reject(effects, NeedKeys);
         }
 
-        // Only verified keys may replace a token latched by an earlier PUNC — the
-        // legacy path has none, and latches the plaintext token as-is.
         s.RemoteToken = input.PeerToken;
         s.RemoteTokenKnown = true;
         return 0;
@@ -246,7 +218,7 @@ public static class HandshakeMachine
         if (!s.HsckSent)
         {
             s.HsckSent = true;
-            // Third flight: our confirm back, exactly once — retries ride the same MAC.
+
             Effects.Add(effects, ref count, EffectKind.Transmit, 0, 0, ReplyHsck);
         }
 

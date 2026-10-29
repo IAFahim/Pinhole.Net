@@ -7,9 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-// The crypto layer, oracle-tested: every constant that is not an RFC vector was produced by
-// an independent python implementation (cryptography + hashlib, RFC 5869 HKDF) of the same
-// schedule, so a C# mistake cannot silently agree with itself.
 public class CryptoTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(8);
@@ -30,19 +27,16 @@ public class CryptoTests
         return tweak is null ? o : tweak(o);
     }
 
-    // ---------------------------------------------------------------- oracle: X25519
-
     [Fact]
     public void X25519_Rfc7748Vectors()
     {
-        // RFC 7748 §5.2, scalar-mult test vector
+
         Assert.Equal(
             "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
             Convert.ToHexString(NodeIdentity.X25519Agree(
                 Convert.FromHexString("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"),
                 Convert.FromHexString("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"))).ToLowerInvariant());
 
-        // RFC 7748 §6.1, Diffie-Hellman: both orders of the same exchange agree
         string shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
         Assert.Equal(shared, Convert.ToHexString(NodeIdentity.X25519Agree(
             Convert.FromHexString("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"),
@@ -55,15 +49,10 @@ public class CryptoTests
     [Fact]
     public void X25519_LowOrderPoint_IsRefused()
     {
-        // The all-zero public key is the classic small-subgroup probe; the agreement must
-        // refuse rather than negotiate on top of the all-zero shared secret.
+
         Assert.Throws<CryptographicException>(() => NodeIdentity.X25519Agree(new byte[32], new byte[32]));
     }
 
-    // ---------------------------------------------------------------- oracle: key schedule
-
-    // A fixed handshake: roles, keys, and every derived artifact come from the independent
-    // python derivation. Both sides must land on exactly these values.
     private static SessionKeys FixtureKeys() => new()
     {
         TranscriptHash = Convert.FromHexString("e970527b014fbba3d0f9ded3f8180b4264490842119f67da3f91875e1948a1a2"),
@@ -84,8 +73,7 @@ public class CryptoTests
         byte[] stHiPriv = Convert.FromHexString("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f");
         byte[] ephLoPub = Convert.FromHexString("8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f");
         byte[] ephHiPub = Convert.FromHexString("358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254");
-        // The fixture's peer ids are the numbers 0x0102030405060708 / 0x0a0b0c0d0e0f1011;
-        // these byte strings are their little-endian encodings.
+
         ulong lo = BinaryPrimitives.ReadUInt64LittleEndian(Convert.FromHexString("0807060504030201"));
         ulong hi = BinaryPrimitives.ReadUInt64LittleEndian(Convert.FromHexString("11100f0e0d0c0b0a"));
 
@@ -121,14 +109,10 @@ public class CryptoTests
         Assert.Equal("18a45df662eecfff9118f1f7185d8b2a82dcf70a31b99ee424548f287deb9969", Convert.ToHexString(epoch2).ToLowerInvariant());
     }
 
-    // ---------------------------------------------------------------- oracle: frame sealing
-
     [Fact]
     public void FrameSealer_ProducesTheOracleCiphertext_AtCounterSeven()
     {
-        // The python oracle sealed "through the wire" with the lo→hi key, salt, counter 7,
-        // and aad [0x52][peer id lo LE][token AABBCCDD][counter 7 LE] — the engine's exact
-        // frame shape for its 7th sealed frame.
+
         byte[] aad = Convert.FromHexString("520807060504030201aabbccdd0700000000000000");
         byte[] oracleCt = Convert.FromHexString("9515322e31d9186736e476c2e111b047133b7d13e056ed4cf6716d473ccd15fb");
 
@@ -142,7 +126,6 @@ public class CryptoTests
 
         Assert.Equal(oracleCt, frame.AsSpan(21, 32).ToArray());
 
-        // and the receiver opens it back to the plaintext
         var receiver = new FrameSealer(FixtureKeys(), iAmLo: false, sending: false);
         byte[] plain = new byte[16];
         Assert.True(receiver.Open(frame, plain, out int len));
@@ -169,16 +152,16 @@ public class CryptoTests
         byte[] f1 = Frame(1), f2 = Frame(2), f3 = Frame(3);
         Assert.True(receiver.Open(f1, scratch, out int n1));
         Assert.Equal(4, n1);
-        Assert.True(receiver.Open(f3, scratch, out _)); // reordering inside the window is fine
+        Assert.True(receiver.Open(f3, scratch, out _));
         Assert.True(receiver.Open(f2, scratch, out _));
-        Assert.False(receiver.Open(f2, scratch, out _)); // replayed: refused
+        Assert.False(receiver.Open(f2, scratch, out _));
 
         byte[] f4 = Frame(4);
-        f4[^3] ^= 1; // tamper: one flipped ciphertext bit
+        f4[^3] ^= 1;
         Assert.False(receiver.Open(f4, scratch, out _));
 
         byte[] f5 = Frame(5);
-        BinaryPrimitives.WriteUInt64LittleEndian(f5.AsSpan(13), (1UL << 40) + 99); // far-future epoch
+        BinaryPrimitives.WriteUInt64LittleEndian(f5.AsSpan(13), (1UL << 40) + 99);
         Assert.False(receiver.Open(f5, scratch, out _));
     }
 
@@ -196,7 +179,6 @@ public class CryptoTests
             HiConfirm = new byte[16],
         };
 
-        // epoch length 4: counters 1-4 use epoch 0, 5-8 epoch 1, ... — 12 frames cross three epochs
         var sender = new FrameSealer(keys, iAmLo: true, sending: true, epochFrames: 4);
         var receiver = new FrameSealer(keys, iAmLo: false, sending: false, epochFrames: 4);
 
@@ -216,17 +198,13 @@ public class CryptoTests
                 $"counter {BinaryPrimitives.ReadUInt64LittleEndian(f.AsSpan(13))} must open after the ratchet");
         }
 
-        Assert.False(receiver.Open(frames[0], scratch, out _)); // replayed counter, refused
+        Assert.False(receiver.Open(frames[0], scratch, out _));
     }
 
     [Fact]
     public void FrameSealer_ForgedFarFutureCounter_IsRejectedWithoutPoisoningTheWindow()
     {
-        // The token rides in the clear, so an on-path forger can shape frames with any
-        // counter it likes. A forged far-future counter must die on authentication
-        // alone: the replay window may advance only when a frame authenticates
-        // (RFC 4303 §3.4.3), or one forged packet starves every legitimate frame
-        // behind it for the rest of the epoch.
+
         var sender = new FrameSealer(FixtureKeys(), iAmLo: true, sending: true);
         var receiver = new FrameSealer(FixtureKeys(), iAmLo: false, sending: false);
 
@@ -239,9 +217,9 @@ public class CryptoTests
         }
 
         byte[] scratch = new byte[64];
-        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 1
+        Assert.True(receiver.Open(Frame(), scratch, out _));
 
-        byte[] forged = Frame(); // counter 2 on the wire, claimed as 100
+        byte[] forged = Frame();
         BinaryPrimitives.WriteUInt64LittleEndian(forged.AsSpan(13), 100);
         Assert.False(receiver.Open(forged, scratch, out _));
 
@@ -252,10 +230,7 @@ public class CryptoTests
     [Fact]
     public void FrameSealer_ForgedNextEpochCounter_IsRejectedWithoutRatchetingTheKey()
     {
-        // The same forger one epoch ahead: the epoch ratchet may adopt the next epoch's
-        // key only when a frame sealed under it authenticates. Committing the ratchet
-        // on a forged counter would strand every legitimate frame still sealed under
-        // the previous epoch's key — a one-packet kill of the receive direction.
+
         var keys = new SessionKeys
         {
             TranscriptHash = new byte[32],
@@ -280,30 +255,26 @@ public class CryptoTests
         byte[] scratch = new byte[64];
         for (int i = 0; i < 4; i++)
         {
-            Assert.True(receiver.Open(Frame(), scratch, out _)); // counters 1..4, epoch 0
+            Assert.True(receiver.Open(Frame(), scratch, out _));
         }
 
-        byte[] forged = Frame(); // counter 5 on the wire, claimed as 9 = epoch 1
+        byte[] forged = Frame();
         BinaryPrimitives.WriteUInt64LittleEndian(forged.AsSpan(13), 9);
         Assert.False(receiver.Open(forged, scratch, out _));
 
-        // Genuine epoch-0 frames still open: the key was not ratcheted by the forgery.
         for (int i = 0; i < 4; i++)
         {
             Assert.True(receiver.Open(Frame(), scratch, out _), $"counter {5 + i} must open after the forged epoch jump");
         }
 
-        // And the genuine epoch transition still ratchets, on an authenticated frame.
-        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 9, epoch 1
-        Assert.True(receiver.Open(Frame(), scratch, out _)); // counter 10
+        Assert.True(receiver.Open(Frame(), scratch, out _));
+        Assert.True(receiver.Open(Frame(), scratch, out _));
     }
 
     [Fact]
     public void FrameSealer_ReorderAcrossEpochBoundary_StragglerStillOpens()
     {
-        // UDP legitimately reorders. When the window crosses an epoch boundary, a
-        // straggler from the previous epoch is still inside the replay window and must
-        // open under the retained previous-epoch key.
+
         var keys = new SessionKeys
         {
             TranscriptHash = new byte[32],
@@ -327,9 +298,9 @@ public class CryptoTests
         }
 
         byte[] scratch = new byte[64];
-        Assert.True(receiver.Open(frames[0], scratch, out _)); // epoch 0
+        Assert.True(receiver.Open(frames[0], scratch, out _));
         Assert.True(receiver.Open(frames[1], scratch, out _));
-        Assert.True(receiver.Open(frames[8], scratch, out _)); // epoch 1: ratchet commits
+        Assert.True(receiver.Open(frames[8], scratch, out _));
         Assert.True(receiver.Open(frames[9], scratch, out _));
         for (int i = 2; i < 8; i++)
         {
@@ -361,10 +332,10 @@ public class CryptoTests
                 receiver.Open(f, scratch, out _);
             }
         })).ToArray();
-        receiver.Dispose(); // races the opens; nothing may throw
+        receiver.Dispose();
         await Task.WhenAll(tasks);
 
-        Assert.False(receiver.Open(frames[0], new byte[64], out _)); // refused, not thrown
+        Assert.False(receiver.Open(frames[0], new byte[64], out _));
     }
 
     [Theory]
@@ -439,8 +410,6 @@ public class CryptoTests
         Assert.Equal(0, local.SupersededLatches);
     }
 
-    // ---------------------------------------------------------------- end to end
-
     [Fact]
     public async Task EncryptedByDefault_DataFlows_BothSidesAuthenticated()
     {
@@ -488,7 +457,6 @@ public class CryptoTests
         Assert.NotNull(cs.StaticKey);
         Assert.Equal(a.StaticPublicKey, cs.StaticKey);
 
-        // a v2 payload without the trailing key, or with a wrong-length one, is malformed
         await using PinholeNode b = await PinholeNode.BindAsync(Opts(o => o with { Encryption = PinholeEncryption.Disabled }));
         ConnectionString legacy = Pinhole.ConnectionString.Parse(b.ConnectionString);
         Assert.Null(legacy.StaticKey);
@@ -526,9 +494,6 @@ public class CryptoTests
     {
         await using PinholeNode a = await PinholeNode.BindAsync(Opts(o => o with { ConnectTimeout = TimeSpan.FromSeconds(5) }));
 
-        // A "machine in the middle" re-issues the victim's string with its own key
-        // substituted. No real attacker is present — the honest peer's PACK simply fails the
-        // pin, which is exactly what a machine in the middle cannot forge.
         await using PinholeNode honest = await PinholeNode.BindAsync(Opts());
         ConnectionString honestString = Pinhole.ConnectionString.Parse(honest.ConnectionString);
         var tampered = new ConnectionString(
@@ -542,8 +507,7 @@ public class CryptoTests
     [Fact]
     public async Task Downgrade_PlaintextPack_AgainstACryptoDial_KillsTheConnection()
     {
-        // A raw socket pretending to be the peer of a v2 string: it answers the crypto PUNC
-        // with a legacy plaintext PACK — the striptease a machine in the middle would perform.
+
         await using PinholeNode a = await PinholeNode.BindAsync(Opts(o => o with { ConnectTimeout = TimeSpan.FromSeconds(5) }));
         using var fake = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         fake.Bind(new IPEndPoint(IPAddress.Loopback, 0));
@@ -560,8 +524,8 @@ public class CryptoTests
             int n = fake.ReceiveFrom(buf, ref any);
             byte[] pack = new byte[17];
             pack[0] = 0x51;
-            BinaryPrimitives.WriteUInt64LittleEndian(pack.AsSpan(1), 0xdeadbeefdeadbeef); // the fake's own id
-            Buffer.BlockCopy(buf, 9, pack, 9, 4);  // echo the dialer's token
+            BinaryPrimitives.WriteUInt64LittleEndian(pack.AsSpan(1), 0xdeadbeefdeadbeef);
+            Buffer.BlockCopy(buf, 9, pack, 9, 4);
             fake.SendTo(pack, any);
         });
 
@@ -623,8 +587,6 @@ public class CryptoTests
                     BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), token);
                     fakePeer.SendTo(pack, any);
 
-                    // Keep the data coming until the test has seen it: on a slow runner the
-                    // whole burst can be delivered before the post-dial subscription attaches.
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     while (!got.Task.IsCompleted && sw.Elapsed < TimeSpan.FromSeconds(6))
                     {
@@ -646,8 +608,6 @@ public class CryptoTests
         Assert.False(conn.IsEncrypted);
         Assert.Null(conn.RemoteStaticKey);
     }
-
-    // ---------------------------------------------------------------- wire-level oracle peer
 
     private sealed class OraclePeer : IDisposable
     {
@@ -712,10 +672,7 @@ public class CryptoTests
             while (true)
             {
                 SocketReceiveFromResult r = await Sock.ReceiveFromAsync(buf, any, ct);
-                // The PUNC carries no recipient field — the header's peer id is the sender,
-                // which for a dial we initiated is always the node we dialed. The node sends
-                // the v4 shape (94 B, marker + mac1); this oracle stays a v3 responder and
-                // answers the unversioned PACK the support window still admits.
+
                 if (r.ReceivedBytes is 9 + CryptoWire.PuncCryptoBody or 9 + CryptoWire.PuncCryptoBodyV4
                     && buf[0] == 0x50
                     && BinaryPrimitives.ReadUInt64LittleEndian(buf.AsSpan(1)) == node.PeerId)
@@ -740,8 +697,7 @@ public class CryptoTests
             _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
             HandshakePack = pack;
             await Sock.SendToAsync(pack, nodeEp, ct);
-            // A plaintext handshake does not prove its source route. Supply fresh sealed
-            // traffic so the node can adopt the oracle's UDP path and complete its dial.
+
             await Sock.SendToAsync(SealFrame(0x53, new byte[8]), nodeEp, ct);
         }
 
@@ -768,7 +724,7 @@ public class CryptoTests
                     SocketReceiveFromResult r = await Sock.ReceiveFromAsync(buf, any, cts.Token);
                     if (r.ReceivedBytes < 13 || buf[0] is 0x50 or 0x51 or 0x57)
                     {
-                        continue; // handshake frames are plaintext by design
+                        continue;
                     }
 
                     if (_crypto!.Recv!.Open(buf.AsSpan(0, r.ReceivedBytes), plain, out int len))
@@ -799,25 +755,16 @@ public class CryptoTests
         using var oracle = new OraclePeer();
         oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
 
-        // The node dials the oracle; the oracle completes a genuine handshake.
         Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString());
         await oracle.ShakeHandsAsync(node);
         PinholeConnection conn = await dial;
         Assert.True(conn.IsEncrypted);
 
-        // The genuine frame is delivered exactly once. Its exact replay is refused by the
-        // replay window, and a fresh frame whose tag was corrupted in flight is refused by
-        // authentication — and only refused: a corrupted tag consumes nothing, so the
-        // ordering here (genuine first) is just determinism, not a workaround. The
-        // corrupted-clone-before-genuine order is covered by
-        // WireOracle_CorruptedCloneDoesNotBurnTheCounter.
         byte[] real = oracle.SealFrame(0x52, "genuine"u8);
         byte[] replay = (byte[])real.Clone();
         byte[] forged = oracle.SealFrame(0x52, "forged"u8);
         forged[^1] ^= 0xFF;
 
-        // Subscribe before sending: on a fast machine the genuine frame can be delivered
-        // before a subscription added after the sends would attach.
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         conn.Received += p => got.TrySetResult(p.ToArray());
 
@@ -829,7 +776,7 @@ public class CryptoTests
         Assert.Equal("genuine"u8.ToArray(), await got.Task.WaitAsync(Timeout));
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 2);
-        Assert.Equal(1, conn.Stats.DatagramsReceived); // the replay did not double-deliver
+        Assert.Equal(1, conn.Stats.DatagramsReceived);
     }
 
     [Fact]
@@ -867,7 +814,7 @@ public class CryptoTests
 
         using var deadline = new CancellationTokenSource(Timeout);
         Task<PinholeConnection> dial = node.ConnectAsync(oracle.StringPointingAt(oracle.Ep).ToString(), deadline.Token);
-        await oracle.ShakeHandsAsync(node, deadline.Token); // the peer's new connection has new ephemeral keys
+        await oracle.ShakeHandsAsync(node, deadline.Token);
         await using var connected = await dial.WaitAsync(Timeout);
         Assert.Same(incoming.Public, connected);
         Assert.Equal(oracle.Identity.PublicKey, incoming.PinnedStaticKey);
@@ -919,7 +866,7 @@ public class CryptoTests
         byte[] latePunch = await oracle.SendUnfinishedIncomingHandshakeAsync(node, confirmed);
         ConnState previous = node.Engine.Lookup(oracle.PeerId)!;
         Assert.Equal(confirmed, previous.Crypto!.PeerConfirmed);
-        Assert.False(previous.Handshake.RemoteTokenAuthenticated); // key proof precedes the first sealed frame
+        Assert.False(previous.Handshake.RemoteTokenAuthenticated);
         await previous.Public!.CloseAsync();
         await oracle.Sock.SendToAsync(latePunch, new IPEndPoint(IPAddress.Loopback, node.LocalPort));
         if (confirmed)
@@ -930,7 +877,7 @@ public class CryptoTests
         else
         {
             await TestPoll.UntilAsync(Timeout, () => node.Engine.Lookup(oracle.PeerId) is not null);
-            Assert.NotSame(previous, node.Engine.Lookup(oracle.PeerId)); // an unproved latch cannot reserve its keys
+            Assert.NotSame(previous, node.Engine.Lookup(oracle.PeerId));
         }
     }
 
@@ -1014,10 +961,7 @@ public class CryptoTests
     [Fact]
     public async Task WireOracle_CorruptedCloneDoesNotBurnTheCounter()
     {
-        // A frame corrupted in flight carries the genuine counter. The receiver must
-        // refuse the corrupted clone on its tag and still deliver the genuine frame
-        // that follows: the replay window advances only on authenticated frames
-        // (RFC 4303 §3.4.3), so the clone consumes nothing.
+
         await using PinholeNode node = await PinholeNode.BindAsync(Opts(o => o with { ConnectTimeout = TimeSpan.FromSeconds(5) }));
         using var oracle = new OraclePeer();
         oracle.Sock.Bind(new IPEndPoint(IPAddress.Loopback, 0));
@@ -1033,12 +977,12 @@ public class CryptoTests
         byte[] genuine = oracle.SealFrame(0x52, "genuine"u8);
         byte[] corrupted = (byte[])genuine.Clone();
         corrupted[^1] ^= 0xFF;
-        oracle.Sock.SendTo(corrupted, nodeEp); // the clone lands first
+        oracle.Sock.SendTo(corrupted, nodeEp);
         oracle.Sock.SendTo(genuine, nodeEp);
 
         Assert.Equal("genuine"u8.ToArray(), await got.Task.WaitAsync(Timeout));
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => conn.FramesRejected >= 1);
-        Assert.Equal(1, conn.Stats.DatagramsReceived); // delivered once, the clone refused
+        Assert.Equal(1, conn.Stats.DatagramsReceived);
     }
 
     [Fact]
@@ -1053,13 +997,9 @@ public class CryptoTests
         PinholeConnection conn = await dial;
         conn.Ping();
 
-        // Everything the node sends after the handshake must open under the session keys —
-        // and only under them.
         (byte type, byte[] body)? frame = await oracle.ReceiveSealedAsync(TimeSpan.FromSeconds(5), wantType: 0x53);
         Assert.NotNull(frame);
-        // Caller pings carry the 8-byte timestamp first and are padded to the guaranteed
-        // wire floor behind it: peers size their path MTU from inbound Ping frames, and a
-        // sub-floor ping would shrink a legacy peer's payload budget below zero.
+
         Assert.True(frame!.Value.body.Length >= 8, $"ping body lost its timestamp: {frame.Value.body.Length} bytes");
         Assert.InRange(frame.Value.body.Length, 8, 1300);
     }

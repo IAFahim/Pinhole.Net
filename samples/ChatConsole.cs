@@ -1,13 +1,12 @@
 using System.Text;
 using Pinhole;
 
-// Shared console UI. Both samples use the same Send/Receive API once connected.
 internal static class ChatConsole
 {
     internal static async Task RunAsync(PinholeConnection peer, CancellationToken ct,
         Task<string?>? pendingInput = null)
     {
-        // Changing InputEncoding replaces Console.In and can discard prefetched lines.
+
         if (Console.InputEncoding.CodePage != Encoding.UTF8.CodePage)
             Console.InputEncoding = Encoding.UTF8;
         Console.OutputEncoding = Encoding.UTF8;
@@ -17,8 +16,7 @@ internal static class ChatConsole
         Task receiving = ReceiveAsync(peer, stop.Token);
         Task sending = Task.Run(async () =>
         {
-            // Console input blocks, so keep it off the receive loop's thread.
-            // Reuse a read started at the invitation prompt, so it cannot steal a chat line.
+
             while (!stop.IsCancellationRequested)
             {
                 string? line = pendingInput is null ? Console.ReadLine()

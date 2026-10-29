@@ -70,8 +70,7 @@ public sealed class PinholeHost : IAsyncDisposable
 
     private async Task KeepaliveAsync()
     {
-        // Refresh at the default-directory TTL/3 so one lost datagram cannot expire
-        // the code; the delete on dispose still ends the registration promptly.
+
         while (!_shutdown.IsCancellationRequested)
         {
             try
@@ -92,11 +91,7 @@ public sealed class PinholeHost : IAsyncDisposable
             }
             else
             {
-                // Desired state: the code maps to this host's live string. A refresh that
-                // comes back NOCODE means the directory lost the code (restart, eviction)
-                // and must not be retried with a token forever — reconcile by claiming
-                // again. If another host grabbed the code in the gap the claim draws TokB
-                // and the next refresh interval retries.
+
                 if (await _directory!.RefreshAsync(Code, _token, _node.ConnectionString, _shutdown.Token).ConfigureAwait(false)
                     == CodeDirectory.RefreshOutcome.NoCode)
                 {
@@ -122,15 +117,14 @@ public sealed class PinholeHost : IAsyncDisposable
         if (staticKey is not null) payload.Write(staticKey);
         if (endpointKey is not null) payload.Write(endpointKey);
         SHA256.HashData(payload.GetBuffer().AsSpan(0, (int)payload.Length), hash);
-        return FormatBase32(hash[..10]); // 80 bits, formatted by the caller in groups
+        return FormatBase32(hash[..10]);
     }
 
     internal static string FormatConfirmation(string raw) => $"{raw[..4]}-{raw[4..8]}-{raw[8..12]}-{raw[12..16]}";
 
     internal static string NewCode()
     {
-        // Crockford-ish alphabet: no I, L, O, U, 0, 1 — unambiguous to read aloud.
-        // Crockford's 32: no I, L, O, or U — unambiguous to read aloud.
+
         const string alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
         Span<char> code = stackalloc char[9];
         RandomNumberGenerator.GetItems(alphabet, code);
@@ -198,8 +192,7 @@ public static class PinholeSession
         PinholeNode node = await PinholeNode.BindAsync(WithOptions(settings.NodeOptions), ct).ConfigureAwait(false);
         try
         {
-            // A 45-bit random code colliding with a live claim is an astronomical event;
-            // a fresh claim on retry still handles it (and any hostile squatting).
+
             for (int attempt = 0; ; attempt++)
             {
                 string code = PinholeHost.NewCode();
@@ -242,9 +235,7 @@ public static class PinholeSession
         try
         {
             PinholeConnection connection = await node.ConnectAsync(invitation, ct).ConfigureAwait(false);
-            // The connection rides this node's engine: dispose the node when the session
-            // ends so its sockets, relays, and timers retire with the connection. Disposing
-            // the returned connection (or the peer closing it) is the documented exit.
+
             _ = connection.Closed.ContinueWith(
                 async _ => await node.DisposeAsync().ConfigureAwait(false),
                 TaskScheduler.Default);
@@ -264,7 +255,7 @@ internal sealed class CodeDirectory
 {
     internal static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(40);
     private static readonly TimeSpan ReplyWait = TimeSpan.FromSeconds(2);
-    private const int MaxCodeRecordLength = 8 * 1024; // keep UDP framing within the macOS datagram limit
+    private const int MaxCodeRecordLength = 8 * 1024;
 
     private readonly IPEndPoint[] _servers;
 
@@ -343,7 +334,7 @@ internal sealed class CodeDirectory
                 }
                 catch (FormatException)
                 {
-                    // A lying directory cannot be argued with; treat as absence.
+
                 }
             }
 
@@ -385,7 +376,7 @@ internal sealed class CodeDirectory
             }
             catch (SocketException)
             {
-                continue; // one dead server is not a verdict on the others
+                continue;
             }
 
             if (res.RemoteEndPoint is not IPEndPoint from || !IsConfiguredServer(from))
@@ -396,8 +387,7 @@ internal sealed class CodeDirectory
             string reply = Encoding.ASCII.GetString(buffer, 0, res.ReceivedBytes).Trim();
             if (answerChallenge is not null && reply.StartsWith("CHAL ", StringComparison.Ordinal))
             {
-                // The cookie proves this endpoint receives; it is keyed to the endpoint
-                // itself, so the retry goes back to the challenging server only.
+
                 if (answerChallenge(reply) is { } retry)
                 {
                     await udp.SendToAsync(Encoding.ASCII.GetBytes(retry), SocketFlags.None, from, deadline.Token).ConfigureAwait(false);

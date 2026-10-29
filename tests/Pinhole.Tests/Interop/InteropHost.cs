@@ -1,6 +1,5 @@
-// Interop harness host: copied into a git worktree of another release commit and
-// compiled against that tree's sources. Keep this file to the API surface that exists
-// on every release under test (serve, ticket, download, infrastructure-free options).
+
+
 using System.Net;
 using Pinhole;
 using Pinhole.Blobs;
@@ -15,7 +14,7 @@ PinholeOptions OfflineLoopback() => new()
     EnablePortMapping = false,
     EnableLanDiscovery = false,
     EnablePathValidation = false,
-    ReceiveBufferCapacity = 16, // echo/dial modes need ReceiveAsync, which requires a buffer at bind
+    ReceiveBufferCapacity = 16,
 };
 
 switch (args[0])
@@ -38,9 +37,7 @@ switch (args[0])
     }
     case "echo":
     {
-        // Old node as the reachable side: prints its connection string, accepts one
-        // peer, and echoes datagrams until killed. Exercises the 1.9.0 datagram API a
-        // game would use, not just the blob layer.
+
         await using var node = await PinholeNode.BindAsync(OfflineLoopback());
         Console.WriteLine("TICKET " + node.ConnectionString);
         await using var peer = await node.AcceptAsync();
@@ -56,8 +53,7 @@ switch (args[0])
     }
     case "dial":
     {
-        // Old node as the dialer: connects to the current side's connection string,
-        // then echoes datagrams until killed.
+
         await using var node = await PinholeNode.BindAsync(OfflineLoopback());
         await using var peer = await node.ConnectAsync(args[1]);
         Console.WriteLine($"PEER encrypted={peer.IsEncrypted} kind={peer.Path.Kind}");

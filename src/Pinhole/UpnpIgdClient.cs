@@ -45,7 +45,7 @@ internal sealed class UpnpIgdClient : IDisposable
     private static async Task<List<Uri>> DiscoverAsync(IPEndPoint? unicast, CancellationToken ct)
     {
         var locations = new List<Uri>();
-        TimeSpan window = unicast is null ? SsdpWindow : TimeSpan.FromMilliseconds(300); // unicast replies are immediate; multicast needs the full window
+        TimeSpan window = unicast is null ? SsdpWindow : TimeSpan.FromMilliseconds(300);
         using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
         {
             ReceiveTimeout = (int)window.TotalMilliseconds,
@@ -58,8 +58,6 @@ internal sealed class UpnpIgdClient : IDisposable
         _ = udp.SendTo(msearch1, SocketFlags.None, target);
         _ = udp.SendTo(msearch2, SocketFlags.None, target);
 
-        // Responses are unicast to our ephemeral port; collect LOCATION headers until the
-        // window closes. Duplicate locations across the two search targets are expected.
         var buf = new byte[2048];
         long deadline = Environment.TickCount64 + (long)window.TotalMilliseconds;
         var seen = new HashSet<Uri>();
@@ -110,7 +108,7 @@ internal sealed class UpnpIgdClient : IDisposable
     internal static bool IsRouterAddress(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
-        if (IPAddress.IsLoopback(address)) return true; // explicit local fixtures
+        if (IPAddress.IsLoopback(address)) return true;
         if (address.AddressFamily == AddressFamily.InterNetworkV6) return address.IsIPv6LinkLocal || (address.GetAddressBytes()[0] & 0xfe) == 0xfc;
         byte[] bytes = address.GetAddressBytes();
         return bytes[0] == 10 || bytes[0] == 172 && bytes[1] is >= 16 and <= 31
@@ -158,7 +156,7 @@ internal sealed class UpnpIgdClient : IDisposable
             IPAddress? externalIp = await TryGetExternalIpAsync(controlUrl, serviceType, ct).ConfigureAwait(false);
             if (externalIp is null)
             {
-                continue; // without the public address the mapping is not advertizable
+                continue;
             }
 
             IPAddress localIp = LocalAddressTowards(controlUrl.Host);
@@ -170,8 +168,6 @@ internal sealed class UpnpIgdClient : IDisposable
                 continue;
             }
 
-            // The lease owns its HTTP client. Disposing discovery cannot break later
-            // renewals/releases, which used to share this short-lived client's handle.
             return new UpnpMapping(CreateHttpClient(), controlUrl, serviceType, new IPEndPoint(externalIp, result.externalPort),
                 internalPort, localIp, result.wireLease, lease, protocol);
         }
@@ -181,8 +177,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
     internal static List<(string ServiceType, Uri ControlUrl)> FindConnectionServices(XDocument description, Uri baseUrl)
     {
-        // Namespace-agnostic walk: device trees vary more than the spec admits, and a
-        // strict namespace match silently loses routers that ship creative XML.
+
         string[] preference =
         [
             "urn:schemas-upnp-org:service:WANIPConnection:2",
@@ -274,16 +269,14 @@ internal sealed class UpnpIgdClient : IDisposable
         }
         catch (UpnpFaultException)
         {
-            return null; // IGDv1 devices do not know the action; the AddPortMapping fallback is next
+            return null;
         }
     }
 
     private async Task<(int Port, int WireLease)?> TryAddPortAsync(Uri controlUrl, string serviceType,
         int internalPort, IPAddress localIp, TimeSpan lease, CancellationToken ct, ProtocolType protocol)
     {
-        // IGDv1 has no "pick a port" action: try our own port first (the best case — the
-        // reflexive candidate then matches the mapped one), then a couple past it. A 725
-        // fault means "only permanent leases supported" and is retried with an infinite one.
+
         for (int attempt = 0; attempt < 3; attempt++)
         {
             int external = internalPort + attempt;
@@ -315,7 +308,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
             if (fault != 718)
             {
-                return null; // conflict is retryable; anything else is this device's final word
+                return null;
             }
         }
 
@@ -371,11 +364,11 @@ internal sealed class UpnpIgdClient : IDisposable
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or SocketException or OperationCanceledException)
         {
-            return null; // transport failure: this device's answer is silence
+            return null;
         }
         catch (UpnpFaultException)
         {
-            throw; // SOAP faults are meaningful to the caller, not transport noise
+            throw;
         }
     }
 
@@ -405,8 +398,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
     private static IPAddress LocalAddressTowards(string host)
     {
-        // Which local address routes to the IGD: a zero-byte "connect" on a UDP socket
-        // performs no traffic yet makes the OS choose the source address.
+
         try
         {
             if (!IPAddress.TryParse(host, out IPAddress? ip))
@@ -439,8 +431,7 @@ internal sealed class UpnpIgdClient : IDisposable
 
         public async Task<bool> RenewAsync(CancellationToken ct)
         {
-            // Renew the exact granted port. AddAny with external=0 could allocate a
-            // different entry, leave the first one behind, and publish a stale address.
+
             try
             {
                 string args =

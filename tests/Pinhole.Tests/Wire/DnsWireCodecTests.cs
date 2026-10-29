@@ -7,12 +7,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// Differential oracles for DnsWireCodec against the production DNS code: the
-// internal Pinhole.DnsCodec (mDNS announcements/queries, TXT peer records) and
-// Pinhole.IrohDiscovery (pkarr DNS-TXT payloads) are called directly through
-// InternalsVisibleTo; IrohDiscovery.Signable is private and reached through a
-// compiled delegate because span parameters cannot be boxed. Everything here is
-// seeded and socket-free: no network, no timing, no filesystem.
 public sealed class DnsWireCodecTests
 {
     private const string Service = "_pinhole._udp.local";
@@ -25,8 +19,6 @@ public sealed class DnsWireCodecTests
     private sealed record DnsRecordSpec(string Name, ushort Type, ushort Class, uint Ttl, byte[] Rdata);
 
     private sealed record GeneratedDns(DnsQuestion[] Questions, DnsRecordSpec[] Records);
-
-    // ---- 1. header ----
 
     [Fact]
     public void Header_GoldenBytes_RoundTripAndBounds()
@@ -43,7 +35,6 @@ public sealed class DnsWireCodecTests
         Assert.Equal(0, header.Authorities);
         Assert.Equal(2, header.Additionals);
 
-        // generic header read: id and flags pass through untouched
         Assert.True(DnsWireCodec.TryReadHeader(Convert.FromHexString("ABCD12340001000200030004"), out DnsHeader passthrough));
         Assert.Equal((ushort)0xABCD, passthrough.Id);
         Assert.Equal((ushort)0x1234, passthrough.Flags);
@@ -61,8 +52,6 @@ public sealed class DnsWireCodecTests
         Assert.Throws<ArgumentOutOfRangeException>(() => DnsWireCodec.WriteHeader(buffer, new DnsHeader(0, 0, 0, -1, 0, 0)));
     }
 
-    // ---- 2. names: labels, pointers, sizes ----
-
     [Fact]
     public void Names_LabelsPointersAndBoundaries_MirrorDnsCodecRules()
     {
@@ -74,35 +63,29 @@ public sealed class DnsWireCodecTests
         int cursor = 0;
         Assert.True(DnsWireCodec.TryReadName(buffer.AsSpan(0, n), ref cursor, out string? name));
         Assert.Equal(Service, name);
-        Assert.Equal(n, cursor); // advanced past the terminator, DnsCodec.Reader semantics
+        Assert.Equal(n, cursor);
 
-        // compression pointer reading: a pointer to an earlier name yields the
-        // same string and advances the cursor by exactly two bytes
         byte[] pointerMessage = Convert.FromHexString("0377777700" + "C000");
         cursor = 5;
         Assert.True(DnsWireCodec.TryReadName(pointerMessage, ref cursor, out string? pointed));
         Assert.Equal("www", pointed);
         Assert.Equal(7, cursor);
 
-        // backward pointer chain of exactly 128 follows is accepted
         byte[] chain = BuildPointerChain(128, out int start128);
         cursor = start128;
         Assert.True(DnsWireCodec.TryReadName(chain, ref cursor, out string? chained));
-        Assert.Equal("", chained); // resolves to the lone root at offset 0
+        Assert.Equal("", chained);
 
-        // 129 follows exceeds MaxNameJumps: refused, not spun
         byte[] tooLong = BuildPointerChain(129, out int start129);
         cursor = start129;
         Assert.False(DnsWireCodec.TryReadName(tooLong, ref cursor, out _));
-        Assert.Equal(start129, cursor); // cursor untouched on failure
+        Assert.Equal(start129, cursor);
 
-        // self and forward pointers are refused (DnsCodec: target >= pos)
         cursor = 0;
         Assert.False(DnsWireCodec.TryReadName(Convert.FromHexString("C000"), ref cursor, out _));
         cursor = 1;
         Assert.False(DnsWireCodec.TryReadName(Convert.FromHexString("00C002"), ref cursor, out _));
 
-        // length bytes 64..191 are neither labels nor pointers
         byte[] length64 = new byte[66];
         length64[0] = 64;
         cursor = 0;
@@ -111,21 +94,18 @@ public sealed class DnsWireCodecTests
         cursor = 0;
         Assert.False(DnsWireCodec.TryReadName(length64, ref cursor, out _));
 
-        // rule 7: sum(label bytes + one length byte per label) capped at 255
-        byte[] at255 = BuildNameBytes(63, 63, 62, 63); // 4*64 - 1 = 255
+        byte[] at255 = BuildNameBytes(63, 63, 62, 63);
         cursor = 0;
         Assert.True(DnsWireCodec.TryReadName(at255, ref cursor, out string? big));
         Assert.Equal(4, big!.Split('.').Length);
-        byte[] over255 = BuildNameBytes(63, 63, 63, 63); // 256
+        byte[] over255 = BuildNameBytes(63, 63, 63, 63);
         cursor = 0;
         Assert.False(DnsWireCodec.TryReadName(over255, ref cursor, out _));
 
-        // rule 8: label bytes >= 0x80 are rejected here; DnsCodec maps them to '?'
         byte[] highByte = [0x02, 0xC3, 0xA0, 0x00];
         cursor = 0;
         Assert.False(DnsWireCodec.TryReadName(highByte, ref cursor, out _));
 
-        // the root name reads as "" (mirrors DnsCodec); WriteName cannot produce it
         byte[] root = [0x00];
         cursor = 0;
         Assert.True(DnsWireCodec.TryReadName(root, ref cursor, out string? empty));
@@ -144,7 +124,7 @@ public sealed class DnsWireCodecTests
 
     private static byte[] BuildPointerChain(int pointers, out int start)
     {
-        // offset 0 is the bare root; every pointer aims at the previous one
+
         byte[] message = new byte[1 + 2 * pointers];
         int previous = 0;
         start = 0;
@@ -183,8 +163,6 @@ public sealed class DnsWireCodecTests
         return name;
     }
 
-    // ---- 3. queries: byte-exact with Writer + AsksFor differential ----
-
     [Fact]
     public void Query_ByteExactWithWriter_AndAsksForServiceDifferential()
     {
@@ -199,14 +177,12 @@ public sealed class DnsWireCodecTests
         var w = new DnsCodec.Writer();
         w.Header(flags: 0x0000, questions: 1, answers: 0, 0, 0);
         w.WritePtrQuestion(Service);
-        Assert.Equal(w.ToArray(), golden); // the golden bytes are exactly the production query
+        Assert.Equal(w.ToArray(), golden);
 
         Assert.True(DnsWireCodec.AsksForService(golden, Service));
         Assert.True(DnsCodec.AsksForOurService(golden));
         Assert.False(DnsWireCodec.AsksForService(golden, "_http._tcp.local"));
 
-        // predicate parity on seeded shapes: type PTR, class masked to IN/ANY,
-        // name case-insensitive, matching question anywhere in the list
         var rng = new Random(0x0D05_0001);
         for (int i = 0; i < 400; i++)
         {
@@ -217,7 +193,7 @@ public sealed class DnsWireCodecTests
                 0 => DnsWireCodec.ClassAny,
                 1 => DnsWireCodec.ClassIn,
                 2 => DnsWireCodec.ClassIn | DnsWireCodec.CacheFlushBit,
-                3 => 3, // CH: no match
+                3 => 3,
                 _ => rng.Next(0, 0x10000),
             });
 
@@ -245,8 +221,6 @@ public sealed class DnsWireCodecTests
         return buffer[..(buffer.Length - cursor.Length)].ToArray();
     }
 
-    // ---- 4. announcements: byte-exact with Writer + identical re-read ----
-
     [Fact]
     public void Announcement_ByteExactWithWriter_AndTryReadsIdenticalValues()
     {
@@ -258,7 +232,7 @@ public sealed class DnsWireCodecTests
             NatHint hint = (NatHint)rng.Next(3);
             IPAddress[] addresses = RandomUsableAddresses(rng, 1 + rng.Next(4));
             int port = rng.Next(1, 65536);
-            uint ttl = i % 7 == 0 ? 0u : 120u; // goodbye included
+            uint ttl = i % 7 == 0 ? 0u : 120u;
 
             byte[] mine = ComposeAnnouncementMine(peerId, key, hint, addresses, port, ttl);
             byte[] oracle = ComposeAnnouncementWriter(peerId, key, hint, addresses, port, ttl);
@@ -307,8 +281,6 @@ public sealed class DnsWireCodecTests
         }
     }
 
-    // ---- 5. peer payloads through the production TryParsePeers ----
-
     [Fact]
     public void Announcement_ProductionTryParsePeers_AgreesOnEveryField()
     {
@@ -333,7 +305,6 @@ public sealed class DnsWireCodecTests
                 peer.Endpoints.ToArray());
         }
 
-        // two peers in one packet parse to two peers, in PTR order
         ulong first = 0x1111111111111111, second = 0x2222222222222222;
         byte[] multi = ComposeTwoPeerAnnouncement(first, second, out IPEndPoint[] expectedFirst, out IPEndPoint[] expectedSecond);
         Assert.True(DnsWireCodec.TryReadMessage(multi, out _));
@@ -342,9 +313,6 @@ public sealed class DnsWireCodecTests
         Assert.Equal(expectedFirst, both[0].Endpoints.ToArray());
         Assert.Equal(expectedSecond, both[1].Endpoints.ToArray());
 
-        // pinned quirks of TryParsePeers (application rules, not wire rules): a
-        // non-hex instance name or an SRV port of zero leaves no buildable peer,
-        // so the packet yields false even though the wire format is canonical
         byte[] badInstance = ComposeAnnouncementMine(0, null, NatHint.Unknown, [IPAddress.Parse("192.0.2.1")], 5000, 120, instance: "not-hex-at-all");
         Assert.True(DnsWireCodec.TryReadMessage(badInstance, out _));
         Assert.False(DnsCodec.TryParsePeers(badInstance, out _));
@@ -356,13 +324,10 @@ public sealed class DnsWireCodecTests
         Assert.False(DnsCodec.TryParsePeers(zeroPort, out _));
     }
 
-    // ---- 6. TXT framing ----
-
     [Fact]
     public void Txt_FramingGoldens_EntriesAndChunkedText()
     {
-        // mDNS TXT record golden: owner a.b, TXT, cache-flush class, ttl 120,
-        // one DNS string "k=v"
+
         byte[] golden = Convert.FromHexString("01610162" + "00" + "0010" + "8001" + "00000078" + "0004" + "036B3D76");
         byte[] buffer = new byte[64];
         int n = DnsWireCodec.WriteTxtRecord(buffer, "b", "a", [("k", "v")], 120);
@@ -376,7 +341,6 @@ public sealed class DnsWireCodecTests
         Assert.Equal("k", entries![0].Key);
         Assert.Equal("v", entries[0].Value);
 
-        // strings without '=' (or with it at index 0) are skipped, mirroring ParseTxt
         Assert.True(DnsWireCodec.TryReadTxtEntries([0x03, (byte)'a', (byte)'=', (byte)'1', 0x02, (byte)'x', (byte)'y', 0x02, (byte)'=', (byte)'z'], out entries));
         (string Key, string Value) skipped = Assert.Single(entries!);
         Assert.Equal("a", skipped.Key);
@@ -384,11 +348,9 @@ public sealed class DnsWireCodecTests
         Assert.True(DnsWireCodec.TryReadTxtEntries([], out entries));
         Assert.Empty(entries!);
 
-        // writer guards
         Assert.Throws<ArgumentException>(() => DnsWireCodec.WriteTxtStrings(buffer, [new string('a', 256)]));
         Assert.Throws<ArgumentException>(() => DnsWireCodec.WriteTxtStrings(buffer, ["näch"]));
 
-        // pkarr text chunking: <=255-byte strings, one length byte each
         var rng = new Random(0x0D05_0004);
         foreach (int length in new[] { 0, 1, 254, 255, 256, 509, 510, 511, 600 })
         {
@@ -409,18 +371,14 @@ public sealed class DnsWireCodecTests
         Assert.True(DnsWireCodec.TryReadTxtText([], out string? emptyText));
         Assert.Equal("", emptyText);
 
-        // multi-byte UTF-8 text round-trips; the same bytes are not ASCII entries
-        byte[] accentedRdata = [0x08, 0x68, 0xC3, 0xA9, 0x20, 0xE2, 0x9C, 0x93, 0x00]; // "hé ✓" + NUL
+        byte[] accentedRdata = [0x08, 0x68, 0xC3, 0xA9, 0x20, 0xE2, 0x9C, 0x93, 0x00];
         Assert.False(DnsWireCodec.TryReadTxtEntries(accentedRdata, out _));
         Assert.True(DnsWireCodec.TryReadTxtText(accentedRdata, out string? decoded));
         Assert.Equal("hé ✓\0", decoded);
 
-        // a string length byte that overruns the rdata is refused by both flavors
         Assert.False(DnsWireCodec.TryReadTxtEntries([0x03, 0x61, 0x3D], out _));
         Assert.False(DnsWireCodec.TryReadTxtText([0x05, 0x68, 0x65, 0x6C, 0x6C], out _));
     }
-
-    // ---- 7. pkarr payload: byte-exact with IrohDiscovery both ways ----
 
     [Fact]
     public void Pkarr_TxtPayload_ByteExactWithCreatePayload_AndParsePayloadBothWays()
@@ -448,8 +406,6 @@ public sealed class DnsWireCodecTests
         byte[] mine = ComposePkarrDns(key, values);
         Assert.Equal(dns, mine);
 
-        // the pkarr compression form: first owner full, every later one C0 0C
-        // (first record: 12 header + owner.Length + 2 wire + 10 tail + 1 length byte + text)
         int secondStart = DnsWireCodec.HeaderSize + (owner.Length + 2) + 10 + 1 + values[0].Length;
         Assert.Equal(0xC0, mine[secondStart]);
         Assert.Equal(12, mine[secondStart + 1]);
@@ -459,7 +415,7 @@ public sealed class DnsWireCodecTests
         Assert.Equal(4, parsed.Records.Length);
         foreach (DnsResourceRecord record in parsed.Records)
         {
-            Assert.Equal(owner, record.Name); // pointer decompression agrees with ReadTxt
+            Assert.Equal(owner, record.Name);
             Assert.Equal(DnsWireCodec.TypeTxt, record.Type);
             Assert.Equal(DnsWireCodec.ClassIn, record.Class);
             Assert.Equal(60u, record.Ttl);
@@ -467,7 +423,6 @@ public sealed class DnsWireCodecTests
             Assert.Contains(text!, values);
         }
 
-        // my bytes, re-signed, are accepted by the production parser
         byte[] resigned = SignPkarr(identity, 1_724_000_000_000_000, mine);
         IrohAddress parsedBack = IrohDiscovery.ParsePayload(key, resigned, out ulong timestamp);
         Assert.Equal(1_724_000_000_000_000UL, timestamp);
@@ -476,8 +431,6 @@ public sealed class DnsWireCodecTests
         Assert.Equal("héllo ✓", parsedBack.UserData);
         Assert.Empty(parsedBack.DerpRelayUrls);
 
-        // audit C-06 pinned: IrohDiscovery THROWS on malformed UTF-8 in TXT text;
-        // the canonical codec returns false instead, never throwing
         byte[] badRdata = [0x02, 0xC3, 0x28];
         Assert.False(DnsWireCodec.TryReadTxtText(badRdata, out _));
         byte[] badDns = ComposePkarrDns(key, ["user-data=ok"], overrideRdata: badRdata);
@@ -527,23 +480,19 @@ public sealed class DnsWireCodecTests
         return buffer[..(buffer.Length - cursor.Length)].ToArray();
     }
 
-    // ---- 8. explicit non-canonical rejections (rule numbers per DnsWireCodec) ----
-
     [Fact]
     public void Rejections_NonCanonicalForms_AndPinnedParserDivergences()
     {
         byte[] announcement = ComposeAnnouncementMine(0x1122334455667788, null, NatHint.Cone, [IPAddress.Parse("192.168.1.42")], 7777, 120);
         Assert.True(DnsWireCodec.TryReadMessage(announcement, out _));
 
-        // rule 1: zero transaction id, at least 12 bytes
         Assert.False(DnsWireCodec.TryReadMessage([], out _));
         Assert.False(DnsWireCodec.TryReadMessage(announcement[..11], out _));
         byte[] withId = (byte[])announcement.Clone();
         withId[0] = 1;
         Assert.False(DnsWireCodec.TryReadMessage(withId, out _));
-        Assert.False(DnsCodec.AsksForOurService(withId)); // DnsCodec agrees on the zero-id rule
+        Assert.False(DnsCodec.AsksForOurService(withId));
 
-        // rule 2: at most 256 records
         byte[] manyRecords = new byte[600];
         Span<byte> cursor = manyRecords;
         cursor = cursor[DnsWireCodec.WriteHeader(cursor, new DnsHeader(0, 0, 0, 300, 0, 0))..];
@@ -554,7 +503,6 @@ public sealed class DnsWireCodecTests
 
         Assert.False(DnsWireCodec.TryReadMessage(manyRecords.AsSpan(0, manyRecords.Length - cursor.Length), out _));
 
-        // rule 3: counts larger than the records present, and truncated rdata
         byte[] missing = new byte[64];
         cursor = missing;
         cursor = cursor[DnsWireCodec.WriteHeader(cursor, new DnsHeader(0, 0, 0, 2, 0, 0))..];
@@ -562,35 +510,28 @@ public sealed class DnsWireCodecTests
         int written = missing.Length - cursor.Length;
         Assert.False(DnsWireCodec.TryReadMessage(missing.AsSpan(0, written), out _));
         byte[] truncatedRdata = (byte[])missing.Clone();
-        truncatedRdata[26] = 5; // rdlength low byte (12 + 5-byte owner + 8) claims 5 rdata bytes, 4 present
+        truncatedRdata[26] = 5;
         Assert.False(DnsWireCodec.TryReadMessage(truncatedRdata.AsSpan(0, written), out _));
 
         byte[] questionOnly = ComposeQuery(Service, DnsWireCodec.TypePtr, DnsWireCodec.ClassIn, withJunkQuestion: false);
-        Assert.False(DnsWireCodec.TryReadMessage(questionOnly[..^1], out _)); // chopped qclass
+        Assert.False(DnsWireCodec.TryReadMessage(questionOnly[..^1], out _));
 
-        // rule 4: trailing bytes are refused here; DnsCodec.TryParsePeers is
-        // lenient about them (pinned divergence, like STUN's padding rule)
         byte[] trailing = [.. announcement, 0xFF];
         Assert.False(DnsWireCodec.TryReadMessage(trailing, out _));
         Assert.True(DnsCodec.TryParsePeers(trailing, out IReadOnlyList<LanPeer> stillParsed));
         Assert.Single(stillParsed);
 
-        // rule 8 divergence pin: DnsCodec accepts label bytes >= 0x80 (mapping
-        // them to '?'); the canonical codec rejects the whole message
         byte[] nonAsciiExtra = [0x03, 0x61, 0xC3, 0xA0, 0x00, 0x00, 0x10, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         byte[] withHighByteLabel = new byte[announcement.Length + nonAsciiExtra.Length];
         announcement.CopyTo(withHighByteLabel, 0);
         nonAsciiExtra.CopyTo(withHighByteLabel, announcement.Length);
-        withHighByteLabel[7]++; // answers count low byte: one more record
+        withHighByteLabel[7]++;
         Assert.False(DnsWireCodec.TryReadMessage(withHighByteLabel, out _));
         Assert.True(DnsCodec.TryParsePeers(withHighByteLabel, out _));
 
-        // rule 9: PTR rdata must be exactly one name (DnsCodec decompresses past
-        // the declared rdlength without checking the name ends there); SRV rdata
-        // needs at least 8 bytes
         byte[] nameBytes = new byte[80];
         int nameLength = DnsWireCodec.WriteName(nameBytes, "0123456789abcdef." + Service);
-        byte[] stretchedRdata = [.. nameBytes.AsSpan(0, nameLength).ToArray(), 0x00]; // one stray byte after the name
+        byte[] stretchedRdata = [.. nameBytes.AsSpan(0, nameLength).ToArray(), 0x00];
         byte[] r9 = new byte[200];
         cursor = r9;
         cursor = cursor[DnsWireCodec.WriteHeader(cursor, new DnsHeader(0, 0x8400, 0, 2, 0, 0))..];
@@ -601,21 +542,17 @@ public sealed class DnsWireCodecTests
         Assert.False(DnsWireCodec.TryReadPtrTarget(r9Message, r9Parsed!.Records[0], out _));
         Assert.False(DnsWireCodec.TryReadSrv(r9Message, r9Parsed.Records[1], out _));
 
-        // the exact shapes DnsCodec.Writer emits decode fine
         Assert.True(DnsWireCodec.TryReadMessage(announcement, out DnsMessage? good));
         Assert.True(DnsWireCodec.TryReadPtrTarget(announcement, good!.Records[0], out string? goodInstance));
         Assert.Equal("1122334455667788." + Service, goodInstance);
         Assert.True(DnsWireCodec.TryReadSrv(announcement, good.Records[1], out DnsSrv goodSrv));
         Assert.Equal((ushort)7777, goodSrv.Port);
 
-        // writers reject programmer errors: oversized TXT text/rdata for the span
         byte[] buffer = new byte[80];
         Assert.Throws<ArgumentException>(() => DnsWireCodec.WriteTxtText(buffer, new byte[100]));
         byte[] huge = new byte[70_000];
         Assert.Throws<ArgumentException>(() => DnsWireCodec.WriteResourceRecord(buffer, "a.b", DnsWireCodec.TypeTxt, DnsWireCodec.ClassIn, 0u, huge));
     }
-
-    // ---- 9. seeded valid messages round-trip through the generic codec ----
 
     [Fact]
     public void ValidMessages_RoundTrip_EveryQuestionAndRecord()
@@ -642,8 +579,6 @@ public sealed class DnsWireCodecTests
             }
         }
     }
-
-    // ---- 10. totality fuzz ----
 
     [Fact]
     public void TotalityFuzz_NeverThrows_NeverOutOfRange()
@@ -714,7 +649,7 @@ public sealed class DnsWireCodecTests
         }
 
         _ = DnsWireCodec.AsksForService(input, Service);
-        _ = DnsCodec.AsksForOurService(input); // the production parser must also survive
+        _ = DnsCodec.AsksForOurService(input);
         int cursor = input.Length / 3;
         if (DnsWireCodec.TryReadName(input, ref cursor, out string? name))
         {
@@ -735,8 +670,6 @@ public sealed class DnsWireCodecTests
             Assert.True(Encoding.UTF8.GetByteCount(text!) <= input.Length);
         }
     }
-
-    // ---- shared fixtures ----
 
     private static GeneratedDns GenerateMessage(Random rng, Span<byte> buffer, out int length)
     {

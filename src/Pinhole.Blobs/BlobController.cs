@@ -48,7 +48,7 @@ public sealed class BlobFlowBudget
             if (observed == used) return true;
             used = observed;
         }
-        // Failed reservations never become visible in the ledger, even briefly.
+
         return false;
     }
 
@@ -57,9 +57,6 @@ public sealed class BlobFlowBudget
     internal long UsedBytes => Interlocked.Read(ref _used);
 }
 
-// The I/O half of the congestion controller: it owns the stats sink, the trace
-// lines, and the shared BlobFlowBudget reservation, and delegates every window,
-// RTT, PTO, and pacing DECISION to the sans-IO PacerMachine (Pinhole.Core).
 internal sealed class BlobController
 {
     private readonly BlobFlowBudget _budget;
@@ -75,10 +72,6 @@ internal sealed class BlobController
 
     public long WindowBytes => _pacer.Window;
 
-    // R3/P3 observability: the two halves of the reservation ledger. They move in
-    // lockstep by construction (every budget hold is mirrored into the pacer and
-    // every release hits both); the property gate exists to catch the one code
-    // path that ever forgets a half.
     internal long BudgetReservedBytes => _budget.UsedBytes;
 
     internal long PacerInFlightBytes => _pacer.InFlight;
@@ -100,8 +93,6 @@ internal sealed class BlobController
             return false;
         }
 
-        // A refused reservation must not burn pacer credit (A-11): the commit that
-        // deducts it only runs after the budget said yes.
         if (!_budget.TryReserve(bytes))
         {
             return false;
@@ -114,8 +105,6 @@ internal sealed class BlobController
     public TimeSpan PtoFor(int retransmits) =>
         TimeSpan.FromMilliseconds(PacerMachine.PtoMs(in _pacer, retransmits));
 
-    // The stats copy of this exists only when the app attached a sink; the
-    // downloader's stall math must not depend on that option.
     public TimeSpan? SmoothedRtt => !_pacer.HaveRtt ? null : TimeSpan.FromMilliseconds(_pacer.SrttMs);
 
     public void OnChunkArrived(int chunkBytes, bool hadReservation, bool fresh, bool retransmitted, long nowMs, long index)
@@ -218,17 +207,12 @@ internal static class BlobTestHooks
         Environment.GetEnvironmentVariable("PINHOLE_BLOB_FIXED_WINDOW") is "1";
     private static readonly AsyncLocal<bool?> Override = new();
 
-    // An A/B run must not change unrelated transfers executing in parallel tests.
     public static bool ForceFixedWindow
     {
         get => Override.Value ?? DefaultFixedWindow;
         set => Override.Value = value;
     }
 
-    // CI forensics for hangs local runs cannot reproduce: when set, the downloader's
-    // control loop drops a one-line state snapshot here a few times per second.
-    // AsyncLocal for the same reason as ForceFixedWindow — parallel blob tests must
-    // never cross-write each other's timeline.
     private static readonly AsyncLocal<Action<string>?> TraceSink = new();
 
     public static Action<string>? Trace
@@ -237,10 +221,6 @@ internal static class BlobTestHooks
         set => TraceSink.Value = value;
     }
 
-    // R3/P3 ledger conservation probe: once per control-loop tick with (budget
-    // holds, pacer in-flight, live outstanding holds) — the three faces of the same
-    // reservation that must agree at every observed step and drain to zero when a
-    // stream unwinds. AsyncLocal so parallel transfers never cross-observe.
     private static readonly AsyncLocal<Action<long, long, long>?> LedgerSink = new();
 
     public static Action<long, long, long>? Ledger

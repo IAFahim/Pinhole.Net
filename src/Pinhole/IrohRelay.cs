@@ -8,7 +8,6 @@ using Org.BouncyCastle.Crypto.Signers;
 
 namespace Pinhole;
 
-// Managed implementation of the iroh-relay v1/v2 WebSocket transport, not iroh QUIC.
 internal sealed class RelayIdentity
 {
     private readonly Ed25519PrivateKeyParameters _secret;
@@ -38,9 +37,9 @@ internal sealed class RelayIdentity
         signer.Init(true, _secret);
         signer.BlockUpdate(message);
         byte[] auth = new byte[98];
-        auth[0] = 1; // ClientAuth, QUIC varint (one byte).
-        PublicKey.CopyTo(auth, 1); // postcard's fixed-size public key.
-        auth[33] = 64; // postcard serde_bytes signature length.
+        auth[0] = 1;
+        PublicKey.CopyTo(auth, 1);
+        auth[33] = 64;
         signer.GenerateSignature().CopyTo(auth, 34);
         return auth;
     }
@@ -48,7 +47,7 @@ internal sealed class RelayIdentity
 
 internal sealed class IrohRelay : IKeyedRelay
 {
-    internal const int MaxDatagramSize = 65536 - 34; // native client encoded-frame limit
+    internal const int MaxDatagramSize = 65536 - 34;
     private const int MaxMessage = 1024 * 1024;
     private readonly RelayIdentity _identity;
     private readonly CancellationTokenSource _stop = new();
@@ -102,9 +101,9 @@ internal sealed class IrohRelay : IKeyedRelay
     {
         if (!IsAlive || destination.Length != 32 || payload.Length is 0 or > MaxDatagramSize) return false;
         byte[] frame = new byte[34 + payload.Length];
-        frame[0] = 4; // ClientToRelayDatagram.
+        frame[0] = 4;
         destination.CopyTo(frame.AsSpan(1, 32));
-        frame[33] = 0; // No ECN marking.
+        frame[33] = 0;
         payload.CopyTo(frame.AsSpan(34));
         return _outgoing.Writer.TryWrite(frame);
     }
@@ -136,7 +135,7 @@ internal sealed class IrohRelay : IKeyedRelay
                         throw new InvalidDataException("relay rejected authentication");
                 }
 
-                failures = 0; // authenticated: the next drop starts the ladder from the bottom again
+                failures = 0;
                 LastError = null;
                 Volatile.Write(ref _alive, 1);
                 _ready.TrySetResult();
@@ -151,8 +150,7 @@ internal sealed class IrohRelay : IKeyedRelay
             catch (Exception ex) when (ex is WebSocketException or HttpRequestException or IOException
                 or OperationCanceledException or InvalidDataException)
             {
-                // InvalidDataException included: a relay that answers garbage must cost a
-                // reconnect cycle, not silently kill this relay's loop forever.
+
                 LastError = ex.Message;
             }
             finally
@@ -203,7 +201,7 @@ internal sealed class IrohRelay : IKeyedRelay
             if (frame.Length == 0) throw new InvalidDataException("empty relay frame");
             if (frame[0] == 9 && frame.Length == 9)
             {
-                frame[0] = 10; // Protocol pong (not a WebSocket pong).
+                frame[0] = 10;
                 if (!_outgoing.Writer.TryWrite(frame)) throw new IOException("relay send queue is full");
             }
             else if (frame[0] is 6 or 7)

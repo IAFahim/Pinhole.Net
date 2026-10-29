@@ -20,9 +20,7 @@ internal sealed class DatagramBuffer
 
     public void Enqueue(ReadOnlySpan<byte> payload)
     {
-        // Count actual evictions through the channel's callback. Queue length is
-        // unchanged when a waiting reader takes a new item directly, and a concurrent
-        // reader can change it between snapshots without any overflow at all.
+
         _channel.Writer.TryWrite(payload.ToArray());
     }
 
@@ -34,7 +32,7 @@ internal sealed class DatagramBuffer
         }
         catch (ChannelClosedException)
         {
-            return null; // EOF comes only after every buffered datagram was drained
+            return null;
         }
     }
 

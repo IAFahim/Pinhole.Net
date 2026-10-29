@@ -1,8 +1,5 @@
-// sendme, the Pinhole edition: one ticket moves a file or a whole directory between
-// machines — chunk-verified while streaming, encrypted end to end, resumable across
-// restarts, using direct UDP/TCP or the configured relay fallback.
-//   dotnet run --project samples/Pinhole.Send -- send ~/photos.tar       # prints a ticket, serves until Ctrl-C
-//   dotnet run --project samples/Pinhole.Send -- recv <ticket> ~/dl      # downloads into ~/dl
+
+
 using System.Diagnostics;
 using Pinhole.Blobs;
 

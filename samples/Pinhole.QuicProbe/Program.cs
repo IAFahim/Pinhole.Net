@@ -40,7 +40,7 @@ internal static partial class Probe
                 report.Reason = "This desktop probe uses the public API's Windows, Linux and macOS platform surface.";
                 return 2;
             }
-            // Inspect the installed public API, not the native implementation's features.
+
             report.UnreliableDatagramApi = typeof(QuicConnection).GetMembers()
                 .Any(member => member.Name.Contains("Datagram", StringComparison.OrdinalIgnoreCase));
             report.ConnectionSupported = QuicConnection.IsSupported;
@@ -157,7 +157,7 @@ internal static partial class Probe
         await using var outgoing = await client.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, cancellationToken);
         Task echo = EchoAsync(server, cancellationToken);
         Task<Measurements> measure = MeasureAsync(outgoing, connectWatch, cancellationToken);
-        // MeasureAsync sends data before EchoAsync can accept the stream.
+
         await Task.WhenAll(echo, measure);
         Measurements measurements = await measure;
         await client.CloseAsync(0, cancellationToken);
@@ -223,10 +223,7 @@ internal static partial class Probe
         X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
         if (!OperatingSystem.IsWindows())
             return certificate;
-        // MsQuic's Schannel provider cannot open the ephemeral key behind
-        // CreateSelfSigned: ConfigurationLoadCredential fails with SEC_E_NO_CREDENTIALS
-        // (0x8009030d). A PFX round-trip leaves a persisted, exportable key the
-        // Windows QUIC stack can load; Linux and macOS read the key directly.
+
         byte[] pfx = certificate.Export(X509ContentType.Pfx);
         certificate.Dispose();
         var storage = X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable;

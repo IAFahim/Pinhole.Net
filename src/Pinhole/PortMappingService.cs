@@ -88,7 +88,7 @@ internal sealed class PortMappingService : IDisposable
         lock (_gate)
         {
             if (_disposed) return;
-            RebindNoLock(newInternalPort); // even the same port may now name another network
+            RebindNoLock(newInternalPort);
             Signal();
         }
     }
@@ -148,10 +148,7 @@ internal sealed class PortMappingService : IDisposable
                 CancellationTokenSource? operation;
                 lock (_gate)
                 {
-                    // A renewal due right now outranks the loop-top expiry check: waking
-                    // late (timer slack under load) must not retire the very lease its
-                    // renewal was about to extend — that would strand the mapping for the
-                    // full rediscovery backoff. Tick()/Current still expire on their own.
+
                     if (_lease is null || _nextActionTicks > Environment.TickCount64)
                     {
                         ExpireNoLock(Environment.TickCount64);
@@ -193,7 +190,7 @@ internal sealed class PortMappingService : IDisposable
                     if (live is null) discovered = await _discover(port, operation.Token).ConfigureAwait(false);
                     else renewed = await live.RenewAsync(operation.Token).ConfigureAwait(false);
                 }
-                catch (Exception) { } // an unsupported/refused router never fails the node
+                catch (Exception) { }
                 finally
                 {
                     lock (_gate) if (ReferenceEquals(_operationStop, operation)) _operationStop = null;
@@ -206,7 +203,7 @@ internal sealed class PortMappingService : IDisposable
                     if (_disposed || generation != _generation)
                     {
                         releaseDiscovered = discovered is not null;
-                        // Rebind/Shutdown already queued the old live lease for release.
+
                     }
                     else if (live is not null)
                     {
@@ -253,9 +250,7 @@ internal sealed class PortMappingService : IDisposable
 
     private void NotifyNoLock(IPEndPoint? endpoint)
     {
-        // A callback can enter node/session locks or dispose its owner. Never run it
-        // under the lease lock. One publisher preserves order with a bounded backlog;
-        // obsolete queued generations are discarded before invocation.
+
         if (_notifications.Count == 16) _notifications.Dequeue();
         _notifications.Enqueue((_generation, endpoint));
         if (_publishing) return;

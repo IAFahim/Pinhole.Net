@@ -9,9 +9,6 @@ public enum EffectKind : byte
     Close = 4,
 }
 
-// One effect per slot, written by machines into a caller-supplied span (stackalloc at the
-// call site; never allocated). Offset/Length address bytes of a Transmit/Deliver buffer;
-// Value carries the per-kind payload (nonce, deadline tick, counter).
 public struct Effect
 {
     public EffectKind Kind;
@@ -21,20 +18,14 @@ public struct Effect
     public long Value;
 }
 
-// Path tags for effects whose target is one of the two routed paths. The Pinhole.Net
-// shells interpret these; machines only ever compare and echo them.
 public static class EffectPath
 {
     public const int Direct = 0;
     public const int Relay = 1;
 
-    // Scheduling tag, not a routed path: PunchScheduler uses it to gate the link-local
-    // candidate class separately from ordinary directs (they wait out the fallback delay).
     public const int DirectLinkLocal = 2;
 }
 
-// Machines never throw on a full span: they emit what fits and report the written count,
-// so a caller that passes Span<Effect>.Empty gets the decision without the effects.
 internal static class Effects
 {
     public static void Add(Span<Effect> list, ref int count, EffectKind kind, int path, int length, long value)

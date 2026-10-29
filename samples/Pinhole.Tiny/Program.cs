@@ -1,7 +1,6 @@
 using System.Text;
 using Pinhole;
 
-// No arguments: share your invitation, or paste a friend's. One argument: join.
 if (args.Length > 1) { Console.Error.WriteLine("Usage: Pinhole.Tiny [invitation]"); return 1; }
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };

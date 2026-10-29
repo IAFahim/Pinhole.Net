@@ -44,8 +44,6 @@ public sealed class ConnectionString
 
     public const int MaxEncodedLength = 8192;
 
-    // The optional per-string secret (the knock): 1..64 raw bytes, format-level. A knock
-    // rides the string only when the node is configured with one, and never on v1..v3.
     public const int MaxKnockLength = 64;
 
     public ulong PeerId { get; }
@@ -176,8 +174,7 @@ public sealed class ConnectionString
         if ((payload[0] == Version2 && flags != FlagsHasStaticKey)
             || (payload[0] == Version3 && flags != (FlagsHasStaticKey | FlagsHasEndpointKey))
             || (payload[0] == Version1 && flags != 0)
-            // v4 adds the knock bit and makes the endpoint bit optional: static+knock or
-            // static+endpoint+knock are the only two shapes a v4 body may wear.
+
             || (payload[0] == Version4 && flags != (FlagsHasStaticKey | FlagsHasKnock)
                 && flags != (FlagsHasStaticKey | FlagsHasEndpointKey | FlagsHasKnock)))
         {
@@ -425,8 +422,7 @@ internal static class Base64Url
 
     public static byte[] Decode(string text)
     {
-        // Strict charset: Convert.FromBase64String silently skips whitespace, and a
-        // connection string that tolerates "AA BB" is one that round-trips ambiguously.
+
         foreach (char c in text)
         {
             if (!(c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '='))

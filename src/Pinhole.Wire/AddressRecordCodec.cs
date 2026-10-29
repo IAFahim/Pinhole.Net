@@ -3,38 +3,6 @@ using System.Net.Sockets;
 
 namespace Pinhole.Wire;
 
-// Canonical codec for the Pinhole address record (differential oracle: Pinhole.AddressRecord).
-// The signed-body byte layout is a compatibility contract — Ed25519 signatures cover these
-// exact bytes, so readers and the writer must reproduce them byte-for-byte:
-//
-//   version   u8       1 = direct endpoints only; 2 = a relayed endpoint list is appended
-//   peerId    u64 LE
-//   key       32 raw bytes (Ed25519 public key)
-//   sequence  u64 LE
-//   expiry    i64 LE   raw Unix seconds; returned as a plain long — never routed through
-//                     DateTimeOffset on wire values (audit C-06), so no bit pattern can
-//                     throw; range/expiry policy belongs to the verifying caller
-//   direct endpoints:   count u8, then per endpoint family u8 (4|16) + address + port u16 BE
-//   relayed endpoints:  same list encoding, present only in version 2
-//
-// The full signed record is body || 64-byte Ed25519 signature; the signature bytes are
-// opaque to this codec (verification needs the key and is the caller's job).
-//
-// Canonical rules the readers enforce (documented; violations return false, never throw):
-//   1. the version byte is exactly 1 or 2 — unknown versions or stray high bits fail;
-//   2. bodies shorter than the fixed header (58 bytes) fail;
-//   3. endpoint family is 4 or 16 and the address and port bytes must all be present;
-//   4. at most 16 direct endpoints and 4 relayed endpoints;
-//   5. version 1 carries no relayed list; version 2 carries at least one relayed endpoint —
-//      the legacy encoder emits v2 only when relayed endpoints exist, so an empty v2 list is
-//      non-canonical (the legacy parser is more lenient and accepts it; see the tests);
-//   6. trailing bytes after the last endpoint fail — a body must consume its input exactly,
-//      which is what makes accept => WriteBody(TryReadBody(x)) == x hold;
-//   7. expiry is surfaced as the raw 64-bit integer regardless of bit pattern.
-//
-// WriteBody throws only on programmer error: wrong key length or endpoint counts over the
-// caps throw InvalidOperationException (same conditions and messages as AddressRecord.Encode);
-// a destination span smaller than the encoding throws ArgumentException.
 public static class AddressRecordCodec
 {
     public const int EndpointKeyLength = 32;
@@ -45,9 +13,8 @@ public static class AddressRecordCodec
 
     public const int MaxRelayedEndpoints = 4;
 
-    public const int MaxEndpointEncoding = 1 + 16 + 2; // family + longest address + port
+    public const int MaxEndpointEncoding = 1 + 16 + 2;
 
-    // version + peerId + key + sequence + expiry + direct endpoint count
     public const int MinimumBodyLength = 1 + 8 + EndpointKeyLength + 8 + 8 + 1;
 
     public const int MaxEncodedLength =
@@ -93,13 +60,13 @@ public static class AddressRecordCodec
         {
             if (pos >= wire.Length)
             {
-                return false; // the relayed count byte is missing
+                return false;
             }
 
             int relayedCount = wire[pos++];
             if (relayedCount == 0)
             {
-                return false; // non-canonical: v2 exists only to carry relayed endpoints
+                return false;
             }
 
             if (!TryReadEndpointList(wire, MaxRelayedEndpoints, relayedCount, ref pos, out relayed))
@@ -110,14 +77,14 @@ public static class AddressRecordCodec
 
         if (pos != wire.Length)
         {
-            return false; // trailing bytes: the record would not cover exactly what was parsed
+            return false;
         }
 
         body = new AddressRecordBody(
             peerId,
             wire.Slice(9, EndpointKeyLength).ToArray(),
             sequence,
-            unchecked((long)expiryRaw), // raw Unix seconds; no DateTimeOffset conversion on wire data (C-06)
+            unchecked((long)expiryRaw),
             endpoints,
             relayed);
         consumed = pos;
@@ -160,8 +127,6 @@ public static class AddressRecordCodec
             throw new InvalidOperationException($"records carry at most {MaxRelayedEndpoints} relayed endpoints");
         }
 
-        // MinimumBodyLength already contains the direct count byte, so the direct list
-        // contributes only its endpoint bytes here; a relayed list adds count + endpoints.
         int needed = MinimumBodyLength + EndpointBytesSize(body.Endpoints)
             + (body.RelayedEndpoints.Length > 0 ? 1 + EndpointBytesSize(body.RelayedEndpoints) : 0);
         if (destination.Length < needed)
@@ -220,7 +185,6 @@ public static class AddressRecordCodec
                 return false;
             }
 
-            // family is 4 or 16 and the slice length matches, so this ctor cannot throw
             parsed[i] = new IPEndPoint(new IPAddress(wire.Slice(pos, family)), port);
             pos += family + 2;
         }
@@ -258,9 +222,6 @@ public static class AddressRecordCodec
     private static void ThrowTooSmall() => throw new ArgumentException("destination span too small");
 }
 
-// The unsigned fields that the Ed25519 signature covers. ExpiresAtUnixSeconds is the raw
-// wire integer; converting to DateTimeOffset is the caller's decision after verification.
-// Array members participate in record equality by reference — compare via WriteBody bytes.
 public readonly record struct AddressRecordBody(
     ulong PeerId,
     byte[] EndpointKey,
@@ -269,5 +230,4 @@ public readonly record struct AddressRecordBody(
     IPEndPoint[] Endpoints,
     IPEndPoint[] RelayedEndpoints);
 
-// The full signed record: body plus the detached 64-byte signature.
 public readonly record struct SignedAddressRecord(AddressRecordBody Body, byte[] Signature);

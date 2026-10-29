@@ -45,11 +45,11 @@ public static class Resolver
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw; // the caller cancelled: that halts the caller, it is not tolerated
+            throw;
         }
         catch (OperationCanceledException)
         {
-            // The budget elapsed: keep whatever resolved in time, drop the rest.
+
         }
 
         var resolved = new List<IPEndPoint>();
@@ -75,7 +75,6 @@ public static class Resolver
         {
             return Array.Empty<IPEndPoint>();
         }
-        // OperationCanceledException propagates: caller cancellation must halt the caller,
-        // and the catalog budget is classified by ResolveWithinBudgetAsync, not swallowed here.
+
     }
 }

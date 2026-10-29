@@ -38,7 +38,6 @@ public sealed class WireTests
         Assert.Equal(100UL, ids.Maximum);
     }
 
-    // Primary interoperability vector: Cloudflare moq-rs setup/client.rs Draft16 fixture.
     [Fact]
     public void SetupVector_HasSixteenBitLength_AndDeltaEncodedParameters()
     {

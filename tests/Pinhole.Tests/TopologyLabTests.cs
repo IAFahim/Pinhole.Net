@@ -10,8 +10,8 @@ namespace Pinhole.Tests;
 
 public sealed class TopologyLabTests(ITestOutputHelper output)
 {
-    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(15); // relay-introduce → direct-upgrade budget
-    private static readonly TimeSpan Quiet = TimeSpan.FromSeconds(6);   // "stays on the relay" observation window
+    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan Quiet = TimeSpan.FromSeconds(6);
 
     public static IEnumerable<object[]> NatPairings() =>
         from listener in new[] { VirtualNatKind.FullCone, VirtualNatKind.RestrictedCone, VirtualNatKind.PortRestricted, VirtualNatKind.Symmetric }
@@ -68,7 +68,7 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             }
             catch (TimeoutException)
             {
-                // path not healed yet — retry
+
             }
             finally
             {
@@ -78,8 +78,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
 
         Assert.Fail($"no exchange within {budget}");
     }
-
-    // ------------------------------------------------------------------ the 16-cell NAT matrix
 
     [Theory]
     [MemberData(nameof(NatPairings))]
@@ -102,9 +100,7 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         }
         else
         {
-            // The physics forbid a direct path: after the quiet window the session must
-            // still be relayed — and still carrying traffic. Eventually-retry: a quiet
-            // relay leg may need one permission-refresh round trip before it flows again.
+
             Assert.Equal(PathKind.Relay, conn.Path.Kind);
             await Task.Delay(Quiet);
             Assert.Equal(PathKind.Relay, conn.Path.Kind);
@@ -115,8 +111,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         Assert.True(dialerNat.MappingsCreated > 0, $"dialer NAT translated nothing — {lab.Net.Counters()}");
         output.WriteLine($"L{listenerKind} x D{dialerKind} -> {conn.Path.Kind} | {lab.Net.Counters()}");
     }
-
-    // ------------------------------------------------------------------ adversarial scenarios
 
     [Fact]
     public async Task UdpFullyBlockedHotel_SessionRidesTheRelayAndNotOneDirectDatagramEscapes()
@@ -134,8 +128,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await ExchangeAsync(conn, atListener, "hotel wifi, B -> A");
         await ExchangeAsync(atListener, conn, "hotel wifi, A -> B");
 
-        // Every direct attempt — punches, STUN probes, everything — died in the virtual
-        // internet; the session exists only because the relay carried it.
         Assert.Equal(0L, lab.Net.Delivered);
         Assert.True(lab.Net.Unroutable > 0, "the blocked path must have seen (and dropped) direct attempts");
         output.WriteLine(lab.Net.Counters());
@@ -149,8 +141,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await using PinholeNode a = await lab.BindNodeAsync(shared);
         await using PinholeNode b = await lab.BindNodeAsync(shared);
 
-        // Both advertise reflexives on the shared NAT's public address; reaching each other
-        // means the NAT must hairpin its own public endpoints back inside.
         (PinholeConnection conn, PinholeConnection atA) = await ConnectAsync(a, b);
         await TestPoll.UntilAsync(Settle, () => conn.Path.Kind == PathKind.Direct);
         await ExchangeAsync(conn, atA, "hairpin, B -> A");
@@ -172,11 +162,8 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await TestPoll.UntilAsync(Settle, () => conn.Path.Kind == PathKind.Direct);
         await ExchangeAsync(conn, atListener, "before expiry");
 
-        // Every mapping dies with no notification — the DHCP-renew/router-reboot case.
         listenerNat.ExpireMappings();
 
-        // The listener's next outbound keepalive allocates a fresh public port; the dialer
-        // adopts the observed source and the path heals without any app involvement.
         await ExchangeEventuallyAsync(conn, atListener, "after expiry", TestBudget.Scenario);
         await ExchangeAsync(atListener, conn, "after expiry, reverse");
         Assert.Equal(PathKind.Direct, conn.Path.Kind);
@@ -190,8 +177,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         using VirtualLab lab = new(withV6Stun: true);
         await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
 
-        // B starts in a second v4 region and, on its first rebind, moves to IPv6 — the
-        // hotel-to-mobile-with-v6 story. Every (re)bind attaches at a fresh port.
         int binds = 0;
         PinholeOptions bOptions = lab.BaseOptions(o => o with { ConnectTimeout = TimeSpan.FromSeconds(10) }) with
         {
@@ -205,7 +190,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await TestPoll.UntilAsync(Settle, () => conn.Path.Kind == PathKind.Direct);
         await ExchangeAsync(conn, atA, "over IPv4, B -> A");
 
-        // The old v4 region dies, then B rebinds: new socket, new family, same connection.
         lab.Net.AddRule(LinkRule.Blackhole(Subnet.Parse(VirtualLab.Hosts4SecondRegion)));
         await b.Engine.SimulateInterfaceLossAsync().WaitAsync(TestBudget.Io);
 
@@ -214,7 +198,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await ExchangeAsync(conn, atA, "over IPv6, B -> A");
         await ExchangeAsync(atA, conn, "over IPv6, A -> B");
 
-        // Roaming is invisible to the app: same object, still exactly one connection.
         Assert.Same(conn, b.Connections.Single(c => c.PeerId == a.PeerId));
         Assert.True(binds >= 2, "the rebind asked the factory for a fresh socket");
         output.WriteLine(lab.Net.Counters());
@@ -223,8 +206,7 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
     [Fact]
     public async Task RelayRestart_FreshRedial_SessionsHealViaReallocation()
     {
-        // A fixed-port TURN relay so "restart" means the same endpoint comes back. The pair's
-        // direct path is blackholed: every session here is relay-carried.
+
         using var probe = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         int relayPort = ((IPEndPoint)probe.Client.LocalEndPoint!).Port;
         probe.Dispose();
@@ -237,29 +219,17 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
         await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0));
 
-        // The connection STAYS OPEN across the restart: its relay leg going silent is what
-        // drives path validation to suspect, which (post-fix) retires the ghost allocation
-        // and re-advertises fresh relay candidates. The old relayed endpoint is captured for
-        // the comparison.
         (PinholeConnection first, PinholeConnection atA) = await ConnectAsync(a, b);
         Assert.Equal(PathKind.Relay, first.Path.Kind);
         await ExchangeAsync(first, atA, "before the restart");
         IPEndPoint oldRelayed = RelayCandidate(a)!;
 
-        // The relay process dies; a fresh one returns on the same endpoint. Both nodes still
-        // hold allocations the successor knows nothing about — ghost clients that would
-        // black-hole every relayed frame for a full refresh cycle (~minutes) if nothing
-        // retired them.
         lab.Turn!.Dispose();
         using FakeTurnServer successor = RestartTurnOnPort(relayPort, lab.TurnAddress(0));
 
         await TestPoll.UntilAsync(TestBudget.Scenario, () =>
             RelayCandidate(a) is { } fresh && !fresh.Equals(oldRelayed));
 
-        // The old session closes from the server side — its Bye cannot ride the stale relay
-        // path, and a fresh dial must not meet a live session for the same peer. Then the
-        // documented re-share flow: redial on the fresh string; the dialer's own ghost gets
-        // retired by the failed warm-permit, exactly as on the server side.
         await atA.DisposeAsync();
         await first.DisposeAsync();
         (PinholeConnection second, PinholeConnection atA2) = await ConnectAsync(a, b, a.ConnectionString);
@@ -284,18 +254,15 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         lab.Net.AddRule(LinkRule.Directional(bSide, aSide, dropAll: true));
         await using PinholeNode a = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
         await using PinholeNode b = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0));
-        Assert.Equal(2, lab.Turn!.Allocations); // one allocation per node at bind
+        Assert.Equal(2, lab.Turn!.Allocations);
 
-        // The dialer's first warm-permit request vanishes — one lost UDP datagram, proving
-        // nothing about the allocation. The client must retry the permit and keep the
-        // allocation; retiring here (#24's flap scenario) would realloc on every loss.
         lab.Turn.DropNextPermissions = 1;
 
         (PinholeConnection conn, PinholeConnection atA) = await ConnectAsync(a, b);
         Assert.Equal(PathKind.Relay, conn.Path.Kind);
         await ExchangeAsync(conn, atA, "one lost permit changed nothing");
 
-        Assert.Equal(2, lab.Turn.Allocations); // no retire, no realloc
+        Assert.Equal(2, lab.Turn.Allocations);
         Assert.True(lab.Turn.PermissionsGranted > 0, "the retried permit actually landed");
     }
 
@@ -313,9 +280,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
         (PinholeConnection conn, PinholeConnection atA) = await ConnectAsync(a, b);
         Assert.Equal(PathKind.Relay, conn.Path.Kind);
 
-        // Idle past the relay-leg idle window plus several probe rounds: the transport's
-        // own liveness probes fly (and the healthy relay answers, so the session never
-        // flaps state) — but none of them may surface as app-requested pings.
         await Task.Delay(TimeSpan.FromSeconds(9));
         Assert.Equal(PinholeConnectionState.Degraded, conn.State);
         Assert.Equal(0L, conn.Stats.PingsSent);
@@ -367,8 +331,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
                 $"transfer never reached {quarter} verified bytes — {lab.Net.Counters()}");
             Assert.Equal(PathKind.Direct, server.Node.Connections.Single().Path.Kind);
 
-            // The relay dies mid-transfer while the direct path is healthy: a non-event for
-            // the transfer, and the engine must not flap the session over it.
             lab.Turn!.Dispose();
 
             BlobDownloadResult result = await download.WaitAsync(TestBudget.Scenario);
@@ -407,8 +369,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             using VirtualLab lab = new();
             VirtualNat serverNat = lab.Nat(VirtualNatKind.FullCone, "203.0.113.10", "172.31.10.0/24");
 
-            // Three files so the roam lands across a stream transition: the next file's
-            // Hello→Welcome handshake must ride out the server's rebind, not die on it.
             string srcDir = Path.Combine(dir, "serve");
             Directory.CreateDirectory(srcDir);
             byte[][] files = [new byte[500_000], new byte[300_000], new byte[300_000]];
@@ -448,9 +408,6 @@ public sealed class TopologyLabTests(ITestOutputHelper output)
             Assert.True(await Task.WhenAny(firstFileDone.Task, Task.Delay(TestBudget.Scenario)) == firstFileDone.Task,
                 $"transfer never finished its first file — {lab.Net.Counters()}");
 
-            // The server's interface dies mid-transfer: new socket, new private address, new
-            // NAT mapping. In-flight chunks, the next file's Hello→Welcome, and the
-            // downloader's ARQ re-requests must all find the rebound path.
             await server.Node.Engine.SimulateInterfaceLossAsync().WaitAsync(TestBudget.Io);
 
             BlobDownloadResult result = await download.WaitAsync(TestBudget.Scenario);

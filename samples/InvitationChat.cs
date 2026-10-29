@@ -1,7 +1,5 @@
 using Pinhole;
 
-// Keep accepting while reading invitations and dialing. A bad/stale invitation
-// never stops the listener. Reuse the outstanding console read once connected.
 internal static class InvitationChat
 {
     internal static async Task RunAsync(PinholeNode node, string? invitation, CancellationToken ct)

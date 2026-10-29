@@ -40,7 +40,7 @@ internal static class UpnpIPv6FirewallClient
                     IPv6FirewallLease? lease = await TryCreateOnServiceAsync(http, service.ControlUrl,
                         new IPEndPoint(source.Address, port), protocol, RequestedLifetime, ct).ConfigureAwait(false);
                     if (lease is null) continue;
-                    transferred = true; // the granted lease now owns the source-bound client
+                    transferred = true;
                     return lease;
                 }
             }
@@ -55,9 +55,7 @@ internal static class UpnpIPv6FirewallClient
         UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(1.5),
         ConnectCallback = async (context, ct) =>
         {
-            // Do not resolve another host or follow a description to a different router.
-            // HttpClient versions differ in whether the local zone survives into
-            // DnsEndPoint. Always connect using our pinned scope, never a URL's zone.
+
             if (!IPAddress.TryParse(context.DnsEndPoint.Host, out IPAddress? target)
                 || !target.GetAddressBytes().SequenceEqual(router.GetAddressBytes())
                 || target.AddressFamily == AddressFamily.InterNetworkV6 && target.ScopeId != 0 && target.ScopeId != router.ScopeId)
@@ -173,7 +171,7 @@ internal static class UpnpIPv6FirewallClient
 
     internal sealed class IPv6FirewallLease(HttpClient http, Uri control, IPEndPoint endpoint, ushort uniqueId, int seconds) : IPortMapLease
     {
-        public IPEndPoint External { get; } = endpoint; // no translation; already a host candidate
+        public IPEndPoint External { get; } = endpoint;
         public TimeSpan Lifetime => TimeSpan.FromSeconds(seconds);
         public async Task<bool> RenewAsync(CancellationToken ct) => await IsAllowedAsync(http, control, ct).ConfigureAwait(false)
             && await ActionAsync(http, control, "UpdatePinhole", Arg("UniqueID", Number(uniqueId))

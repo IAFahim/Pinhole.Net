@@ -9,29 +9,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests.Sim;
 
-// R3 property gate P1 at END-TO-END level: no application datagram is delivered
-// twice or without a valid seal — proven over FULL stack runs on a hostile virtual
-// network (LinkRule.Hostile: seeded duplication, delay+jitter reordering, seeded
-// byte corruption, and — for the blob leg — seeded burst loss).
-//
-// Session leg: two real PinholeNodes dial through the hostile leg; the app-level
-// protocol is an echo with retransmission (a session datagram has no transport
-// retry of its own). The receiver counts DELIVERIES per sequence number and the
-// sender counts SENDS, so the property is exact: every sequence is delivered at
-// least once (a corrupted frame was refused, then healed by a retransmit), never
-// more times than it was sent (a wire duplicate never double-delivered), and every
-// delivered payload is byte-identical to what the sender sealed (nothing arrives
-// without a valid seal). Pacing and the retransmit timer are structural: 2 ms per
-// send bounds the in-flight reorder spread far under the 64-counter replay window,
-// and the timer is the app's reliability layer, not a condition wait.
-//
-// Blob leg: a full BlobClient/BlobServer transfer under duplication, corruption,
-// reordering AND burst loss must finish byte-exact — the engine's seal/replay
-// refusing every hostile copy while the blob layer's own sweeps heal the rest.
-//
-// Every stochastic model (duplication, corruption, loss, jitter stream) is seeded;
-// a rerun reproduces the verdict. Draw interleaving is wall-clock (threads), so
-// bit-exact traces are not claimed — P4's machine-level gates own that contract.
 public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
 {
     private const int SessionDatagrams = 800;
@@ -67,9 +44,6 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
         long echoesFailed = 0;
         long retransmits = 0;
 
-        // The receiver: every DELIVERY is counted, checked byte-exact against the
-        // generator, and echoed back. Delivery bookkeeping runs under one lock;
-        // everything else in the test reads it only after the wire has gone quiet.
         listener.Received += payload =>
         {
             long seq = BinaryPrimitives.ReadInt64LittleEndian(payload);
@@ -89,7 +63,7 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
 
             try
             {
-                listener.Send(payload); // the echo IS the ack channel, through the same hostile leg
+                listener.Send(payload);
             }
             catch (InvalidOperationException)
             {
@@ -113,19 +87,15 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
         {
             try
             {
-                dialer.Send(Payload(seq)); // throws only if the path is momentarily gone
+                dialer.Send(Payload(seq));
                 lock (sendCount) sendCount[seq]++;
             }
             catch (InvalidOperationException)
             {
-                // The retransmit timer owns seq; a refused send never reached the wire
-                // and must not count as one.
+
             }
         }
 
-        // Blast, paced: one datagram per 2 ms keeps the reorder spread (~25 ms of
-        // jitter) an order of magnitude inside the engine's 64-counter replay window,
-        // so a legitimate straggler is never refused as stale.
         var sw = Stopwatch.StartNew();
         for (int seq = 0; seq < SessionDatagrams; seq++)
         {
@@ -133,8 +103,6 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
             await Task.Delay(2);
         }
 
-        // The app's reliability layer: retransmit the unacked until the echo account
-        // closes. This is load generation on a timer, not a condition wait.
         while (Volatile.Read(ref acks) < SessionDatagrams)
         {
             Assert.True(sw.Elapsed < TimeSpan.FromSeconds(30),
@@ -150,15 +118,12 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
             }
         }
 
-        // Let any in-flight stragglers land, then hold the wire quiet so the counts
-        // below are final. Structural: duplicates can trail their originals by the
-        // full delay+jitter span; 1 s is 28x that span.
         await Task.Delay(1000);
 
         lock (sendCount)
         lock (deliveryCount)
         {
-            Assert.Equal(0, deliveriesCorrupt); // nothing was ever delivered unsealed-or-edited
+            Assert.Equal(0, deliveriesCorrupt);
             for (int seq = 0; seq < SessionDatagrams; seq++)
             {
                 Assert.True(sendCount[seq] >= 1, $"seq {seq} was never successfully sent");
@@ -169,8 +134,8 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
             }
         }
 
-        Assert.Equal(deliveries, listener.Stats.DatagramsReceived); // the engine's own account agrees
-        // Non-vacuity: the attack landed, and both seal layers refused it.
+        Assert.Equal(deliveries, listener.Stats.DatagramsReceived);
+
         Assert.True(hostile.Duplicated >= 24, $"only {hostile.Duplicated} duplicates crossed");
         Assert.True(hostile.Corrupted >= 8, $"only {hostile.Corrupted} corrupted crossings");
         Assert.True(listener.FramesRejected > 0, "the receiver never refused a hostile frame");
@@ -227,8 +192,6 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
             Assert.Equal(BlobBytes, result.Bytes);
             Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "seal.bin")));
 
-            // Non-vacuity: the hostile leg actually duplicated and corrupted (and the
-            // seeded loss model dropped); the byte-exact file above is the property.
             Assert.True(hostile.Duplicated >= 16, $"only {hostile.Duplicated} duplicates crossed");
             Assert.True(hostile.Corrupted >= 4, $"only {hostile.Corrupted} corrupted crossings");
             Assert.True(hostile.Lost >= 4, $"only {hostile.Lost} datagrams were lost");
@@ -243,11 +206,6 @@ public sealed class SimPhase2P1SealTests(ITestOutputHelper output)
         }
     }
 
-    // ------------------------------------------------------------------ payloads
-
-    // seq (u64 LE) + a body derived from the seq: byte-exactness of every delivery
-    // is checkable without shipping a table. Sizes vary per seq (24..223 bytes) and
-    // stay far under the engine's 1200-byte guaranteed payload ceiling.
     private static byte[] Payload(long seq)
     {
         int length = 24 + (int)(seq * 37 % 200);

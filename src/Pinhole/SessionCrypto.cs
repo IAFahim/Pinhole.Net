@@ -18,7 +18,7 @@ public enum PinholeEncryption
 
 internal static class CryptoWire
 {
-    public const int HeaderLength = 9;   // type byte + sender peer id (u64 LE)
+    public const int HeaderLength = 9;
     public const int TokenLength = 4;
     public const int EphemeralLength = 32;
     public const int StaticKeyLength = 32;
@@ -27,43 +27,27 @@ internal static class CryptoWire
     public const int TagLength = 16;
     public const int SealedOverhead = CounterLength + TagLength;
 
-    public const int PuncLegacyBody = TokenLength;                                  // 4  → frame 13
-    public const int PuncCryptoBody = TokenLength + EphemeralLength + StaticKeyLength; // 68 → frame 77
-    public const int PackLegacyBody = 2 * TokenLength;                              // 8  → frame 17
-    public const int PackCryptoBody = 2 * TokenLength + EphemeralLength + StaticKeyLength + ConfirmLength; // 88 → frame 97
-    public const int HsckBody = TokenLength + ConfirmLength;                        // 20 → frame 29
+    public const int PuncLegacyBody = TokenLength;
+    public const int PuncCryptoBody = TokenLength + EphemeralLength + StaticKeyLength;
+    public const int PackLegacyBody = 2 * TokenLength;
+    public const int PackCryptoBody = 2 * TokenLength + EphemeralLength + StaticKeyLength + ConfirmLength;
+    public const int HsckBody = TokenLength + ConfirmLength;
 
-    // Handshake v4 (R5 phase 1): a version marker + mac1 appended to the v3 crypto body.
-    // A v3 reader rejects both lengths on their length class alone (94/114 are neither
-    // the legacy nor the crypto shapes its handlers admit), so the extension is additive:
-    // old peers silently ignore the frames, new peers gate key agreement on the MAC.
     public const byte HandshakeV4Marker = 0x04;
-    public const int Mac1Length = 16; // WireGuard's mac1 size; keyed BLAKE3 truncated to 16
+    public const int Mac1Length = 16;
     public const int Mac1ExtLength = 1 + Mac1Length;
-    public const int PuncCryptoBodyV4 = PuncCryptoBody + Mac1ExtLength;   // 85  → frame 94
-    public const int PackCryptoBodyV4 = PackCryptoBody + Mac1ExtLength;   // 105 → frame 114
+    public const int PuncCryptoBodyV4 = PuncCryptoBody + Mac1ExtLength;
+    public const int PackCryptoBodyV4 = PackCryptoBody + Mac1ExtLength;
 
-    // Handshake v4 (R5 phase 2): under initiation load a PUNC may carry a second
-    // extension — marker 0x05 + mac2, keyed with the cookie the responder minted for the
-    // PUNC's source address. mac1 still covers the same bytes it always did (the frame up
-    // to and including mac1); mac2 covers the whole frame including mac1, excluding the
-    // mac2 bytes themselves — so a mac1 verdict never depends on whether mac2 rode along.
     public const byte Mac2Marker = 0x05;
     public const int Mac2Length = 16;
     public const int Mac2ExtLength = 1 + Mac2Length;
-    public const int PuncCryptoBodyV4Mac2 = PuncCryptoBodyV4 + Mac2ExtLength; // 102 → frame 111
+    public const int PuncCryptoBodyV4Mac2 = PuncCryptoBodyV4 + Mac2ExtLength;
 
-    // The COOKIE reply a loaded responder sends instead of PACK: echo of the PUNC's token
-    // (binds the cookie to one dial attempt), the minting epoch tag, and the 16-byte
-    // cookie value. No keys, no state — the cheapest frame the engine can answer with.
     public const int CookieLength = 16;
-    public const int CookieBody = TokenLength + 1 + CookieLength; // 21 → frame 30
+    public const int CookieBody = TokenLength + 1 + CookieLength;
     public const int CookieFrameLength = HeaderLength + CookieBody;
 
-    // mac1 = BLAKE3-Keyed(responderStaticPub32, frame[0..^16])[..16] — the whole frame
-    // including the marker byte, excluding the 16 MAC bytes themselves. The key is the
-    // answering node's static public key: public material by design, so mac1 filters
-    // random-source and port-scan floods, not attackers who hold the target's key.
     public static void WriteMac1Ext(Span<byte> frame, ReadOnlySpan<byte> responderStaticPub)
     {
         frame[^Mac1ExtLength] = HandshakeV4Marker;
@@ -84,19 +68,12 @@ internal static class CryptoWire
         return CryptographicOperations.FixedTimeEquals(frame[^Mac1Length..], digest[..Mac1Length]);
     }
 
-    // A mac2-carrying frame ends marker(0x05) + mac2[16]; mac1 lives exactly where it did
-    // in the extension-free v4 shape, so every mac1 call sites reads this view of it.
     public static bool HasMac2(ReadOnlySpan<byte> frame) =>
         frame.Length >= HeaderLength + Mac1ExtLength + Mac2ExtLength && frame[^Mac2ExtLength] == Mac2Marker;
 
     public static ReadOnlySpan<byte> Mac1View(ReadOnlySpan<byte> frame) =>
         HasMac2(frame) ? frame[..^Mac2ExtLength] : frame;
 
-    // mac2 = BLAKE3-Keyed(cookie16, frame[0..^16])[..16] — the whole frame including the
-    // mac1 bytes and both markers, excluding the mac2 bytes themselves. The key is the
-    // cookie the responder minted for this source address; the dialer cannot compute it,
-    // only echo what it was handed. BLAKE3's keyed mode takes a 32-byte key, so the
-    // 16-byte cookie is zero-extended — the entropy is the cookie's 128 bits either way.
     public static void WriteMac2Ext(Span<byte> frame, ReadOnlySpan<byte> cookie)
     {
         frame[^Mac2ExtLength] = Mac2Marker;
@@ -124,11 +101,8 @@ internal static class CryptoWire
         return destination;
     }
 
-    public const int CookieKeyLength = 32; // BLAKE3 keyed mode's key size; the 16-byte cookie zero-extends into it
+    public const int CookieKeyLength = 32;
 
-    // cookie = BLAKE3-Keyed(rotatingSecret32, sourceAddress)[..16]. The preimage is the
-    // arrival's source address exactly as the responder saw it (the SocketAddress wire
-    // form), so a cookie minted for one source can never validate for another.
     public static void CookieFor(Span<byte> destination, ReadOnlySpan<byte> rotatingSecret, ReadOnlySpan<byte> sourceAddress)
     {
         Span<byte> digest = stackalloc byte[Blake3.DigestLength];
@@ -136,14 +110,6 @@ internal static class CryptoWire
         digest[..CookieLength].CopyTo(destination);
     }
 
-    // The knock (R5 phase 2 remainder): with a per-string secret configured, mac1 is no
-    // longer keyed with the raw static pub but with a domain-separated derivation of
-    // BOTH the static pub and the knock —
-    //   KnockMac1Key = BLAKE3-DeriveKey("pinhole-knock-mac1-v1", staticPub32 || knock)
-    // A dialer whose string carries the knock computes the same key; a scanner holding
-    // only the static pub cannot, and fails the same silent mac1 gate a random flood
-    // does. On the wire the frames are byte-shape identical to knock-less v4 — only the
-    // MAC key material differs.
     public const string KnockMac1Label = "pinhole-knock-mac1-v1";
 
     internal static ReadOnlySpan<byte> KnockMac1LabelBytes => "pinhole-knock-mac1-v1"u8;
@@ -194,7 +160,7 @@ internal sealed class NodeIdentity
         }
         catch (InvalidOperationException ex)
         {
-            // BouncyCastle rejects small-subgroup (all-zero) agreements itself
+
             throw new CryptographicException("peer public key is a low-order point", ex);
         }
 
@@ -206,13 +172,13 @@ internal sealed class NodeIdentity
 
 internal sealed class SessionKeys
 {
-    public required byte[] TranscriptHash { get; init; }  // 32
-    public required byte[] LoToHiKey { get; init; }       // 32, AES-256 key, lo→hi direction
-    public required byte[] HiToLoKey { get; init; }       // 32, hi→lo direction
-    public required byte[] LoToHiSalt { get; init; }      // 4, nonce salt, lo→hi
-    public required byte[] HiToLoSalt { get; init; }      // 4, hi→lo
-    public required byte[] LoConfirm { get; init; }       // 16, lo's handshake MAC
-    public required byte[] HiConfirm { get; init; }       // 16, hi's handshake MAC
+    public required byte[] TranscriptHash { get; init; }
+    public required byte[] LoToHiKey { get; init; }
+    public required byte[] HiToLoKey { get; init; }
+    public required byte[] LoToHiSalt { get; init; }
+    public required byte[] HiToLoSalt { get; init; }
+    public required byte[] LoConfirm { get; init; }
+    public required byte[] HiConfirm { get; init; }
 }
 
 internal static class KeySchedule
@@ -220,10 +186,7 @@ internal static class KeySchedule
     public const string TranscriptLabel = "pinhole-hs1";
     public const string Info = "pinhole-session-v1";
     public const string RekeyInfo = "pinhole-rekey-v1";
-    // The knock rides the key schedule as a PSK block: a labeled BLAKE3 derivation of
-    // the secret appended to the DH ikm, so every output (keys, salts, confirm MACs)
-    // differs from a knock-less derivation. mac1 prices the string first; this makes
-    // the session itself unreachable without it.
+
     public const string KnockPskLabel = "pinhole-knock-psk-v1";
 
     private static ReadOnlySpan<byte> KnockPskLabelBytes => "pinhole-knock-psk-v1"u8;
@@ -239,8 +202,7 @@ internal static class KeySchedule
     {
         bool iAmLo = myPeerId < peerPeerId;
         byte[] ee = NodeIdentity.X25519Agree(myEphPrivate, peerEphPublic);
-        // (s_lo, e_hi) and (e_lo, s_hi) swap perspective with the role; X25519 agreement is
-        // symmetric, so each side computes both with the halves it holds.
+
         byte[] se = iAmLo
             ? NodeIdentity.X25519Agree(myStaticPrivate, peerEphPublic)
             : NodeIdentity.X25519Agree(myEphPrivate, peerStaticPublic);
@@ -273,8 +235,7 @@ internal static class KeySchedule
         return new SessionKeys
         {
             TranscriptHash = th,
-            // Direction-absolute: lo→hi is lo→hi for both sides; the role-relative choice
-            // (which key I send with) happens in FrameSealer's constructor.
+
             LoToHiKey = okm[..32],
             HiToLoKey = okm[32..64],
             LoToHiSalt = okm[128..132],
@@ -319,12 +280,10 @@ internal sealed class FrameSealer : IDisposable
 
     private byte[] _key;
     private AesGcm? _aes;
-    private AesGcm? _prevAes; // the previous epoch's cipher: stragglers still inside the replay window
+    private AesGcm? _prevAes;
     private uint _epoch;
     private bool _disposed;
 
-    // Send side: the next counter to seal with. Receive side: the accepted-counter
-    // replay window. A sealer is one direction only, so the halves never mix.
     private ulong _nextCounter = 1;
     private ReplayWindow _recvWindow;
 
@@ -332,7 +291,7 @@ internal sealed class FrameSealer : IDisposable
     {
         _transcriptHash = keys.TranscriptHash;
         _epochFrames = epochFrames;
-        bool loToHi = sending == iAmLo; // the lo side sends with the lo→hi key, hi with hi→lo
+        bool loToHi = sending == iAmLo;
         _nonceSalt = loToHi ? keys.LoToHiSalt : keys.HiToLoSalt;
         _key = loToHi ? keys.LoToHiKey : keys.HiToLoKey;
     }
@@ -354,8 +313,7 @@ internal sealed class FrameSealer : IDisposable
             }
             else if (epoch != _epoch)
             {
-                // Epochs advance one at a time (the counter does), so this is one HKDF step
-                // per 2^28 frames — automatic key rotation with no wire negotiation.
+
                 while (_epoch < epoch)
                 {
                     _key = KeySchedule.Rekey(_key, _transcriptHash);
@@ -386,13 +344,13 @@ internal sealed class FrameSealer : IDisposable
         ReadOnlySpan<byte> sealedBody = frame[(CryptoWire.HeaderLength + CryptoWire.TokenLength)..];
         if (sealedBody.Length < CryptoWire.CounterLength + CryptoWire.TagLength)
         {
-            return false; // not a sealed frame at all
+            return false;
         }
 
         ulong counter = BinaryPrimitives.ReadUInt64LittleEndian(sealedBody);
         if (counter == 0)
         {
-            return false; // counters start at 1
+            return false;
         }
 
         uint epoch = (uint)((counter - 1) / (ulong)_epochFrames);
@@ -405,14 +363,9 @@ internal sealed class FrameSealer : IDisposable
 
             if (!_recvWindow.Admits(counter))
             {
-                return false; // stale replay or duplicate: no authentication needed to see that
+                return false;
             }
 
-            // Pick the candidate cipher without committing anything: the current epoch's,
-            // the previous epoch's (a legitimately reordered straggler inside the window),
-            // or a derived candidate for the next epoch — adopted only if it authenticates.
-            // Anything further away is unreachable: the 64-frame window cannot straddle
-            // more than two adjacent epochs.
             AesGcm aes;
             byte[]? candidateKey = null;
             if (epoch == _epoch)
@@ -443,7 +396,7 @@ internal sealed class FrameSealer : IDisposable
                     aes.Dispose();
                 }
 
-                return false; // caller-provided destination cannot hold this frame
+                return false;
             }
 
             Span<byte> nonce = stackalloc byte[12];
@@ -458,25 +411,24 @@ internal sealed class FrameSealer : IDisposable
             }
             catch (CryptographicException)
             {
-                opened = false; // forged or corrupted in flight: no counter burned, no key adopted
+                opened = false;
             }
 
             if (!opened)
             {
                 if (candidateKey is not null)
                 {
-                    aes.Dispose(); // the unadopted next-epoch candidate dies with the frame
+                    aes.Dispose();
                 }
 
                 return false;
             }
 
-            // Authenticated: now, and only now, the frame's state may commit.
             _recvWindow = _recvWindow.Mark(counter);
             if (candidateKey is not null)
             {
                 _prevAes?.Dispose();
-                _prevAes = _aes; // retained until the window can no longer reach the old epoch
+                _prevAes = _aes;
                 _aes = aes;
                 _key = candidateKey;
                 _epoch = epoch;
@@ -507,20 +459,20 @@ internal sealed class ConnectionCrypto
 {
     private readonly byte[] _ephPrivate;
     private readonly byte[] _staticPrivate;
-    private readonly byte[]? _knock; // the PSK: the string's knock when dialing, the engine's when answering
+    private readonly byte[]? _knock;
 
     public required ulong MyPeerId { get; init; }
     public required ulong PeerPeerId { get; init; }
     public byte[] MyEphPublic { get; }
     public byte[] MyStaticPublic { get; }
 
-    public byte[]? PeerEphPublic { get; private set; }     // connection gate
-    public byte[]? PeerStaticPublic { get; private set; }  // connection gate
-    public SessionKeys? Keys { get; private set; }         // connection gate; set once
+    public byte[]? PeerEphPublic { get; private set; }
+    public byte[]? PeerStaticPublic { get; private set; }
+    public SessionKeys? Keys { get; private set; }
     public FrameSealer? Send { get; private set; }
     public FrameSealer? Recv { get; private set; }
     public bool PeerConfirmed { get; private set; }
-    public long Rejected; // Interlocked: tampered, replayed, or downgraded frames dropped
+    public long Rejected;
 
     [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
     private ConnectionCrypto(byte[] ephPrivate, byte[] ephPublic, byte[] staticPrivate, byte[] staticPublic, ulong myPeerId, ulong peerPeerId, byte[]? knock)
@@ -551,7 +503,7 @@ internal sealed class ConnectionCrypto
 
         if (PeerEphPublic is not null)
         {
-            return false; // a second, different handshake: stale or hostile
+            return false;
         }
 
         try
@@ -567,20 +519,17 @@ internal sealed class ConnectionCrypto
         }
         catch (CryptographicException)
         {
-            return false; // low-order point probe: refuse the keys; a later honest retry still works
+            return false;
         }
     }
 
     public bool TrySupersedeUnconfirmed(ReadOnlySpan<byte> eph, ReadOnlySpan<byte> stat, ReadOnlySpan<byte> confirm,
         bool allowUnexposedIncoming = false)
     {
-        // An explicit dial may adopt a late incoming PUNC/HSCK from the peer's
-        // closed connection. That state has neither authenticated traffic nor an
-        // exposed application connection. A trial PACK still needs a valid MAC
-        // under the requested static key; active sessions never take this path.
+
         if (PeerConfirmed && !allowUnexposedIncoming || Keys is null)
         {
-            return false; // nothing stale to replace, or too late to replace it
+            return false;
         }
 
         try
@@ -609,7 +558,7 @@ internal sealed class ConnectionCrypto
         }
     }
 
-    public long SupersededLatches; // Interlocked
+    public long SupersededLatches;
 
     public byte[] MyConfirm() => MyPeerId < PeerPeerId ? Keys!.LoConfirm : Keys!.HiConfirm;
 
@@ -626,10 +575,7 @@ internal sealed class ConnectionCrypto
         Telemetry.FrameRejected("session", "unverified");
     }
 
-    // Key-agreement forensics: at the FIRST reject, remember whether a session was already
-    // derived and the leading bytes of the stored, arriving, and own ephemeral keys. Cross-
-    // referencing the three names whose handshake the stale latch belongs to.
-    private long _keyRejectCaptured; // Interlocked: first reject wins
+    private long _keyRejectCaptured;
     private volatile string _keyRejectDetail = "";
 
     public string KeyRejectSummary => _keyRejectDetail;

@@ -6,9 +6,7 @@ namespace Pinhole.Tests;
 
 public sealed class PortMappingLifecycleTests
 {
-    // The choreography here runs on sub-second lease lifetimes; the budget only needs to
-    // absorb a steal-heavy runner's scheduler stalls. 20 s: one mac CI run starved the
-    // worker's post-cancellation continuation past a full 10 s without any lease fault.
+
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(20);
     private sealed class Lease(int port, ConcurrentQueue<string> trace) : IPortMapLease
     {
@@ -41,7 +39,7 @@ public sealed class PortMappingLifecycleTests
         service.Ensure(20001);
         await started.Task.WaitAsync(Budget);
         service.Shutdown();
-        reply.SetResult(lease); // model a response already arriving when cancellation happened
+        reply.SetResult(lease);
         await service.Completed.WaitAsync(Budget);
         service.Ensure(20002); service.Rebind(20003); service.Tick(Environment.TickCount64);
         Assert.Empty(published);

@@ -62,7 +62,7 @@ public sealed class RelaySignalingTests
         Assert.Equal(PathKind.Direct, outgoing.Path.Kind); Assert.Equal(PathKind.Direct, incoming.Path.Kind);
         Assert.True(outgoing.IsEncrypted); Assert.True(incoming.IsEncrypted);
         await Exchange(outgoing, incoming, 7); await Exchange(incoming, outgoing, 8);
-        Assert.DoesNotContain(relay.Traffic, d => d.Payload[0] == 0x52); // application Data was never relayed
+        Assert.DoesNotContain(relay.Traffic, d => d.Payload[0] == 0x52);
     }
 
     [Fact]
@@ -137,9 +137,7 @@ public sealed class RelaySignalingTests
         PinholeConnectResult result = await a.TryConnectAsync(RelayTicket(b)).WaitAsync(Budget);
         Assert.False(result.IsSuccess); Assert.Equal(PinholeConnectFailure.TimedOut, result.Failure);
         Assert.Contains("signaling", result.ErrorMessage!);
-        // Husk cleanup is asynchronous on BOTH sides: the timed-out dial's local entry is
-        // closed in the background, so poll it down like the peer's instead of asserting
-        // a single instant (a loaded runner once caught the husk mid-retirement).
+
         await Until(() => a.Connections.Count == 0 && b.Connections.Count == 0);
         Assert.DoesNotContain(relay.Traffic, d => d.Payload[0] == 0x52);
     }
@@ -216,10 +214,7 @@ public sealed class RelaySignalingTests
         attacker.SendTo(original, new IPEndPoint(IPAddress.Parse("192.0.2.20").MapToIPv6(), b.LocalPort).Serialize());
         var ack = new byte[8192];
         var from = new System.Net.SocketAddress(System.Net.Sockets.AddressFamily.InterNetworkV6);
-        // Receiving the reply proves that the replay was processed, rather than dropped
-        // by the virtual network. The attacker cannot produce an encrypted response. The
-        // dialer's PUNC carries the v4 mac1 extension and the reply mirrors its shape
-        // (mac1 has no source binding in phase 1 — that is mac2/cookie's job).
+
         int count = await Task.Run(() => attacker.ReceiveFrom(ack, from)).WaitAsync(Budget);
         Assert.Equal(0x51, ack[0]); Assert.Equal(9 + CryptoWire.PackCryptoBodyV4, count);
         Assert.True(Interlocked.Read(ref lab.Net.Delivered) > deliveredBefore);
@@ -263,9 +258,7 @@ public sealed class RelaySignalingTests
         Task<PinholeConnection> dial = a.ConnectAsync(RelayTicket(b), stop.Token);
         await Until(() => a.Engine.Lookup(b.PeerId) is { PeerCandidatesReceived: true });
         ConnState state = a.Engine.Lookup(b.PeerId)!;
-        // Honest retries parse the same relay identity into a new byte array.
-        // Compare every candidate field by value, including its key bytes, so that
-        // reference identity cannot turn an unchanged target into a false failure.
+
         var before = CandidateValues();
         byte[] original = relay.Traffic.First(d => d.Payload[0] == 0x55 && d.Source.SequenceEqual(b.EndpointPublicKey!)).Payload;
         long rejected = state.Public!.FramesRejected;
@@ -308,7 +301,7 @@ public sealed class RelaySignalingTests
         await using var b = await Node(lab, relay, "192.0.2.20");
         long initialDatagrams = Interlocked.Read(ref lab.Net.Delivered);
         Task<PinholeConnection> accepting = b.AcceptAsync();
-        Task<PinholeConnection> dial = a.ConnectAsync(b.ConnectionString); // reachable direct tuples and a relay
+        Task<PinholeConnection> dial = a.ConnectAsync(b.ConnectionString);
         await Until(() => a.Connections.Count == 1 && a.Connections[0].RelaySignalingReady
             && b.Connections.Count == 1 && b.Connections[0].RelaySignalingReady);
         Assert.False(dial.IsCompleted); Assert.False(accepting.IsCompleted);

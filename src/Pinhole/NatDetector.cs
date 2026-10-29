@@ -46,15 +46,14 @@ public static class NatDetector
             return NatType.Unknown;
         }
 
-        using var socket = new PeerSocket(0x4E); // 'N': an idle frame type for a probe-only socket
+        using var socket = new PeerSocket(0x4E);
         var seen = new List<IPEndPoint>();
         foreach (IPEndPoint server in servers)
         {
             IPEndPoint mapped;
             try
             {
-                // Detection must stay snappy even with a dead server in the list: cap each
-                // probe well under the punch engine's signaling timeout.
+
                 using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 probeCts.CancelAfter(TimeSpan.FromSeconds(3));
                 mapped = await socket.ProbeStunAsync(server, probeCts.Token).ConfigureAwait(false);
@@ -62,7 +61,7 @@ public static class NatDetector
             catch (Exception ex) when (ex is SocketException or TimeoutException or OperationCanceledException)
             {
                 ct.ThrowIfCancellationRequested();
-                continue; // an unresponsive server must not sink the verdict
+                continue;
             }
 
             seen.Add(mapped);
@@ -71,8 +70,6 @@ public static class NatDetector
         return Classify(seen);
     }
 
-    // IPv4 and IPv6 naturally have different endpoints. Only compare observations within
-    // one family, or a healthy dual-stack network would be mislabeled symmetric.
     internal static NatType Classify(IReadOnlyList<IPEndPoint> observations)
     {
         var comparable = observations.GroupBy(ep => ep.AddressFamily).Where(group => group.Count() >= 2).ToArray();

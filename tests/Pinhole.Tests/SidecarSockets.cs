@@ -24,7 +24,7 @@ internal static class SidecarSockets
             }
             catch (SocketException ex)
             {
-                // The number sits in an excluded TCP range; draw another one.
+
                 lastFailure = ex;
             }
         }
@@ -44,7 +44,7 @@ internal static class SidecarSockets
             }
             catch (SocketException) when (attempt < 7)
             {
-                await Task.Delay(150); // a busy runner's port pressure is transient
+                await Task.Delay(150);
                 continue;
             }
             if (node.TcpListeningPort is not null || attempt >= 7)

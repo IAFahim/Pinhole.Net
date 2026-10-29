@@ -21,7 +21,7 @@ public sealed class StunRefreshTests
             PublishIrohAddress = false,
             EnableLanDiscovery = false,
             EnableNetworkWatch = false, EnablePortMapping = false,
-            EnablePathValidation = false, // isolate this suite: refresh, not probe, behavior
+            EnablePathValidation = false,
             StunRefreshInterval = refresh,
         }).WaitAsync(Timeout);
     }
@@ -50,8 +50,6 @@ public sealed class StunRefreshTests
 
         stun.ReportMappedOverride = Mapping(41000);
 
-        // Poll on the artifact the test ultimately asserts (the regenerated string), so the
-        // pass condition and the assertions below can never observe different generations.
         await TestPoll.UntilAsync(Timeout, () =>
         {
             if (!Pinhole.ConnectionString.TryParse(node.ConnectionString, out Pinhole.ConnectionString? cs))
@@ -64,7 +62,7 @@ public sealed class StunRefreshTests
         });
 
         Assert.Contains(node.PublicEndpoints, ep => ep.Port == 41000);
-        Assert.DoesNotContain(node.PublicEndpoints, ep => ep.Port == 40000); // replaced, not accumulated
+        Assert.DoesNotContain(node.PublicEndpoints, ep => ep.Port == 40000);
     }
 
     [Fact]
@@ -81,20 +79,14 @@ public sealed class StunRefreshTests
 
         stun.ReportMappedOverride = Mapping(42100);
 
-        // The peer's candidate table is refreshed by the announce the refresh triggered.
         await TestPoll.UntilAsync(Timeout, () =>
             b.Engine.PeerCandidatesSnapshot(a.PeerId).Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Port == 42100));
 
-        // The refresh only re-advertised: the live direct path was never demoted to Dead or
-        // Closed. (A steal-heavy runner once caught a transient Punching here that sealed
-        // traffic healed moments later, so the claim settles instead of asserting a single
-        // instant — the strong invariant is that it comes back and never dies.)
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
             && atA.Path.Kind == PathKind.Direct);
         Assert.NotEqual(PinholeConnectionState.Dead, atA.State);
         Assert.NotEqual(PinholeConnectionState.Closed, atA.State);
 
-        // And it still carries traffic after the mapping moved.
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         void Handler(ReadOnlySpan<byte> body) => got.TrySetResult(body.ToArray());
         atB.Received += Handler;
@@ -125,7 +117,7 @@ public sealed class StunRefreshTests
 
         stun.ReportMappedOverride = Mapping(43100);
 
-        await Task.Delay(800); // several refresh periods would have passed at test cadence
+        await Task.Delay(800);
         Assert.DoesNotContain(node.PublicEndpoints, ep => ep.Port == 43100);
     }
 

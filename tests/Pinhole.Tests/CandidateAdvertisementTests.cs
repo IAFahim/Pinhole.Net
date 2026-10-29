@@ -60,7 +60,7 @@ public sealed class CandidateAdvertisementTests
     {
         if (!HostHasRadioOrEthernetLinkLocal())
         {
-            return; // nothing to advertise on this host; the opt-out case above covers it
+            return;
         }
 
         await using PinholeNode node = await PinholeNode.BindAsync(Options(advertiseLinkLocal: true));
@@ -69,6 +69,6 @@ public sealed class CandidateAdvertisementTests
             .Where(c => c.Kind == CandidateKind.Direct && c.Address.Address.IsIPv6LinkLocal)
             .ToList();
         Assert.InRange(linkLocal.Count, 1, 2);
-        Assert.All(linkLocal, c => Assert.Equal(0, c.Address.Address.ScopeId)); // bare: scope is the sender's concern
+        Assert.All(linkLocal, c => Assert.Equal(0, c.Address.Address.ScopeId));
     }
 }

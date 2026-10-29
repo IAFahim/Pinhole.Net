@@ -52,7 +52,6 @@ public sealed class RoamingTests
         var states = new List<PinholeConnectionState>();
         conn.StateChanged += s => { lock (states) { states.Add(s); } };
 
-        // The interface "dies": new socket, new port, same connection objects.
         int portBefore = b.LocalPort;
         var sw = Stopwatch.StartNew();
         await b.Engine.SimulateInterfaceLossAsync().WaitAsync(Timeout);
@@ -62,18 +61,16 @@ public sealed class RoamingTests
         sw.Stop();
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"recovery took {sw.Elapsed}");
 
-        // Same object, not a replacement: roaming must be invisible to the app.
         Assert.Same(conn, b.Connections.Single(c => c.PeerId == a.PeerId));
 
-        // And datagrams flow in both directions on the rebound path.
         Assert.True(conn.Path.Since > DateTimeOffset.UnixEpoch, "the path snapshot carries its timestamp");
         await AssertExchangeAsync(conn, atA, "after rebind, B -> A");
         await AssertExchangeAsync(atA, conn, "after rebind, A -> B");
 
         lock (states)
         {
-            Assert.Contains(PinholeConnectionState.Punching, states); // the outage was honest
-            Assert.Contains(PinholeConnectionState.Open, states);     // and so was the recovery
+            Assert.Contains(PinholeConnectionState.Punching, states);
+            Assert.Contains(PinholeConnectionState.Open, states);
         }
     }
 
@@ -85,21 +82,16 @@ public sealed class RoamingTests
         await using PinholeNode a = await PinholeNode.BindAsync(Opts(relays: [relay]));
         await using PinholeNode b = await PinholeNode.BindAsync(Opts(relays: [relay]));
 
-        // Meet on the relay first (direct candidates withheld), then let the engine's
-        // upgrade probing move the pair onto a direct path.
         ConnectionString fullA = ConnectionString.Parse(a.ConnectionString);
         string relayOnly = new ConnectionString(a.PeerId,
             fullA.Candidates.Where(c => c.Kind == CandidateKind.Relay).ToList(),
             staticKey: fullA.StaticKey).ToString();
         (PinholeConnection conn, PinholeConnection atA) = await ConnectPairAsync(a, b, relayOnly);
-        // On loopback the engine's direct-upgrade probing can land within the dial itself,
-        // so the post-dial state is Degraded *or* already Open — the meet was on the relay
-        // either way (the string carries no direct candidates).
+
         await WaitForStateAsync(conn, PinholeConnectionState.Open, Timeout);
         await WaitForStateAsync(atA, PinholeConnectionState.Open, Timeout);
         Assert.Equal(PathKind.Direct, conn.Path.Kind);
 
-        // The direct path dies on both sides; the relay path survives.
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
 
@@ -123,7 +115,6 @@ public sealed class RoamingTests
         b.Engine.SimulateDirectPathDeath(a.PeerId);
         a.Engine.SimulateDirectPathDeath(b.PeerId);
 
-        // No relay to fall back to: after a bounded re-punch the connection admits it.
         await WaitForStateAsync(conn, PinholeConnectionState.Dead, Timeout);
         PinholeConnection atA = a.Connections.Single(c => c.PeerId == b.PeerId);
         await WaitForStateAsync(atA, PinholeConnectionState.Dead, Timeout);

@@ -17,8 +17,7 @@ public sealed class FakeStunServer : IDisposable
         _udp = new Socket(ipv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _udp.Bind(new IPEndPoint(ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback, 0));
         LocalEndPoint = (IPEndPoint)_udp.LocalEndPoint!;
-        // Arm the receive before returning. An extra pool dispatch could consume
-        // the client's entire probe deadline before this local fixture starts.
+
         _ = RunAsync();
     }
 
@@ -28,9 +27,6 @@ public sealed class FakeStunServer : IDisposable
 
     public IPEndPoint? ReportMappedOverride { get; set; }
 
-    // The first N well-formed binding requests are dropped on the floor: the client
-    // must retransmit the same transaction to get through. Seen counts every
-    // well-formed request, dropped or not.
     public int DropFirstRequests { get; set; }
 
     public int RequestsSeen;
@@ -76,7 +72,7 @@ public sealed class FakeStunServer : IDisposable
 
         static byte[] BuildResponse(byte[] txid, IPEndPoint observed)
         {
-            // XOR-MAPPED-ADDRESS (0x0020) value: reserved(0) + family + port^cookie>>16 + addr^mask
+
             byte[] raw = observed.Address.GetAddressBytes();
             bool v4 = raw.Length == 4;
             byte[] value = new byte[4 + raw.Length];
@@ -90,7 +86,7 @@ public sealed class FakeStunServer : IDisposable
 
             int padded = (value.Length + 3) & ~3;
             byte[] msg = new byte[20 + 4 + padded];
-            BinaryPrimitives.WriteUInt16BigEndian(msg, 0x0101); // binding success
+            BinaryPrimitives.WriteUInt16BigEndian(msg, 0x0101);
             BinaryPrimitives.WriteUInt16BigEndian(msg.AsSpan(2), (ushort)(4 + padded));
             BinaryPrimitives.WriteUInt32BigEndian(msg.AsSpan(4), Cookie);
             txid.CopyTo(msg, 8);
@@ -120,7 +116,6 @@ public sealed class StunTests
 
         IPEndPoint mapped = await peer.ProbeStunAsync(server.LocalEndPoint).WaitAsync(DefaultTimeout);
 
-        // The fake reports whatever endpoint it observed — the client's own loopback address and port.
         Assert.Equal(IPAddress.Loopback, mapped.Address);
         Assert.Equal(peer.LocalPort, mapped.Port);
         Assert.Equal(mapped, peer.PublicAddress);
@@ -157,17 +152,14 @@ public sealed class StunTests
         IPEndPoint mapped = await peer.ProbeStunAsync(server.LocalEndPoint).WaitAsync(DefaultTimeout);
 
         Assert.Equal(peer.LocalPort, mapped.Port);
-        // Three losses survived: the original transmission plus at least three
-        // retransmits of the same transaction id.
+
         Assert.True(server.RequestsSeen >= 4, $"saw only {server.RequestsSeen} requests");
     }
 
     [Fact]
     public async Task Probe_ConcurrentCalls_SurviveLossOnEveryFirstTransmission()
     {
-        // The hunter signature: concurrent probes serialize on the shared
-        // transaction slot, so a lost datagram must cost one retransmit
-        // interval, never the whole serialized chain's budget.
+
         using FakeStunServer server = new() { DropFirstRequests = 2 };
         using var peer = new PeerSocket(0x56);
 

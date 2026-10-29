@@ -79,8 +79,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
-            // No multicast on this interface (common in containers): announcing is
-            // best-effort, never a bind failure.
+
         }
     }
 
@@ -109,9 +108,6 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
 
     public byte[]? EndpointPublicKey => _engine.EndpointPublicKey;
 
-    // Knock-aware: a knock-configured node's string carries the secret (version 4) —
-    // only what this string hands out may connect. LAN-discovery strings never do: a
-    // multicast announcement would hand the knock to every listener.
     public string ConnectionString => new ConnectionString(
         _engine.PeerId,
         _engine.LocalCandidatesSnapshot(),
@@ -313,9 +309,7 @@ public sealed class PinholeNode : IAsyncDisposable, IDisposable
         }
         catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
-            // The handshake itself refused the peer (pinning mismatch, refused encryption,
-            // failed confirmation): the cause is counted where it happened, in
-            // HandshakeFailed — this is only the attempt's terminal outcome.
+
             Telemetry.AttemptOutcome(Telemetry.OutcomeDialFaulted);
             throw;
         }

@@ -58,8 +58,7 @@ public sealed class Blake3Tests
     [Fact]
     public void KnownEmptyVector_Matches()
     {
-        // af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262 — the published
-        // BLAKE3 hash of the empty string.
+
         byte[] root = Blake3.Hash([]);
         Assert.Equal("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262", Convert.ToHexString(root).ToLowerInvariant());
     }
@@ -67,7 +66,7 @@ public sealed class Blake3Tests
     [Fact]
     public void ChunkCvs_RecomputeFromData_AndReceiverTreeReproducesRoot()
     {
-        byte[] data = RandomNumberGenerator.GetBytes(5000); // 4 full chunks + 904
+        byte[] data = RandomNumberGenerator.GetBytes(5000);
         var tree = new Blake3.Tree();
         tree.Update(data);
         byte[] root = tree.RootHash();
@@ -81,8 +80,6 @@ public sealed class Blake3Tests
             Assert.Equal(cvs[i], Blake3.ChunkCv(chunk, (ulong)i, root: false));
         }
 
-        // The receiver's job: hash received bytes through its own tree while writing them
-        // out, verify each chunk's CV on arrival, and require the root to match the ticket.
         var receiver = new Blake3.Tree();
         for (int i = 0; i < cvs.Count; i++)
         {

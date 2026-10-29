@@ -65,7 +65,7 @@ public sealed class LanMulticastChannelTests
         channel.Send(new byte[] { 22 }, null);
         Assert.True(sink.Poll(2_000_000, SelectMode.SelectRead));
         Assert.Equal(1, sink.Receive(new byte[100]));
-        // An IPv4 packet must give browsers the corresponding LOCAL IPv6 scope.
+
         sink.SendTo(new byte[] { 33 }, new IPEndPoint(IPAddress.Loopback, channel.LocalV4!.Port));
         Assert.True(channel.TryReceive(new byte[100], out _, out _, 2000));
         Assert.Equal(v6Index, channel.LastReceiveIpv6Scope);

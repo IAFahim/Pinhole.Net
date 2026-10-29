@@ -133,7 +133,7 @@ public sealed class TcpStreamSessionTests
             incoming.Send(data);
             Assert.Equal(data, (await outgoing.ReceiveAsync().AsTask().WaitAsync(Budget))!.Value.ToArray());
         }
-        Assert.Equal(0, lab.Net.Delivered); // no direct UDP frame slipped through the policy
+        Assert.Equal(0, lab.Net.Delivered);
         await outgoing.CloseAsync();
         await incoming.Closed.WaitAsync(Budget);
         Assert.Equal(PinholeConnectionState.Closed, incoming.State);
@@ -156,7 +156,7 @@ public sealed class TcpStreamSessionTests
         await using var attacker = await Pair.Open(null, b.Engine, tag: 2);
         byte[] punc = pair.AtB.First(frame => frame[0] == 0x50);
         Assert.True(attacker.A.Send(punc));
-        await Until(() => attacker.AtA.Any(frame => frame[0] == 0x53)); // new encrypted challenge was issued
+        await Until(() => attacker.AtA.Any(frame => frame[0] == 0x53));
         byte[] confirm = pair.AtB.First(frame => frame[0] == 0x57);
         Assert.True(attacker.A.Send(confirm));
         byte[] oldPong = pair.AtB.First(frame => frame[0] == 0x54);

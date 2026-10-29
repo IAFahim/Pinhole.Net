@@ -120,7 +120,7 @@ public sealed class TcpSessionTests
             using var extra = new TcpClient();
             await extra.ConnectAsync(IPAddress.Loopback, pool.ListeningPort!.Value).WaitAsync(Timeout);
             try { Assert.Equal(0, await extra.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(Timeout)); }
-            catch (IOException) { } // a reset is also a refusal; no protocol/session was admitted
+            catch (IOException) { }
             Assert.Equal(TcpTransport.MaxLinks, pool.LiveLinks);
             pool.Dispose();
             Assert.Null(pool.ListeningPort);

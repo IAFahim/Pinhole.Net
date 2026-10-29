@@ -66,9 +66,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
             TimeSpan controller = await RunOneRungAsync(dir, fixedWindow: false);
             output.WriteLine($"5% bidirectional loss, 128-pkt queue: fixed window {fixedWindow.TotalSeconds:F1}s vs " +
                              $"controller {controller.TotalSeconds:F1}s ({fixedWindow / controller:F1}x)");
-            // Shared CI load and OS timer granularity change the relative elapsed times.
-            // Keep the A/B measurement, but gate on actual loss recovery and verification;
-            // controller adaptation itself is checked below with controlled RTT samples.
+
         }
         finally
         {
@@ -126,16 +124,16 @@ public sealed class CongestionTests(ITestOutputHelper output)
 
         long window = controller.WindowBytes;
         controller.OnRetransmit(1000);
-        Assert.Equal(window, controller.WindowBytes); // isolated loss does not collapse the window
+        Assert.Equal(window, controller.WindowBytes);
         controller.OnRetransmit(1001);
         controller.OnRetransmit(1002);
-        Assert.True(controller.WindowBytes < window); // clustered loss reduces pressure
+        Assert.True(controller.WindowBytes < window);
         controller.OnPathChanged();
         Assert.Equal(window, controller.WindowBytes);
         Assert.Equal(initial, controller.PtoFor(0));
-        Assert.Null(stats.SmoothedRtt); // the old route's sample cannot describe the new one
+        Assert.Null(stats.SmoothedRtt);
         controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: false, 2000, index: 0);
-        Assert.Equal(window + 1024, controller.WindowBytes); // fresh-route slow start is restored
+        Assert.Equal(window + 1024, controller.WindowBytes);
     }
 
     [Fact]
@@ -143,22 +141,20 @@ public sealed class CongestionTests(ITestOutputHelper output)
     {
         var stats = new BlobTransferStats();
         var controller = new BlobController(1024 * 1024, new BlobFlowBudget(1024 * 1024), stats, fixedWindow: false);
-        // A deep-queue path: 40 ms base delay, a standing queue holds srtt near double.
+
         controller.ObserveRtt(TimeSpan.FromMilliseconds(40));
         controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
         controller.ObserveRtt(TimeSpan.FromMilliseconds(200));
 
         long window = controller.WindowBytes;
         controller.OnRetransmit(10_000);
-        Assert.Equal(window, controller.WindowBytes); // one expiry under standing delay is not loss
+        Assert.Equal(window, controller.WindowBytes);
 
         controller.OnRetransmit(10_001);
-        Assert.True(controller.WindowBytes < window); // a cluster collapses it
+        Assert.True(controller.WindowBytes < window);
         Assert.Equal(1, stats.LossEvents);
         long collapsed = controller.WindowBytes;
 
-        // The retransmissions deliver what the originals never did: real-loss votes.
-        // No duplicate verdict ever arrives, so nothing may come back.
         for (int i = 0; i < 3; i++)
         {
             controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050 + i, index: 100 + i);
@@ -166,13 +162,9 @@ public sealed class CongestionTests(ITestOutputHelper output)
 
         Assert.Equal(0, stats.RestoredWindows);
 
-        // A second collapse one loss window later; this time the "lost" originals land
-        // as duplicates — the timer fired on queue delay, and the verdict undoes it.
         controller.OnRetransmit(10_600);
-        // A standing collapse lands AT the threshold, so the three arrivals since grew
-        // it in congestion avoidance: 64 bytes each into the fractional accumulator,
-        // 192 total — under one chunk, and the window has not yet earned a step.
-        Assert.Equal(collapsed, controller.WindowBytes); // still the first collapse's shape
+
+        Assert.Equal(collapsed, controller.WindowBytes);
         controller.OnRetransmit(10_601);
         Assert.Equal(2, stats.LossEvents);
         long beforeSpuriousVerdict = controller.WindowBytes;
@@ -180,20 +172,13 @@ public sealed class CongestionTests(ITestOutputHelper output)
 
         controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: true, 10_700, index: 0);
         Assert.Equal(1, stats.RestoredWindows);
-        Assert.Equal(collapsed, controller.WindowBytes); // restored to the pre-collapse window
+        Assert.Equal(collapsed, controller.WindowBytes);
     }
 
     [Fact]
     public void Controller_StragglerOriginals_OverturnTheFreshVotes_AndRestoreTheWindow()
     {
-        // The macOS hunter orbit: a starved scheduler delivers the re-served copies
-        // first (fresh, real-loss votes) and the slow originals after (no reservation
-        // left). Before pairing, each chunk netted -1 — the duplicates PROVED the
-        // collapse spurious while confirming it in the ledger, restores stayed at 0,
-        // and the window ground down on a link that dropped nothing. Paired, each
-        // completed chunk nets +1: two fresh votes (-2), then each original cancels
-        // its chunk's vote and adds the spurious one (+2), so the ledger crosses the
-        // quorum on the second completed pair.
+
         var stats = new BlobTransferStats();
         var controller = new BlobController(1024 * 1024, new BlobFlowBudget(1024 * 1024), stats, fixedWindow: false);
         controller.ObserveRtt(TimeSpan.FromMilliseconds(40));
@@ -202,19 +187,16 @@ public sealed class CongestionTests(ITestOutputHelper output)
 
         long window = controller.WindowBytes;
         controller.OnRetransmit(10_000);
-        controller.OnRetransmit(10_001); // standing cluster: collapse, 2 expiries, quorum 1
+        controller.OnRetransmit(10_001);
         Assert.True(controller.WindowBytes < window);
 
-        // Both re-served copies land fresh: real-loss votes, no duplicates in sight.
         controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_050, index: 100);
         controller.OnChunkArrived(1024, hadReservation: false, fresh: true, retransmitted: true, 10_051, index: 101);
         Assert.Equal(0, stats.RestoredWindows);
 
-        // First original straggles in: its pair nets +1, the other pair still owes -1.
         controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: false, 10_600, index: 100);
-        Assert.Equal(0, stats.RestoredWindows); // ledger 0: under the quorum of 1
+        Assert.Equal(0, stats.RestoredWindows);
 
-        // Second original completes its pair: ledger +1, the collapse overturns.
         controller.OnChunkArrived(1024, hadReservation: false, fresh: false, retransmitted: false, 10_640, index: 101);
         Assert.Equal(1, stats.RestoredWindows);
         Assert.Equal(window, controller.WindowBytes);
@@ -237,24 +219,16 @@ public sealed class CongestionTests(ITestOutputHelper output)
     [Fact]
     public void TryStartRun_WhenTheSharedBudgetRefuses_LeavesThePacerCreditIntact()
     {
-        // A-11: the pacer's credit was deducted before the shared budget was asked, so a
-        // refused reservation burned credit for bytes that were never sent — under
-        // contention on the pie the pacer starved itself. Conservation: a refused run
-        // leaves the pacer, the window, and the budget exactly as they were.
+
         var budget = new BlobFlowBudget(64 * 1024);
         var controller = new BlobController(1024 * 1024, budget, stats: null, fixedWindow: false);
 
-        // A rival download holds the entire shared pie.
         Assert.True(budget.TryReserve(64 * 1024));
 
-        // Seed the pacer clock, then accrue a full run's worth of credit (capped at four
-        // chunks for the 32 KiB initial window) and attempt a run the budget refuses.
         Assert.False(controller.TryStartRun(2048, 0));
         Assert.False(controller.TryStartRun(2048, 10_000));
         Assert.Equal(64 * 1024, budget.UsedBytes);
 
-        // The refusal must not have burned the credit: with the pie freed, the same
-        // burst leaves immediately instead of waiting for the pacer to refill.
         budget.Release(64 * 1024);
         Assert.True(controller.TryStartRun(4096, 10_000));
         Assert.Equal(4096, budget.UsedBytes);
@@ -269,18 +243,13 @@ public sealed class CongestionTests(ITestOutputHelper output)
             using var lab = new VirtualLab();
             await using BlobServer server = await ServeAsync(lab, dir);
 
-            // A duplicating provider: one chunk in eight arrives twice. The second copy
-            // verifies nothing — it is pure wire load, and exactly what the stats must
-            // count instead of pretending request credits bound the response side.
             server.DuplicateChunk = idx => idx % 8 == 3;
-            long expectedDuplicateBytes = 64 * 1024; // 512 chunks / 8 = 64 duplicates × 1 KiB
+            long expectedDuplicateBytes = 64 * 1024;
 
             var stats = new BlobTransferStats();
             BlobDownloadResult result = await DownloadAsync(lab, server, dir, stats).WaitAsync(Budget);
             Assert.Equal(FlowBytes, result.Bytes);
-            // A retry whose first response was merely slow produces an extra copy beyond
-            // the ideal 64 — runner scheduling decides how many. The property under test
-            // is that duplicates are counted as wire load, never hidden or discounted.
+
             Assert.True(stats.DuplicateBytes >= expectedDuplicateBytes,
                 $"only {stats.DuplicateBytes} duplicate bytes counted, expected at least {expectedDuplicateBytes}");
             Assert.Equal(stats.DuplicateBytes + FlowBytes, stats.ReceivedBytes);
@@ -307,8 +276,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
             {
                 if (paused || p.VerifiedBytes < 16 * 1024) return;
                 paused = true;
-                // The network pump keeps receiving while application work stalls the
-                // verifier past its PTO. Already buffered responses are not lost data.
+
                 Thread.Sleep(350);
             });
             BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
@@ -351,9 +319,6 @@ public sealed class CongestionTests(ITestOutputHelper output)
             lab.Net.AddRule(LinkRule.Bottleneck(region, region, LinkBits, queuePackets: 128,
                 delay: TimeSpan.FromMilliseconds(20)));
 
-            // One small shared pie: both downloads join it, so neither can open a full
-            // window while the other is starving. The sampler watches the ledger the
-            // whole time — the cap must hold even at the peaks.
             var budget = new BlobFlowBudget(96 * 1024);
             long peak = 0;
             using var sampler = new System.Threading.Timer(
@@ -367,7 +332,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
             sampler.Dispose();
             Assert.Equal(FlowBytes, done[0].Bytes);
             Assert.Equal(FlowBytes, done[1].Bytes);
-            Assert.Equal(0, budget.UsedBytes); // both streams settled every reservation
+            Assert.Equal(0, budget.UsedBytes);
             Assert.True(peak > 32 * 1024, $"the budget was never really exercised (peak {peak / 1024} KiB)");
             Assert.True(peak <= budget.CapacityBytes,
                 $"aggregate in-flight peaked at {peak / 1024} KiB, past the {budget.CapacityBytes / 1024} KiB pie");
@@ -389,8 +354,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
             using var lab = new VirtualLab();
             await using BlobServer server = await ServeAsync(lab, dir);
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
-            // A deliberately thin link: the 512 KiB flow takes seconds, so the roam
-            // provably lands mid-flight rather than after the last chunk was served.
+
             lab.Net.AddRule(LinkRule.Bottleneck(region, region, 4_000_000, queuePackets: 64,
                 delay: TimeSpan.FromMilliseconds(20)));
 
@@ -414,7 +378,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
                 }, default).WaitAsync(Budget));
 
             await gate.Task.WaitAsync(Budget);
-            await server.Node.Engine.SimulateInterfaceLossAsync(); // the provider roams: new endpoint, same session
+            await server.Node.Engine.SimulateInterfaceLossAsync();
 
             BlobDownloadResult result = await run;
             Assert.Equal(FlowBytes, result.Bytes);
@@ -429,8 +393,6 @@ public sealed class CongestionTests(ITestOutputHelper output)
         }
     }
 
-    // ------------------------------------------------------------------ plumbing
-
     private static string TempDir()
     {
         string dir = Path.Combine(Path.GetTempPath(), "pinhole-congestion-" + Guid.NewGuid().ToString("N"));
@@ -444,7 +406,7 @@ public sealed class CongestionTests(ITestOutputHelper output)
         Random.Shared.NextBytes(data);
         string src = Path.Combine(dir, name + ".src");
         await File.WriteAllBytesAsync(src, data);
-        int nextPort = port; // a fresh port per (re)bind: a fixed one would make a roam a no-op
+        int nextPort = port;
         return await BlobServer.ServeAsync(src, new BlobServeOptions
         {
             NodeOptions = lab.BaseOptions(o => o with

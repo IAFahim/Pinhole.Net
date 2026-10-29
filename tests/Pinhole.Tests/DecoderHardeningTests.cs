@@ -49,8 +49,7 @@ public sealed class DecoderHardeningTests
     public void BlobTicket_EveryTruncation_IsRejected()
     {
         string text = RealTicket().ToString();
-        // A ticket is exactly-length-checked: no strict prefix of a valid ticket may
-        // parse, or two different strings would name the same capability.
+
         for (int len = 0; len < text.Length; len++)
         {
             Assert.False(BlobTicket.TryParse(text[..len], out _), $"prefix of length {len} parsed");
@@ -60,7 +59,7 @@ public sealed class DecoderHardeningTests
     [Fact]
     public void BlobTicket_TryParse_Null_ReturnsFalse()
     {
-        // The contract says "false on any malformed input"; null is not exempt.
+
         Assert.False(BlobTicket.TryParse(null, out BlobTicket? ticket));
         Assert.Null(ticket);
     }
@@ -68,7 +67,7 @@ public sealed class DecoderHardeningTests
     [Fact]
     public void BlobTicket_RandomBytes_NeverProduceAnUnexpectedThrow()
     {
-        // Deterministic seed: any failure regenerates the exact inputs.
+
         var rng = new Random(0xB10B);
         for (int i = 0; i < 2_000; i++)
         {
@@ -89,9 +88,7 @@ public sealed class DecoderHardeningTests
         }
         catch (FormatException)
         {
-            // The one documented failure mode for hostile input; anything else
-            // (IndexOutOfRange, OutOfMemory, a raw codec throw) escapes and fails
-            // the test exactly as it should.
+
         }
     }
 
@@ -128,9 +125,7 @@ public sealed class DecoderHardeningTests
 
     private static void ParseMustStayBounded(byte[] frame)
     {
-        // The only property: TryParse classifies, it never throws — garbage costs one
-        // datagram, same rule as the engine. A structurally-valid-but-lying frame is
-        // fine here: the AEAD tag or the per-chunk CV catches liars upstream.
+
         bool parsed = BlobWire.Frame.TryParse(frame, out BlobWire.Frame f);
         if (parsed)
         {
@@ -186,9 +181,8 @@ public sealed class DecoderHardeningTests
     [Fact]
     public void Manifest_HugeDeclaredEntryCount_FailsFastInsteadOfPreAllocating()
     {
-        // A tiny manifest claiming ~2 billion entries must die on truncation, not on
-        // an OutOfMemoryException from trusting the count as a capacity hint.
-        var claimed = new byte[2 + 4]; // name len 0, count = int.MaxValue
+
+        var claimed = new byte[2 + 4];
         claimed[0] = 0;
         claimed[1] = 0;
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(claimed.AsSpan(2), int.MaxValue);

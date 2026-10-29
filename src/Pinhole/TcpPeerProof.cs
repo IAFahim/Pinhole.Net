@@ -42,8 +42,7 @@ internal sealed class TcpPeerProof
 
     internal int CompareTo(TcpPeerProof other)
     {
-        // Both ends see the same sorted pair, so parallel streams converge on the
-        // same winner instead of each end closing the other's preferred stream.
+
         long remote = Volatile.Read(ref _remoteChallenge), otherRemote = Volatile.Read(ref other._remoteChallenge);
         var key = (Math.Min(_challenge, remote), Math.Max(_challenge, remote));
         var otherKey = (Math.Min(other._challenge, otherRemote), Math.Max(other._challenge, otherRemote));

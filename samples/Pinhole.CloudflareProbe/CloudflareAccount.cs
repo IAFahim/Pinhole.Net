@@ -24,8 +24,7 @@ internal sealed record CloudflareCredentials(string Username, string Credential,
             };
             foreach (string? url in values)
             {
-                // Select only documented Cloudflare UDP endpoints. A TCP/TLS URL or
-                // another provider must never turn this into a false Cloudflare pass.
+
                 int port = url?.ToLowerInvariant() switch
                 {
                     "turn:turn.cloudflare.com:3478?transport=udp" => 3478,
@@ -134,7 +133,7 @@ internal sealed class CloudflareAccount : IAsyncDisposable
     {
         try
         {
-            if (_deleteUrl is null) return; // Caller-owned keys are never deleted.
+            if (_deleteUrl is null) return;
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             using var request = new HttpRequestMessage(HttpMethod.Delete, _deleteUrl);
             SetAuth(request, _accountAuth);
@@ -197,7 +196,7 @@ internal sealed class CloudflareAccount : IAsyncDisposable
             }
             string errors = await stderr;
             string output = await stdout;
-            // Never echo raw CLI output: token/account commands contain sensitive data.
+
             if (process.ExitCode != 0)
                 throw new ProbeFailure("BLOCKED",
                     (errors + output).Contains("Cloudflare auth server could not be reached", StringComparison.Ordinal)

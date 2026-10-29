@@ -9,60 +9,12 @@ public readonly record struct DnsHeader(ushort Id, ushort Flags, int Questions, 
 
 public sealed record DnsQuestion(string Name, ushort Type, ushort Class);
 
-// RdataOffset is the record's rdata start inside the whole DNS message: PTR/SRV
-// rdata can hold compression pointers, which only resolve against the message.
 public sealed record DnsResourceRecord(string Name, ushort Type, ushort Class, uint Ttl, byte[] Rdata, int RdataOffset);
 
 public sealed record DnsMessage(DnsHeader Header, DnsQuestion[] Questions, DnsResourceRecord[] Records);
 
 public readonly record struct DnsSrv(ushort Priority, ushort Weight, ushort Port, string Target);
 
-// Canonical DNS wire codec for the shapes this repo actually puts on the wire:
-// the mDNS announcements/queries of Pinhole.DnsCodec (header, PTR/SRV/TXT/A/AAAA
-// records, TXT "key=value" peer entries) and the pkarr DNS-TXT payload of
-// IrohDiscovery. Byte-compatible with both on every form they produce or accept,
-// and total: TryRead never throws on wire-controlled bytes and never returns an
-// out-of-range value; Write throws only on programmer error.
-//
-// Compression pointers: READ accepts them (both existing parsers do; the pkarr
-// writer even emits 0xC0 0x0C for repeated owners), with the exact safety rules
-// DnsCodec.Reader.TryName uses. WRITE never compresses except through the
-// explicit WriteCompressionPointer, which reproduces the pkarr owner encoding.
-//
-// Canonical rules enforced by TryReadMessage, numbered for the tests:
-//   1. at least 12 bytes, and the transaction id is zero: every DNS message the
-//      repo sends is mDNS or pkarr (DnsCodec.TryHeader requires bytes 0-1 == 0;
-//      IrohDiscovery.CreatePayload writes zeros). Flags pass through unchecked —
-//      both existing parsers ignore them, so the codec does not invent rules.
-//   2. answers+authorities+additionals <= 256 (DnsCodec.MaxRecords).
-//   3. every question and record fits inside the message: a declared record
-//      count larger than the records present fails (truncated rdata fails).
-//   4. the question+record walk ends exactly at the message end: trailing bytes
-//      are rejected. IrohDiscovery.ReadTxt enforces this too; DnsCodec is lenient
-//      here — deliberately stricter, pinned in the tests.
-//   5. names: label length bytes 1..63; a length byte >= 64 that is not a
-//      compression pointer (0x40..0xBF) is rejected; the 0x00 root terminates.
-//   6. compression pointers 0xC0|offset: both bytes present, target strictly
-//      before the pointer (no forward or self pointers), at most 128 pointer
-//      follows per name (loop-safe).
-//   7. sum(label bytes + 1 per label) <= 255 after decompression.
-//   8. label content is ASCII (< 0x80). DnsCodec substitutes '?' for high bytes;
-//      every writer in the repo emits ASCII, so the canonical codec rejects.
-//      The empty name (root, zero labels) reads back as "" — mirrors DnsCodec;
-//      WriteName cannot produce it (the empty label is rejected).
-//   9. PTR rdata is exactly one name and SRV rdata is exactly priority, weight,
-//      port and one target name, each ending exactly at the rdata end.
-//      DnsCodec ignores rdlength while decompressing those names — deliberately
-//      stricter, pinned in the tests.
-//  10. mDNS TXT entries (key=value): the length-prefixed strings tile the rdata
-//      exactly and are ASCII. DnsCodec.ParseTxt silently drops a malformed tail
-//      and lossily maps high bytes to '?' — deliberately stricter, pinned in
-//      the tests. Only strings with '=' at index > 0 yield entries (mirror of
-//      ParseTxt; junk strings are skipped, not rejected).
-//  11. pkarr TXT text: the strings tile the rdata exactly and their
-//      concatenation is valid UTF-8. IrohDiscovery.ReadTxt THROWS
-//      InvalidDataException on bad UTF-8 (audit C-06); the canonical codec
-//      returns false instead — never throws.
 public static class DnsWireCodec
 {
     public const int HeaderSize = 12;
@@ -80,8 +32,6 @@ public static class DnsWireCodec
     public const ushort ClassIn = 1;
     public const ushort ClassAny = 255;
     public const ushort CacheFlushBit = 0x8000;
-
-    // ---- header ----
 
     public static bool TryReadHeader(ReadOnlySpan<byte> message, out DnsHeader header)
     {
@@ -122,12 +72,6 @@ public static class DnsWireCodec
         return HeaderSize;
     }
 
-    // ---- names ----
-
-    // Reads one name starting at cursor (an absolute offset into message),
-    // following compression pointers per rules 5-8. On success cursor advances
-    // past the name's first occurrence (terminator or pointer); on failure the
-    // cursor is left untouched.
     public static bool TryReadName(ReadOnlySpan<byte> message, ref int cursor, out string? name)
     {
         name = null;
@@ -163,7 +107,7 @@ public static class DnsWireCodec
                 int target = ((first & 0x3F) << 8) | message[pos + 1];
                 if (target >= pos)
                 {
-                    return false; // forward or self pointer: DnsCodec refuses these too
+                    return false;
                 }
 
                 if (end < 0) end = pos + 2;
@@ -196,9 +140,6 @@ public static class DnsWireCodec
         return true;
     }
 
-    // Uncompressed name encoding, mirroring DnsCodec.Writer.WriteName: labels
-    // split on '.', each 1..63 ASCII bytes, root terminator appended. The 255
-    // total-name cap that DnsCodec only checks on read is enforced here too.
     public static int WriteName(Span<byte> destination, string name)
     {
         int written = 0, totalLength = 0;
@@ -232,8 +173,6 @@ public static class DnsWireCodec
         return 2;
     }
 
-    // ---- questions ----
-
     public static bool TryReadQuestion(ReadOnlySpan<byte> message, ref int cursor, out DnsQuestion? question)
     {
         question = null;
@@ -259,8 +198,6 @@ public static class DnsWireCodec
         cursor = cursor[WirePrimitives.WriteU16Be(cursor, question.Class)..];
         return destination.Length - cursor.Length;
     }
-
-    // ---- records ----
 
     public static bool TryReadResourceRecord(ReadOnlySpan<byte> message, ref int cursor, out DnsResourceRecord? record)
     {
@@ -291,9 +228,6 @@ public static class DnsWireCodec
         return destination.Length - cursor.Length;
     }
 
-    // Owner passed as already-encoded name bytes (WriteName output or a
-    // compression pointer), for the pkarr shape where every answer after the
-    // first points back to the first owner.
     public static int WriteResourceRecord(Span<byte> destination, ReadOnlySpan<byte> encodedName, ushort type, ushort @class, uint ttl, ReadOnlySpan<byte> rdata)
     {
         Span<byte> cursor = destination;
@@ -303,8 +237,6 @@ public static class DnsWireCodec
         cursor = cursor[WriteRecordTail(cursor, type, @class, ttl, rdata)..];
         return destination.Length - cursor.Length;
     }
-
-    // ---- typed rdata readers (rule 9) ----
 
     public static bool TryReadPtrTarget(ReadOnlySpan<byte> message, DnsResourceRecord record, out string? target)
     {
@@ -341,8 +273,6 @@ public static class DnsWireCodec
         return true;
     }
 
-    // mDNS peer TXT framing: "key=value" strings (rule 10). Strings without a
-    // '=' at index > 0 are skipped, exactly like DnsCodec.ParseTxt.
     public static bool TryReadTxtEntries(ReadOnlySpan<byte> rdata, out (string Key, string Value)[]? entries)
     {
         entries = null;
@@ -351,7 +281,7 @@ public static class DnsWireCodec
         while (pos < rdata.Length)
         {
             int len = rdata[pos++];
-            if (len > rdata.Length - pos) return false; // ParseTxt drops a malformed tail; canonical rejects
+            if (len > rdata.Length - pos) return false;
             for (int i = pos; i < pos + len; i++)
             {
                 if (rdata[i] > 0x7F) return false;
@@ -370,8 +300,6 @@ public static class DnsWireCodec
         return true;
     }
 
-    // pkarr TXT framing (rule 11): strings concatenated and strict-UTF-8
-    // decoded. Total where IrohDiscovery.ParsePayload throws (C-06).
     public static bool TryReadTxtText(ReadOnlySpan<byte> rdata, out string? text)
     {
         text = null;
@@ -406,8 +334,6 @@ public static class DnsWireCodec
         return true;
     }
 
-    // ---- rdata writers ----
-
     public static int WriteSrvRdata(Span<byte> destination, ushort priority, ushort weight, ushort port, string target)
     {
         Span<byte> cursor = destination;
@@ -418,8 +344,6 @@ public static class DnsWireCodec
         return destination.Length - cursor.Length;
     }
 
-    // One length-prefixed ASCII string per entry, mirroring Writer.WriteTxt's
-    // framing (each "key=value" string is its own DNS string, at most 255 bytes).
     public static int WriteTxtStrings(Span<byte> destination, ReadOnlySpan<string> strings)
     {
         int written = 0;
@@ -440,8 +364,6 @@ public static class DnsWireCodec
         return written;
     }
 
-    // pkarr TXT chunking, byte-identical to IrohDiscovery.CreatePayload: the
-    // UTF-8 text is cut into <=255-byte strings, one length byte each.
     public static int WriteTxtText(Span<byte> destination, ReadOnlySpan<byte> utf8Text)
     {
         int written = 0;
@@ -456,8 +378,6 @@ public static class DnsWireCodec
 
         return written;
     }
-
-    // ---- mDNS shapes, byte-exact mirrors of DnsCodec.Writer ----
 
     public static int WritePtrQuestion(Span<byte> destination, string service)
     {
@@ -524,8 +444,6 @@ public static class DnsWireCodec
         return WriteResourceRecord(destination, host, type, (ushort)(ClassIn | CacheFlushBit), ttl, raw);
     }
 
-    // ---- whole message (rules 1-4) ----
-
     public static bool TryReadMessage(ReadOnlySpan<byte> message, out DnsMessage? parsed)
     {
         parsed = null;
@@ -541,8 +459,6 @@ public static class DnsWireCodec
         return true;
     }
 
-    // Mirrors DnsCodec.AsksForOurService: any PTR question for the service,
-    // class IN or ANY with the mDNS top bit masked off, name case-insensitive.
     public static bool AsksForService(ReadOnlySpan<byte> message, string service)
     {
         ArgumentNullException.ThrowIfNull(service);
@@ -581,7 +497,7 @@ public static class DnsWireCodec
             records++;
         }
 
-        return cursor == message.Length; // rule 4: no trailing bytes
+        return cursor == message.Length;
     }
 
     private static bool RdataInMessage(ReadOnlySpan<byte> message, DnsResourceRecord record) =>

@@ -9,7 +9,6 @@ public sealed class PathValidationTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
-    // Detection budget ≈ idle + maxUnanswered × interval ≈ 0.7 s in these tests.
     private static readonly TimeSpan Idle = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(150);
 
@@ -22,7 +21,7 @@ public sealed class PathValidationTests
         PublishIrohAddress = false,
         EnableLanDiscovery = false,
         EnableNetworkWatch = false, EnablePortMapping = false,
-        EnableTcpTransport = false, // these scenarios isolate UDP loss and restoration
+        EnableTcpTransport = false,
         EnablePathValidation = validation,
         PathValidationIdle = idle ?? Idle,
         PathValidationProbeInterval = Interval,
@@ -49,7 +48,7 @@ public sealed class PathValidationTests
             var sw = Stopwatch.StartNew();
             while (!got.Task.IsCompleted && sw.Elapsed < Timeout)
             {
-                from.Send(Encoding.UTF8.GetBytes(marker)); // unreliable: retransmit until heard
+                from.Send(Encoding.UTF8.GetBytes(marker));
                 await Task.Delay(50);
             }
 
@@ -70,14 +69,10 @@ public sealed class PathValidationTests
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
         await TestPoll.UntilAsync(Timeout, () => a.Engine.Lookup(b.PeerId)?.PacketRelayConfirmed == true
             && b.Engine.Lookup(a.PeerId)?.PacketRelayConfirmed == true);
-        // Both ends must settle Open on the direct path before the fault is injected —
-        // under load the relay can briefly carry the session while iroh confirmation
-        // lands, and the premise of this test is a healthy direct path to kill.
+
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
             && atB.State == PinholeConnectionState.Open);
 
-        // The fault injector only drops packets — no NotifyPathSuspect, no send errors.
-        // The engine has to notice on its own within the detection budget.
         a.Engine.SimulateSilentDirectPathLoss(b.PeerId);
         b.Engine.SimulateSilentDirectPathLoss(a.PeerId);
 
@@ -88,7 +83,6 @@ public sealed class PathValidationTests
         Assert.False(atA.Closed.IsCompleted);
         await AssertExchangeAsync(atA, atB, "detected silently, flowing on relay");
 
-        // Relay traffic keeps flowing but never falsely certifies the dead direct path.
         Assert.Equal(PinholeConnectionState.Degraded, atA.State);
         Assert.Equal(PathKind.Relay, atA.Path.Kind);
     }
@@ -99,8 +93,7 @@ public sealed class PathValidationTests
     public async Task RestoredUdp_UpgradesTheSameConnectionBackToDirect(bool tcpEnabled)
     {
         await using var server = new FakeIrohRelay();
-        // Bind to loopback so alternate NIC addresses cannot accidentally reopen the
-        // session and hide a failure to promote its ORIGINAL direct address.
+
         var options = Opts(server: server) with
         {
             Bind = new IPEndPoint(IPAddress.Loopback, 0),
@@ -109,8 +102,7 @@ public sealed class PathValidationTests
         await using var a = await PinholeNode.BindAsync(options);
         await using var b = await PinholeNode.BindAsync(options);
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
-        // The initial race can establish a relay session first. This scenario restores
-        // the original UDP path, so record it only after BOTH sides actually select it.
+
         IPEndPoint? originalA = null, originalB = null;
         await TestPoll.UntilAsync(Timeout, () =>
         {
@@ -131,7 +123,6 @@ public sealed class PathValidationTests
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Degraded
             && atB.State == PinholeConnectionState.Degraded);
 
-        // The NAT rebind recovers: UDP works again, and the engine's own probing upgrades.
         a.Engine.SimulateDirectPathRestore(b.PeerId);
         b.Engine.SimulateDirectPathRestore(a.PeerId);
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Open
@@ -158,12 +149,10 @@ public sealed class PathValidationTests
         a.Engine.SimulateSilentDirectPathLoss(b.PeerId);
         b.Engine.SimulateSilentDirectPathLoss(a.PeerId);
 
-        // No fallback exists: bounded re-punch, then an honest Dead — never a fake Open.
         await TestPoll.UntilAsync(Timeout, () => atA.State == PinholeConnectionState.Dead
             && atB.State == PinholeConnectionState.Dead);
         Assert.False(atA.Closed.IsCompleted, "Dead is not Closed; the object survives");
 
-        // The network heals; the connection comes back on its own kick.
         a.Engine.SimulateDirectPathRestore(b.PeerId);
         b.Engine.SimulateDirectPathRestore(a.PeerId);
         a.Engine.RetryPunch(b.PeerId);
@@ -182,21 +171,11 @@ public sealed class PathValidationTests
     [Fact]
     public async Task HealthyDirectTraffic_ProducesNoProbes_AndStaysOpen()
     {
-        // A wider idle window than the file default: the flood paces at ~20 ms and a single
-        // scheduler stall on a loaded CI runner must not read as a dead path. 1500 ms
-        // rather than 750 (itself a widening from 500): the observed macOS failure was
-        // the eventual-probe poll starving for its whole 10 s budget, so the maintenance
-        // loop demonstrably lagged seconds — the same class of stall crossing a 750 ms
-        // idle would make the RECEIVER probe and void the "never probes" assert.
+
         await using var a = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(1500)));
         await using var b = await PinholeNode.BindAsync(Opts(idle: TimeSpan.FromMilliseconds(1500)));
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
-        // One-way flood for far longer than the idle window: the RECEIVER hears constant
-        // direct traffic and must never probe; the SENDER hears nothing, so its probes run —
-        // and are answered, which is exactly a healthy one-way stream staying Open.
-        // 6 s keeps the flood at 4x the idle window even with the wider 1500 ms budget,
-        // so the receiver-side "never probes" claim still covers many idle windows.
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed < TimeSpan.FromSeconds(6))
         {
@@ -206,13 +185,10 @@ public sealed class PathValidationTests
 
         Assert.Equal(0, atA.PathProbesSent);
         Assert.Equal(PinholeConnectionState.Open, atA.State);
-        // The silent side's probes and their answers are eventual, not instant: a probe
-        // sent near the flood's end has its reply land after it. Poll the pair — with a
-        // scenario-sized budget, since a loaded runner's maintenance loop (75 ms ticks)
-        // can lag seconds behind the counters it is supposed to advance.
+
         await TestPoll.UntilAsync(TestBudget.Scenario, () => atB.PathProbesSent > 0 && atB.PathProbeReplies > 0);
         Assert.Equal(PinholeConnectionState.Open, atB.State);
-        Assert.Equal(0, atB.Stats.PingsSent); // monitoring counters stay out of caller stats
+        Assert.Equal(0, atB.Stats.PingsSent);
     }
 
     [Fact]
@@ -221,8 +197,7 @@ public sealed class PathValidationTests
         using var net = new VirtualNetwork();
         var socketA = new DropProbeSocket(net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.10"), 31010)));
         var socketB = new DropProbeSocket(net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.20"), 31020)));
-        // No caller pings, PMTU probes, or keepalive traffic: every Ping below is an
-        // actual liveness probe. Drop one per sender, independent of runner scheduling.
+
         var options = Opts() with { EnablePmtud = false, KeepaliveInterval = TimeSpan.Zero };
         await using var a = await PinholeNode.BindAsync(options with { UdpSocketFactory = _ => socketA });
         await using var b = await PinholeNode.BindAsync(options with { UdpSocketFactory = _ => socketB });
@@ -260,7 +235,7 @@ public sealed class PathValidationTests
         b.Engine.SimulateSilentDirectPathLoss(a.PeerId);
         await Task.Delay(TimeSpan.FromMilliseconds(900));
 
-        Assert.Equal(PinholeConnectionState.Open, atA.State); // opted out: nobody probes
+        Assert.Equal(PinholeConnectionState.Open, atA.State);
         Assert.Equal(0, atA.PathProbesSent);
     }
 
@@ -271,14 +246,12 @@ public sealed class PathValidationTests
         await using var b = await PinholeNode.BindAsync(Opts());
         (PinholeConnection _, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
-        // A alone goes deaf: its probes run (and the peer's answers are dropped by the
-        // blackhole), so the counter climbs — until the node is disposed.
         a.Engine.SimulateSilentDirectPathLoss(b.PeerId);
         await TestPoll.UntilAsync(Timeout, () => atA.PathProbesSent > 0);
         a.Dispose();
         long sent = atA.PathProbesSent;
         await Task.Delay(TimeSpan.FromMilliseconds(500));
-        Assert.Equal(sent, atA.PathProbesSent); // the scheduler died with the node
+        Assert.Equal(sent, atA.PathProbesSent);
     }
 
     private sealed class DropProbeSocket(IUdpSocket inner) : IUdpSocket

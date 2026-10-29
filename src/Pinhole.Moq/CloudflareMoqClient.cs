@@ -36,7 +36,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
     private CloudflareMoqClient(QuicConnection connection, QuicStream control, ulong maxRequestId)
     {
         _connection = connection; _control = control; _requestIds = new(maxRequestId);
-        _peerRequestIds = new MoqPeerRequestIds(256); // the grant our setup parameters gave the relay
+        _peerRequestIds = new MoqPeerRequestIds(256);
         _controlTask = ReadControlAsync(); _dataTask = ReadDataAsync();
     }
 
@@ -122,7 +122,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
         var response = await RequestAsync(0x3, writer =>
         {
             writer.Namespace(trackNamespace); writer.Text(trackName);
-            // Largest-object filter, ascending groups, normal priority; all values are Draft16 parameters.
+
             writer.Parameters((0x20, 128UL), (0x21, new byte[] { 2 }), (0x22, 1UL));
         }, subscription, deadline.Token);
         if (response.Type != 0x4) throw new MoqProtocolException("Expected SUBSCRIBE_OK");
@@ -139,7 +139,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
         var writer = new MoqWriter();
         writer.Integer(0x18); writer.Integer(publisher.Alias); writer.Integer(groupId); writer.Byte(128);
         writer.Integer(0); writer.Integer((ulong)payload.Length);
-        if (payload.Length == 0) writer.Integer(0); // Empty normal object, not an end status.
+        if (payload.Length == 0) writer.Integer(0);
         await stream.WriteAsync(writer.ToArray(), deadline.Token);
         await stream.WriteAsync(payload, completeWrites: true, deadline.Token);
         await stream.WritesClosed.WaitAsync(deadline.Token);
@@ -149,8 +149,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref subscription.Disposed, 1) != 0) return;
         _subscriptions.TryRemove(subscription.RequestId, out _);
-        // Keep the retired alias bounded by MaximumTracks until session shutdown,
-        // so in-flight data after UNSUBSCRIBE is abandoned without killing other tracks.
+
         subscription.Complete(null);
         if (_stop.IsCancellationRequested) return;
         using var deadline = Deadline(_stop.Token);
@@ -170,8 +169,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
             if (_pending.Count >= 128) throw new InvalidOperationException("MoQ pending request limit reached");
             if (owner is MoqSubscription && _subscriptionReservations >= MaximumTracks)
                 throw new InvalidOperationException("MoQ track limit reached");
-            // Credit rejection is local and leaves both the ID and session available
-            // for a later MAX_REQUEST_ID extension. Only a failed write fails the session.
+
             id = _requestIds.Allocate();
             if (owner is MoqPublisher publisher) _publishRequests[id] = publisher;
             if (owner is MoqSubscription subscription)
@@ -304,8 +302,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
     private async Task CheckPeerRequestAsync(ulong id)
     {
         _peerRequestIds.Admit(id);
-        // C-14c: raise the relay's request-id grant before it runs out — the session
-        // used to die at the 128th relay-originated request.
+
         if (_peerRequestIds.ExtensionDue() is { } grant)
         {
             var writer = new MoqWriter(); writer.Integer(grant);
@@ -322,9 +319,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
             {
                 var stream = await _connection.AcceptInboundStreamAsync(_stop.Token);
                 if (stream.Type != QuicStreamType.Unidirectional) throw new MoqProtocolException("Unexpected bidirectional stream");
-                // C-14a: one pump task per subgroup stream with an idle deadline. The
-                // accept loop stays free, so no stream head-of-line-blocks another, and
-                // a stream open longer than one deadline survives while data flows.
+
                 _ = PumpStreamAsync(stream);
             }
         }
@@ -344,12 +339,11 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!_stop.IsCancellationRequested)
         {
-            // Idle stall: this one stream went quiet; the session and every other
-            // track keep going. The relay opens a fresh stream for the next group.
+
         }
         catch (OperationCanceledException)
         {
-            // Session shutdown raced this pump.
+
         }
         catch (Exception error) { if (!_stop.IsCancellationRequested) Fail(error); }
     }
@@ -391,7 +385,7 @@ public sealed class CloudflareMoqClient : IAsyncDisposable
         catch (Exception error) when (error is OperationCanceledException or QuicException) { }
         await _control.DisposeAsync(); await _connection.DisposeAsync();
         await Task.WhenAll(_controlTask, _dataTask);
-        // Concurrent public operations may still unwind through the gates and source.
+
     }
     private static CancellationTokenSource Deadline(CancellationToken token, CancellationToken second = default)
     {
@@ -461,7 +455,7 @@ public sealed class MoqSubscription : IAsyncDisposable
     public ValueTask<MoqObject> ReadAsync(CancellationToken cancellationToken = default) => _objects.Reader.ReadAsync(cancellationToken);
     public IAsyncEnumerable<MoqObject> ReadAllAsync(CancellationToken cancellationToken = default) => _objects.Reader.ReadAllAsync(cancellationToken);
     internal ValueTask EnqueueAsync(MoqObject message, CancellationToken cancellationToken) =>
-        _objects.Writer.WriteAsync(message, cancellationToken); // bounded: waits for the reader instead of failing the session
+        _objects.Writer.WriteAsync(message, cancellationToken);
     internal void Complete(Exception? error) => _objects.Writer.TryComplete(error);
     public ValueTask DisposeAsync() => new(_client.UnsubscribeAsync(this));
 }

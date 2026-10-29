@@ -8,10 +8,6 @@ using Xunit.Abstractions;
 
 namespace Pinhole.Tests;
 
-// R2 verified runs: behavioral gates for the v4 client/server path. Every run must
-// chain to the ticket root before any of its bytes reach the disk, resume must be
-// O(1) in the committed-run state, and every honest interop combination (v4/v4,
-// v4/v3 fallback, v3/v4, plaintext) still completes byte-exact.
 public sealed class BlobRunTransferTests
 {
     private readonly ITestOutputHelper _output;
@@ -66,10 +62,7 @@ public sealed class BlobRunTransferTests
         return data;
     }
 
-    // 300_000 bytes = 293 chunks = 4 full runs + a 37-chunk ragged tail.
     private const long MultiRunBytes = 300_000;
-
-    // ---------------------------------------------------------------- gate 1: forged proofs
 
     [Fact]
     public async Task ForgedRun_NoVerifiedRunByteReachesTheDisk()
@@ -85,7 +78,7 @@ public sealed class BlobRunTransferTests
             {
                 if (runIndex == 2 && siblings.Length > 0)
                 {
-                    siblings[0] ^= 0x80; // every proof attempt for run 2 lies
+                    siblings[0] ^= 0x80;
                 }
             };
 
@@ -97,8 +90,7 @@ public sealed class BlobRunTransferTests
             Assert.False(File.Exists(target), "a forged run must never publish the target file");
             string dataPath = Path.Combine(target + ".pinhole-part", "data");
             Assert.True(File.Exists(dataPath), "the abandoned attempt left its part directory");
-            // Only runs committed before the forgery may exist on disk: run 2 starts at
-            // chunk 128, so the data file cannot extend past 128 KiB.
+
             Assert.True(new FileInfo(dataPath).Length <= 128 * 1024,
                 $"part data extends to {new FileInfo(dataPath).Length} bytes past the first forged run");
         }
@@ -107,8 +99,6 @@ public sealed class BlobRunTransferTests
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 2: self-consistent CV lies
 
     [Fact]
     public async Task LyingChunkCvs_AreRejectedBeforeAnyWrite()
@@ -120,9 +110,7 @@ public sealed class BlobRunTransferTests
             await File.WriteAllBytesAsync(src, RandomBytes(MultiRunBytes));
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            // The lie is self-consistent: the data is flipped AND the frame's CV is
-            // recomputed over the flipped bytes, so the per-chunk check passes and only
-            // the run's root proof can catch it.
+
             server.CorruptChunk = (idx, data) =>
             {
                 if (idx is >= 128 and < 192)
@@ -131,8 +119,8 @@ public sealed class BlobRunTransferTests
                 }
             };
             server.ReworkChunkCv = (idx, data) => idx is >= 128 and < 192
-                ? Blake3.ChunkCv(data, (ulong)idx, root: false) // self-consistent lie
-                : null; // null keeps the honest outboard CV
+                ? Blake3.ChunkCv(data, (ulong)idx, root: false)
+                : null;
 
             string outDir = Path.Combine(dir, "out");
             await Assert.ThrowsAsync<InvalidDataException>(() => BlobClient.DownloadAsync(server.Ticket, outDir,
@@ -149,8 +137,6 @@ public sealed class BlobRunTransferTests
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 3: hostile Head bounds
 
     [Fact]
     public async Task HostileHead_IsBounded()
@@ -192,8 +178,7 @@ public sealed class BlobRunTransferTests
     [Fact]
     public void ManifestMemory_IsBounded()
     {
-        // The MemorySink bound is unit-tested directly: wiring a whole lying directory
-        // server would duplicate the lying-Head oracle for one integer comparison.
+
         string dir = TempDir();
         try
         {
@@ -205,15 +190,13 @@ public sealed class BlobRunTransferTests
 
             var honest = new BlobClient.MemorySink();
             honest.UseVerifiedRuns();
-            honest.Init(1024, 1); // inside the bound: accepted
+            honest.Init(1024, 1);
         }
         finally
         {
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 4: O(1) resume
 
     [Fact]
     public async Task ResumeIsO1_NoPrefixRehash()
@@ -230,7 +213,7 @@ public sealed class BlobRunTransferTests
             string part = target + ".pinhole-part";
 
             using var cancelFirst = new CancellationTokenSource();
-            server.DropChunk = idx => idx >= 130; // run 0 commits, the tail cannot finish
+            server.DropChunk = idx => idx >= 130;
             Task firstRun = Task.Run(() => BlobClient.DownloadAsync(server.Ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }, ct: cancelFirst.Token));
             await TestPoll.UntilAsync(Timeout, () =>
@@ -245,9 +228,6 @@ public sealed class BlobRunTransferTests
             cancelFirst.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstRun).WaitAsync(Timeout);
 
-            // Sink-level evidence (the rehash counter seam), taken while the interrupted
-            // part state is still on disk: a v4 FileSink resuming the committed state
-            // never reads or re-hashes the prefix — O(1) in the state file.
             byte[] data = await File.ReadAllBytesAsync(src);
             var resumedSink = new BlobClient.FileSink(target, server.Ticket.Root);
             resumedSink.UseVerifiedRuns();
@@ -258,8 +238,6 @@ public sealed class BlobRunTransferTests
             Assert.Equal(0, resumedSink.RehashedPrefixChunks);
             resumedSink.Abandon();
 
-            // Request-pattern evidence: record every chunk index the successor serves
-            // from here on; the resume must start at or past the committed extent.
             var requested = new System.Collections.Concurrent.ConcurrentQueue<long>();
             server.DropChunk = idx => { requested.Enqueue(idx); return false; };
 
@@ -281,15 +259,13 @@ public sealed class BlobRunTransferTests
     [Fact]
     public void RunStateResume_IsO1_AndSkipsNothingVerified()
     {
-        // Pure sink-level check of the PBPART02 round-trip: commit runs, restart the
-        // sink over the same part directory, and confirm the bitmap + fold state come
-        // back without a single prefix read (RehashedPrefixChunks stays 0).
+
         string dir = TempDir();
         try
         {
             string target = Path.Combine(dir, "sink.bin");
             byte[] root = RandomNumberGenerator.GetBytes(32);
-            const int chunks = 192; // 3 runs
+            const int chunks = 192;
             const long totalBytes = chunks * Blake3.ChunkSize;
 
             var first = new BlobClient.FileSink(target, root);
@@ -297,7 +273,7 @@ public sealed class BlobRunTransferTests
             first.Init(totalBytes, chunks);
             byte[] chunk = RandomBytes(Blake3.ChunkSize);
             byte[] cv = RandomBytes(32);
-            for (int r = 0; r < 2; r++) // a fully committed file never checkpoints
+            for (int r = 0; r < 2; r++)
             {
                 byte[][] run = Enumerable.Range(0, 64).Select(_ => chunk).ToArray();
                 first.ApplyRun(r, 64, run, cv);
@@ -342,7 +318,6 @@ public sealed class BlobRunTransferTests
             writer.Checkpoint();
             writer.Abandon();
 
-            // The data file no longer covers the committed run: the state is void.
             using (var data = File.Open(Path.Combine(part, "data"), FileMode.Open, FileAccess.Write))
             {
                 data.SetLength(1024);
@@ -355,7 +330,6 @@ public sealed class BlobRunTransferTests
             Assert.Equal(0, torn.Applied);
             torn.Abandon();
 
-            // A v3 PBPART01 state in the part directory is not resumed across formats.
             Directory.Delete(part, recursive: true);
             Directory.CreateDirectory(part);
             var legacy = new byte[56];
@@ -378,8 +352,6 @@ public sealed class BlobRunTransferTests
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 5: adversarial matrix
 
     [Theory]
     [InlineData("corrupt-chunk")]
@@ -408,7 +380,7 @@ public sealed class BlobRunTransferTests
                 case "lying-cv":
                     server.CorruptChunk = (idx, bytes) => { if (idx is >= 128 and < 192) bytes[0] ^= 0xFF; };
                     server.ReworkChunkCv = (idx, bytes) => idx is >= 128 and < 192
-                        ? Blake3.ChunkCv(bytes, (ulong)idx, root: false) // self-consistent lie
+                        ? Blake3.ChunkCv(bytes, (ulong)idx, root: false)
                         : null;
                     break;
                 case "forged-proof":
@@ -468,7 +440,7 @@ public sealed class BlobRunTransferTests
 
             if (mode == "dropped-proof")
             {
-                Assert.Contains(1, droppedProofs); // one drop happened and was healed
+                Assert.Contains(1, droppedProofs);
             }
         }
         finally
@@ -476,8 +448,6 @@ public sealed class BlobRunTransferTests
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 6: interop matrix
 
     [Fact]
     public async Task V4Client_V4Server_CompletesByteExact()
@@ -513,7 +483,7 @@ public sealed class BlobRunTransferTests
             await File.WriteAllBytesAsync(src, data);
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            server.LegacyV3Only = true; // closes on Hello v4, answers Hello v3
+            server.LegacyV3Only = true;
 
             string outDir = Path.Combine(dir, "out");
             BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir,
@@ -531,9 +501,7 @@ public sealed class BlobRunTransferTests
     [Fact]
     public async Task LegacyV3Client_V4Server_StillServesV3()
     {
-        // A pre-v4 downloader emulated at the wire: v3 Hello, v3 Welcome, sealed Head
-        // opened under the v3 ticket key, and an honest chunk frame. The v4 provider
-        // must keep this legacy path byte-identical.
+
         string dir = TempDir();
         try
         {
@@ -609,8 +577,6 @@ public sealed class BlobRunTransferTests
         return frame;
     }
 
-    // ---------------------------------------------------------------- gate 7: run shapes
-
     public static IEnumerable<object[]> RunSizes() =>
         new object[][] { [0L], [5L], [1024L], [5000L], [64 * 1024L], [65 * 1024L], [200_000L], [300_000L] };
 
@@ -644,21 +610,14 @@ public sealed class BlobRunTransferTests
         string dir = TempDir();
         try
         {
-            byte[] data = RandomBytes(MultiRunBytes); // 5 runs
+            byte[] data = RandomBytes(MultiRunBytes);
             string src = Path.Combine(dir, "ooo.bin");
             await File.WriteAllBytesAsync(src, data);
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            // Hold run 1 (chunks 64..127) back until the runs around it have been
-            // served, so it commits last: the fold prefix stalls at run 1 while runs
-            // 2..4 commit sparse, then the drain and final fold must still hit the
-            // root. The release counts chunks SERVED BY THE PROVIDER, not client
-            // progress: progress timing is scheduler-dependent and hung this test on
-            // every non-Linux CI runner, while the served-chunk counter flips at the
-            // same point on any OS. Budget 90s: the heal is 64 single-chunk PTO
-            // re-requests, which loaded runners stretch without anything being wrong.
+
             long started = Environment.TickCount64;
-            long run1ServeAttempts = 0; // provider dropped a run-1 chunk (a request DID reach it)
+            long run1ServeAttempts = 0;
             int othersServed = 0;
             long releasedAtMs = -1;
             int released = 0;
@@ -679,10 +638,6 @@ public sealed class BlobRunTransferTests
                 return false;
             };
 
-            // The failure mode is CI-only (loaded macOS/Windows runners): a silent
-            // hang to the budget with no internal stall error. On any failure the
-            // client-side state timeline and the provider counters land in the test
-            // output so the failed job's log IS the diagnosis.
             string outDir = Path.Combine(dir, "out");
             var timeline = new List<string>(512);
             BlobTestHooks.Trace = line => { lock (timeline) timeline.Add(line); };
@@ -735,9 +690,7 @@ public sealed class BlobRunTransferTests
     [Fact]
     public void FileSink_RunFold_MatchesTheStreamingRoot()
     {
-        // The sink's incremental fold (prefix stack + sparse final run) must equal the
-        // oracle FoldRunsToRoot over the same run CVs, for forward AND reverse commit
-        // orders — reverse exercises the sparse set and the drain.
+
         foreach (int chunkCount in new[] { 65, 100, 128, 129, 192, 200, 1000, 1025 })
         {
             foreach (bool reverse in new[] { false, true })
@@ -810,7 +763,7 @@ public sealed class BlobRunTransferTests
 
             for (int i = 0; i < 20; i++)
             {
-                sink.Checkpoint(); // stalled: the committed-run set has not moved
+                sink.Checkpoint();
             }
 
             Assert.Equal(1, sink.CheckpointWrites);
@@ -825,8 +778,6 @@ public sealed class BlobRunTransferTests
             DeleteDir(dir);
         }
     }
-
-    // ---------------------------------------------------------------- gate 8: proof loss
 
     [Fact]
     public async Task ProofLoss_HealsViaRunReRequest()
@@ -845,7 +796,7 @@ public sealed class BlobRunTransferTests
                 if (runIndex == 1)
                 {
                     attempts++;
-                    return attempts == 1; // lose exactly the first proof for run 1
+                    return attempts == 1;
                 }
 
                 return false;
@@ -863,10 +814,6 @@ public sealed class BlobRunTransferTests
         }
     }
 
-    // ---------------------------------------------------------------- lying-Head oracle
-
-    // The smallest adversarial provider that matters for the Head bound: a real engine
-    // handshake, a genuine v4 Welcome, and a sealed Head declaring an absurd size.
     private sealed class LyingHeadOracle : IDisposable
     {
         public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -929,8 +876,6 @@ public sealed class BlobRunTransferTests
                 }
             }
 
-            // Answer every Hello with a genuine v4 Welcome sealing the lying Head, then
-            // serve nothing else: the Head bound has everything it needs to fire.
             while (!ct.IsCancellationRequested)
             {
                 int received;

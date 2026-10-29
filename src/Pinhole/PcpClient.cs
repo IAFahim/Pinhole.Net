@@ -20,8 +20,7 @@ internal static class PcpClient
                 byte[] nonce = RandomNumberGenerator.GetBytes(12);
                 using var udp = new UdpClient(gateway.AddressFamily);
                 udp.Connect(gateway);
-                // Connecting selects the actual source address and pins replies to this
-                // gateway. RFC 6887 section 16.4 requires that source in the header.
+
                 byte[] request = BuildMapRequest(nonce, ((IPEndPoint)udp.Client.LocalEndPoint!).Address, internalPort, lease, protocol: protocol);
                 byte[]? response = await RoundTripAsync(udp, request, ct).ConfigureAwait(false);
                 if (TryParseMapResponse(response, request, out IPEndPoint? external, out uint granted))
@@ -31,7 +30,7 @@ internal static class PcpClient
             }
             catch (SocketException)
             {
-                // An unavailable interface must not hide a mapping on another gateway.
+
             }
         }
 
@@ -45,15 +44,14 @@ internal static class PcpClient
         if (internalPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(internalPort));
         if (protocol is not (ProtocolType.Udp or ProtocolType.Tcp)) throw new ArgumentOutOfRangeException(nameof(protocol));
         if (lease < TimeSpan.Zero || lease.TotalSeconds > uint.MaxValue) throw new ArgumentOutOfRangeException(nameof(lease));
-        // RFC 6887 sections 7.1 and 11.1: 24-byte common header + 36-byte MAP
-        // body. The two-byte result field from NAT-PMP is NOT part of PCP.
+
         byte[] request = new byte[60];
         request[0] = 2;
         request[1] = 1;
         BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(4), (uint)lease.TotalSeconds);
         clientAddress.MapToIPv6().GetAddressBytes().CopyTo(request, 8);
         nonce.CopyTo(request, 24);
-        request[36] = (byte)protocol; // IP protocol: TCP=6, UDP=17
+        request[36] = (byte)protocol;
         BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(40), (ushort)internalPort);
         BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(42), (ushort)(suggestedExternal?.Port ?? 0));
         IPAddress suggestedAddress = suggestedExternal?.Address
@@ -116,13 +114,13 @@ internal static class PcpClient
                     pending = null;
                     if (data.Length >= 24 && data[0] == 2 && data[1] == 129 && data[3] != 0)
                     {
-                        return null; // a gateway error permits the next mapping protocol
+                        return null;
                     }
                     if (TryParseMapResponse(data, request, out _, out _))
                     {
                         return data;
                     }
-                    // Ignore unrelated/malformed replies without abandoning this attempt.
+
                     pending = udp.ReceiveAsync(ct).AsTask();
                 }
             }

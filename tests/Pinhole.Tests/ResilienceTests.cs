@@ -36,7 +36,7 @@ public sealed class ResilienceTests
         }
         catch (InvalidOperationException)
         {
-            return false; // pathless pending state: sending is refused until a path returns
+            return false;
         }
         finally
         {
@@ -70,8 +70,6 @@ public sealed class ResilienceTests
                 StunRefreshInterval = TimeSpan.FromSeconds(2),
             });
 
-    // ------------------------------------------------------------------ the outage ladder
-
     [Fact]
     public async Task BriefOutage_1s_ConnectionNeverEvenNotices()
     {
@@ -86,8 +84,6 @@ public sealed class ResilienceTests
         await Task.Delay(TimeSpan.FromSeconds(1));
         lab.Net.RemoveRule(cut);
 
-        // A one-second blip is under the validation budget: state never left Open and the
-        // next datagram flows with no recovery ceremony at all.
         Assert.Equal(PinholeConnectionState.Open, atB.State);
         Assert.True(await TryExchangeAsync(atB, atA, "after the blip"));
         _output.WriteLine("1 s outage: never left Open");
@@ -110,8 +106,6 @@ public sealed class ResilienceTests
         await Task.Delay(TimeSpan.FromSeconds(30));
         long spent = lab.Net.Delivered + lab.Net.Unroutable - baseline;
 
-        // Bounded recovery work while no route exists: the wounded session paces itself at
-        // a few datagrams per second — 30 s of silence may not look like a retry storm.
         Assert.True(spent < 30 * 40, $"recovery burned {spent} datagrams during the outage");
 
         lab.Net.RemoveRule(cut);
@@ -133,18 +127,15 @@ public sealed class ResilienceTests
         LinkRule cut = LinkRule.Blackhole(Subnet.Parse("192.0.2.10/32"));
         lab.Net.AddRule(cut);
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(15), () => atB.State == PinholeConnectionState.Dead);
-        await Task.Delay(TimeSpan.FromSeconds(8)); // comfortably past the 4 s punch budget too
+        await Task.Delay(TimeSpan.FromSeconds(8));
 
         lab.Net.RemoveRule(cut);
-        // Dead is not Closed: the same object returns to authenticated traffic when a route
-        // exists again — sealed frames keep their counters and replay window throughout.
+
         Assert.True(await ExchangeUntilAsync(atB, atA, "revived from Dead", Settle),
             "a Dead connection did not revive when the route returned");
         Assert.Equal(PinholeConnectionState.Open, atB.State);
         _output.WriteLine("long outage: honest Dead, then same-object revival");
     }
-
-    // ------------------------------------------------------------------ suspend-like pause
 
     [Fact]
     public async Task SuspendLikePause_TimersFireOnce_NoStorm_TrafficReturns()
@@ -156,10 +147,6 @@ public sealed class ResilienceTests
         Assert.True(await ExchangeUntilAsync(atB, atA, "before the pause", Settle));
         long probesBefore = atB.PathProbesSent;
 
-        // A suspend-like pause: total silence in both directions, long enough that every
-        // absolute-deadline timer (validation, refresh) is far past due when traffic
-        // returns. The engine uses one scheduler with absolute deadlines, so waking runs
-        // each chore once — never a replayed backlog of timers.
         LinkRule cut = LinkRule.Blackhole(Subnet.Parse("192.0.2.10/32"));
         lab.Net.AddRule(cut);
         await Task.Delay(TimeSpan.FromSeconds(12));
@@ -174,8 +161,6 @@ public sealed class ResilienceTests
         _output.WriteLine($"pause survived; {idleSends} idle datagrams in the 2 s after recovery");
     }
 
-    // ------------------------------------------------------------------ notifications absent
-
     [Fact]
     public async Task NoNetworkWatch_TotalStunSilence_TriggersTheBoundedRevalidation()
     {
@@ -186,30 +171,17 @@ public sealed class ResilienceTests
         Assert.True(await ExchangeUntilAsync(atB, atA, "before", Settle));
         int portBefore = nodeA.LocalPort;
 
-        // EnableNetworkWatch is false everywhere in the lab: the platform notification will
-        // never fire. Cut node A's visibility of BOTH configured STUN servers: the periodic
-        // refresh then observes total silence where it used to see answers, and that
-        // transition must itself drive recovery — the bounded periodic revalidation for
-        // platforms whose notifications are absent or delayed.
         LinkRule cutStun1 = LinkRule.Blackhole(Subnet.Parse("192.0.2.53/32"));
         LinkRule cutStun2 = LinkRule.Blackhole(Subnet.Parse("192.0.2.54/32"));
         lab.Net.AddRule(cutStun1);
         lab.Net.AddRule(cutStun2);
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(20), () => nodeA.LocalPort != portBefore);
 
-        // The session survives the notificationless rebind: the rebind re-announces, and
-        // the wounded/dead sides keep bounded beacons until the peer's observed-source
-        // replies revive the path. Then visibility returns and the node is fully itself.
-        // Session survival across a rebind is RoamingTests' proven claim; here the subject
-        // is the trigger itself. (A both-sides-Dead rebind with STUN-dark reflexives is a
-        // known lab gap: beacons flow but PACK replies do not return — see TESTING.md.)
         lab.Net.RemoveRule(cutStun1);
         lab.Net.RemoveRule(cutStun2);
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(15), () => nodeA.PublicEndpoints.Count > 0);
         _output.WriteLine($"STUN silence triggered rebind {portBefore} -> {nodeA.LocalPort} with the session intact");
     }
-
-    // ------------------------------------------------------------------ MTU changes
 
     [Fact]
     public async Task MtuShrankMidFlow_ReverificationFallsBackToTheFloor()
@@ -225,15 +197,11 @@ public sealed class ResilienceTests
         Assert.True(await ExchangeUntilAsync(atB, atA, "before the tunnel", Settle));
 
         int floor = NodeEngine.PmtuBaseWire;
-        await TestPoll.UntilAsync(TimeSpan.FromSeconds(30), () => atB.PathMtu > floor); // the climb confirmed something
+        await TestPoll.UntilAsync(TimeSpan.FromSeconds(30), () => atB.PathMtu > floor);
 
-        // A VPN/tunnel engages: everything above 1300 wire bytes now dies in the network,
-        // while small validation probes keep passing — the classic silent shrink.
         nodeA.Engine.Lookup(nodeB.PeerId)!.DropAboveBytes = 1300;
         nodeB.Engine.Lookup(nodeA.PeerId)!.DropAboveBytes = 1300;
 
-        // The confirmed size re-verifies, fails its probe cycle, and falls back to the
-        // guaranteed floor — after which traffic sized to the floor flows again.
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(30), () => atB.PathMtu == floor);
         Assert.True(await ExchangeUntilAsync(atB, atA, "over the tunnel", Settle));
         _output.WriteLine($"MTU shrank mid-flow; fell back to the {floor}-byte floor and kept flowing");
@@ -246,8 +214,7 @@ public sealed class ResilienceTests
         int nextPort = 32000;
         PinholeOptions HostOptions(string address) => lab.BaseOptions(o => o with
         {
-            // Distinct explicit ports: a 0 port would leave the virtual socket's
-            // LocalEndPoint unusable for the port-change assertion.
+
             UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse(address), System.Threading.Interlocked.Increment(ref nextPort))),
             PmtuReprobeInterval = TimeSpan.FromSeconds(1),
         });
@@ -259,12 +226,6 @@ public sealed class ResilienceTests
         int floor = NodeEngine.PmtuBaseWire;
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(20), () => atB.PathMtu > floor);
 
-        // Migrate B: a forced rebind gives it a fresh port, so the direct endpoint changes —
-        // a path migration. The confirmed MTU belonged to the old endpoint and must be
-        // forgotten, then re-earned on the new path.
-        // Capture the reset at the Open transition: the engine invokes it under the
-        // connection lock, before a PMTU reply can raise the floor again. Polling for the
-        // transient floor after awaiting the rebind can miss it on a busy CI runner.
         var reopenedMtu = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         void ObserveReopen(PinholeConnectionState state)
         {
@@ -287,8 +248,6 @@ public sealed class ResilienceTests
         }
     }
 
-    // ------------------------------------------------------------------ terminal semantics
-
     [Fact]
     public async Task FaultedDial_IsNeverZombieRevived()
     {
@@ -296,9 +255,6 @@ public sealed class ResilienceTests
         await using PinholeNode victim = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0));
         await using PinholeNode dialer = await lab.BindNodeAsync(hostAddress: new IPEndPoint(IPAddress.Parse("192.0.2.20"), 0));
 
-        // A ticket that pins SOMEONE ELSE's static key: the victim's honest handshake is
-        // refused by the pin, the dial faults, and the husk must stay dead no matter how
-        // much valid-looking traffic the victim keeps sending afterward.
         ConnectionString honest = Pinhole.ConnectionString.Parse(victim.ConnectionString);
         string poisoned = new ConnectionString(honest.PeerId, honest.Candidates, honest.NatHint,
             staticKey: RandomNumberGenerator.GetBytes(32)).ToString();
@@ -323,13 +279,11 @@ public sealed class ResilienceTests
         lab.Net.AddRule(cut);
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(10),
             () => atB.State is PinholeConnectionState.Punching or PinholeConnectionState.Dead);
-        _ = nodeB.RoamNowAsync(); // recovery in flight...
-        nodeB.Dispose();          // ...and the user disposes anyway
+        _ = nodeB.RoamNowAsync();
+        nodeB.Dispose();
 
         lab.Net.RemoveRule(cut);
-        // The route is back, but the disposed node answers nothing, forever: its peer's
-        // connection must NOT come back to life, and the only remaining traffic is the
-        // survivor's own bounded recovery pace (a few datagrams per second).
+
         await Task.Delay(TimeSpan.FromSeconds(3));
         Assert.False(atA.State == PinholeConnectionState.Open,
             "a disposed peer's connection came back to life");

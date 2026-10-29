@@ -1,22 +1,4 @@
-// Pinhole mesh harness — proves NAT-independent P2P between machines that know nothing
-// about each other beforehand, using only the pure-C# session API (PinholeNode).
-//
-//   pinhole-mesh node <index> <count>    CI mode: discovers peers over a signaling channel,
-//                                        runs 3 connect/exchange/drop rounds of fresh random
-//                                        secrets, exits 0 only if all rounds verify, hard
-//                                        shutdown at the 5-minute deadline. Node 0 additionally
-//                                        hosts guest joins until the deadline.
-//   pinhole-mesh guest <cs>              Local mode: join a live session from just the printed
-//                                        connection string, exchange a random secret, print
-//                                        what the mesh answered.
-//
-// Signaling is pluggable: MESH_SIGNAL_DIR switches to a local filesystem channel (used for
-// same-machine runs); otherwise the GitHub Contents API on branch $MESH_BRANCH is used, so
-// three unrelated GitHub-hosted runners can find each other with nothing shared in advance
-// except the repo they were spawned from. The connection string each node announces is the
-// real discovery artifact: peer ID + direct/reflexive candidates + free-relay fallback.
-// MESH_FORCE_RELAY=1 disables direct UDP/TCP, keeping authenticated invitations
-// with iroh, DERP and TURN relay candidates.
+
 
 using System.Diagnostics;
 using System.Globalization;
@@ -40,8 +22,6 @@ if (args is ["guest", var ticket])
 
 Console.Error.WriteLine("usage: pinhole-mesh node <index> <count> | pinhole-mesh guest <cs>");
 return 2;
-
-// ---------------------------------------------------------------------------------------------
 
 internal static class MeshJson
 {
@@ -111,8 +91,6 @@ internal static class MeshNode
             Console.WriteLine($"[node {index}] fatal: {exception.Message}");
         }
 
-        // Node 0 keeps accepting guests until the deadline so any machine (e.g. a dev PC)
-        // can join with the connection string while the session is live.
         if (index == 0 && Environment.GetEnvironmentVariable("MESH_LINGER") is "1" or "once")
         {
             await HostGuestsAsync(node, mySecrets, deadline);
@@ -130,8 +108,6 @@ internal static class MeshNode
             TimeSpan.FromSeconds(Math.Max(1, Math.Min(seconds, (deadline - DateTimeOffset.UtcNow).TotalSeconds - 1)));
     }
 
-    // Retain both identity keys when filtering candidates: dropping them produces
-    // a plaintext v1 invitation, which encrypted nodes correctly refuse.
     private static string TicketOf(PinholeNode node)
     {
         if (Environment.GetEnvironmentVariable("MESH_FORCE_RELAY") != "1")
@@ -156,8 +132,7 @@ internal static class MeshNode
 
         try
         {
-            // Fresh tickets per round: a peer that roamed or rebound since the session
-            // started re-announces its current candidates instead of being dialed stale.
+
             await signal.AnnounceAsync($"rounds/{round}/tickets/{index}.json", JsonSerializer.Serialize(new TicketAnnounce
             {
                 Index = index,
@@ -165,17 +140,12 @@ internal static class MeshNode
             }, MeshJson.Options)).WaitAsync(budget);
             Dictionary<int, string> roundTickets = await signal.WaitForCountAsync($"rounds/{round}/tickets", count, budget);
 
-            // Lower index listens, higher index dials: every pair forms exactly one
-            // connection; ConnectAsync runs the direct->relay chain internally.
             CancellationToken roundToken = roundCts.Token;
             IEnumerable<Task<PinholeConnection>> pending = Enumerable.Range(0, index)
                 .Select(j => node.ConnectAsync(roundTickets[j], roundToken))
                 .Concat(Enumerable.Repeat(0, count - 1 - index)
                     .Select(_ => node.AcceptAsync(roundToken).WaitAsync(roundToken)));
 
-            // Attach the receive handler the instant each connection resolves: a datagram
-            // that lands before the handler exists is gone (no reliability to lean on),
-            // and the acceptor side may resolve long after peers began blasting secrets.
             async Task<PinholeConnection> Watch(Task<PinholeConnection> pendingConn)
             {
                 PinholeConnection conn = await pendingConn.ConfigureAwait(false);
@@ -191,9 +161,6 @@ internal static class MeshNode
 
             await Task.WhenAll(pending.Select(Watch)).ConfigureAwait(false);
 
-            // Datagrams are unreliable: keep re-sending our secret until every peer's
-            // secret is in. "I heard everyone" is not "everyone heard me", so keep a
-            // floor on the retransmit window before trusting that conclusion.
             byte[] body = Encoding.UTF8.GetBytes($"SECRET:{round}:{index}:{mySecret}");
             var sw = Stopwatch.StartNew();
             while (sw.Elapsed < TimeSpan.FromSeconds(25))
@@ -205,7 +172,7 @@ internal static class MeshNode
                         try { context.Conn.Send(body); }
                         catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
                         {
-                            // a dead member costs its own datagram; the round retransmits next tick
+
                         }
                     }
                 }
@@ -252,7 +219,7 @@ internal static class MeshNode
                 try { await context.Conn.CloseAsync().ConfigureAwait(false); }
                 catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
                 {
-                    // teardown is best-effort; the peer sees silence either way
+
                 }
             }
         }
@@ -292,8 +259,7 @@ internal static class MeshNode
                 using var acceptStop = new CancellationTokenSource(deadline - DateTimeOffset.UtcNow - TimeSpan.FromSeconds(8));
                 conn = await node.AcceptAsync(acceptStop.Token).ConfigureAwait(false);
                 using var exchangeStop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                // The ACK proves the guest actually read the welcome. Buffered reads
-                // retain frames arriving between the handshake and this continuation.
+
                 Task<string> guestSecret = ReceivePrefixAsync(conn, "GUEST_ACK:", exchangeStop.Token);
                 byte[] body = Encoding.UTF8.GetBytes("WELCOME:" + JsonSerializer.Serialize(new { from = "pinhole-mesh", secrets }));
                 try
@@ -314,11 +280,10 @@ internal static class MeshNode
                     catch (OperationCanceledException) when (exchangeStop.IsCancellationRequested) { }
                 }
 
-                // Bounded teardown; a pathological guest session must not stall the hosting loop.
                 try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
                 catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException or TimeoutException)
                 {
-                    // teardown is best-effort; the peer sees silence either way
+
                 }
                 if (Environment.GetEnvironmentVariable("MESH_LINGER") == "once") return;
             }
@@ -330,7 +295,7 @@ internal static class MeshNode
                     try { await conn.CloseAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
                 catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException or TimeoutException)
                 {
-                    // teardown is best-effort; the peer sees silence either way
+
                 }
                 }
             }
@@ -367,7 +332,7 @@ internal static class Guest
             try { conn.Send(hello); }
             catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or SocketException)
             {
-                // the welcome answer is retried on the next tick
+
             }
             await Task.Delay(300);
         }
@@ -377,8 +342,7 @@ internal static class Guest
             conn.Send(Encoding.UTF8.GetBytes("GUEST_ACK:" + mySecret));
             Console.WriteLine($"[guest] mesh answered over {conn.Path.Kind} with its secrets:");
             Console.WriteLine(await answered.ConfigureAwait(false));
-            // Keep the relay send queue alive until the host receives our ACK and
-            // closes; disposing this node immediately could discard the queued ACK.
+
             try { await conn.Closed.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
             catch (TimeoutException) { }
             return 0;

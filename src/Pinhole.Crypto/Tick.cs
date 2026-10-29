@@ -1,8 +1,5 @@
 namespace Pinhole.Crypto;
 
-// Time as a value. Machines receive a Tick and never read a clock; the shells
-// construct it from the monotonic source of their choosing. Relocates to
-// Pinhole.Core with the sans-IO machines.
 public readonly struct Tick : IEquatable<Tick>, IComparable<Tick>
 {
     public long Milliseconds { get; }

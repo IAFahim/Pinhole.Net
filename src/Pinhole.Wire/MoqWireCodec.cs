@@ -2,58 +2,6 @@ using System.Text;
 
 namespace Pinhole.Wire;
 
-// Canonical span codecs for the MoQ wire forms Pinhole.Moq exchanges with the
-// Cloudflare Draft-16 relay. Derived from MoqWriter / MoqReader / MoqStreamWire
-// (MoqWire.cs), the control-message switch in CloudflareMoqClient.ReadControl-
-// Async, and MoqSessionPump's subgroup-stream parsing. All varints go through
-// WirePrimitives: minimal RFC 9000 encodings only. TryRead never throws on
-// wire-controlled bytes; Write throws only on programmer error (destination too
-// small, value out of range, malformed caller data).
-//
-// Canonical rules enforced (each TryRead rejects with false):
-//   R1  varints are the minimal RFC 9000 encoding; padded forms are rejected.
-//       (MoqReader.Integer and MoqStreamWire.ReadIntegerAsync accept padded
-//       forms — a known discrepancy, kept out of this codec on purpose.)
-//   R2  control frames are: varint type, fixed two-byte big-endian payload
-//       length, payload. The length is a u16, NOT a varint, mirroring
-//       MoqStreamWire.ReadMessageAsync and MoqWriter.Message.
-//   R3  any declared length (frame payload, blob, text, extension block)
-//       larger than the bytes that remain after it is rejected.
-//   R4  strict consumption: a message TryRead accepts only a buffer holding
-//       exactly one framed message — bytes trailing the frame are rejected,
-//       and the payload must be consumed exactly wherever the client calls
-//       MoqReader.End(). SUBSCRIBE_OK alone also accepts a well-formed
-//       extension block after its parameters, mirroring the client's
-//       Parameters()+Extensions() read of that message.
-//   R5  unknown control types are not parseable as messages (the client
-//       throws "Unsupported MoQ control type"). Known set:
-//       0x02 SUBSCRIBE_UPDATE, 0x03 SUBSCRIBE, 0x04 SUBSCRIBE_OK, 0x05
-//       SUBSCRIBE_ERROR, 0x06 ANNOUNCE, 0x07 ANNOUNCE_OK, 0x0a UNSUBSCRIBE,
-//       0x0b SUBSCRIBE_DONE, 0x10 GOAWAY, 0x15 MAX_REQUEST_ID, 0x1d PUBLISH,
-//       0x1e PUBLISH_OK, 0x20 CLIENT_SETUP, 0x21 SERVER_SETUP.
-//   R6  text fields (track names, namespace elements, reasons) are length-
-//       prefixed UTF-8, at most 4096 bytes (MoqReader.Blob default), and
-//       strictly valid UTF-8. Namespace lists hold exactly one element
-//       (MoqReader.Namespace rejects any other count). MoqWriter.Text would
-//       happily write longer text — this writer refuses (discrepancy).
-//   R7  parameter lists: at most 128 entries (MoqReader.Parameters), delta-
-//       encoded strictly increasing keys (duplicates rejected; the first key
-//       may be 0), every cumulative key at most VarintMax (MoqReader's
-//       checked() sum would tolerate sums past 2^62 — discrepancy), even key
-//       = varint value, odd key = blob of at most 65535 bytes.
-//   R8  extension blocks: count-free pair list, same pair rules as R7, at
-//       most 128 pairs (MoqReader.Pairs), consuming the block exactly.
-//   R9  subgroup stream headers: the type varint must be < 0x40, carry the
-//       marker bit 0x10, and not set both bits of 0x6 (MoqSessionPump); the
-//       subgroup id varint is present exactly when (type & 0x6) == 4; the
-//       priority is one raw byte (not a varint) exactly when (type & 0x20)
-//       == 0.
-//   R10 object headers: extension block at most 65535 bytes and well-formed
-//       per R8; payload length at most 65536 (CloudflareMoqClient.Maximum-
-//       ObjectBytes); payload length 0 means a status varint follows. Object
-//       ids are the wire value; the delta chaining the pump applies on top
-//       of them belongs to the session layer, not the codec.
-
 public static class MoqControlTypes
 {
     public const ulong SubscribeUpdate = 0x02;
@@ -100,8 +48,6 @@ public readonly struct MoqParameter
     }
 }
 
-// A parsed control frame. Payload(buffer) is valid only for the same buffer
-// the frame was read from.
 public readonly struct MoqControlFrame(ulong type, int payloadStart, int payloadLength, int consumed)
 {
     public ulong Type => type;
@@ -141,8 +87,6 @@ public readonly struct MoqSubscribeOk(ulong requestId, ulong trackAlias, MoqPara
     public MoqParameter[] Extensions => extensions;
 }
 
-// TrackAlias is the second integer of the wire form; the client's reader
-// consumes it but ignores its value.
 public readonly struct MoqSubscribeError(ulong requestId, ulong errorCode, ulong trackAlias, string reason)
 {
     public ulong RequestId => requestId;
@@ -151,7 +95,6 @@ public readonly struct MoqSubscribeError(ulong requestId, ulong errorCode, ulong
     public string Reason => reason;
 }
 
-// 0x0b as parsed by the client: same shape as SUBSCRIBE_ERROR.
 public readonly struct MoqSubscribeDone(ulong requestId, ulong status, ulong trackAlias, string reason)
 {
     public ulong RequestId => requestId;
@@ -231,8 +174,6 @@ public static class MoqWireCodec
     public const int MaxObjectPayloadBytes = 65536;
     public const int MaxControlPayloadBytes = ushort.MaxValue;
 
-    // ---- control framing (R2, R3) ----
-
     public static bool TryReadControlFrame(ReadOnlySpan<byte> b, out MoqControlFrame frame)
     {
         frame = default;
@@ -279,8 +220,6 @@ public static class MoqWireCodec
         payload.CopyTo(b[w..]);
         return w + payload.Length;
     }
-
-    // ---- text, namespaces, parameters, extensions ----
 
     public static bool TryReadTrackName(ReadOnlySpan<byte> b, out string name, out int consumed)
     {
@@ -342,7 +281,6 @@ public static class MoqWireCodec
         return w + WritePairs(b[w..], parameters);
     }
 
-    // An extension block is a count-free pair list that must fill its span.
     public static bool TryReadExtensionBlock(ReadOnlySpan<byte> b, out MoqParameter[] extensions, out int consumed)
     {
         extensions = [];
@@ -359,8 +297,6 @@ public static class MoqWireCodec
     }
 
     public static int WriteExtensionBlock(Span<byte> b, ReadOnlySpan<MoqParameter> extensions) => WritePairs(b, extensions);
-
-    // ---- control messages (R4, R5) ----
 
     public static bool TryReadSetup(ReadOnlySpan<byte> b, out MoqSetup message, out int consumed)
     {
@@ -463,8 +399,6 @@ public static class MoqWireCodec
         return FinishControlMessage(b, body, w);
     }
 
-    // The only message whose wire form tolerates extensions after the
-    // parameters (the client reads Parameters() then Extensions() here).
     public static bool TryReadSubscribeOk(ReadOnlySpan<byte> b, out MoqSubscribeOk message, out int consumed)
     {
         message = default;
@@ -603,7 +537,6 @@ public static class MoqWireCodec
         return FinishControlMessage(b, body, w);
     }
 
-    // No extension block tolerance: the client reads Parameters() then End().
     public static bool TryReadAnnounceOk(ReadOnlySpan<byte> b, out MoqAnnounceOk message, out int consumed)
     {
         message = default;
@@ -784,8 +717,6 @@ public static class MoqWireCodec
         return FinishControlMessage(b, body, w);
     }
 
-    // ---- subgroup stream headers (R9) ----
-
     public static bool TryReadStreamHeader(ReadOnlySpan<byte> b, out MoqStreamHeader header, out int consumed)
     {
         header = default;
@@ -852,10 +783,6 @@ public static class MoqWireCodec
         return w;
     }
 
-    // ---- object headers (R10) ----
-
-    // extensionsPresent mirrors the stream type's extension bit ((type & 1) != 0
-    // in MoqSessionPump); the header itself does not carry that flag.
     public static bool TryReadObjectHeader(ReadOnlySpan<byte> b, bool extensionsPresent, out MoqObjectHeader header, out int consumed)
     {
         header = default;
@@ -934,12 +861,9 @@ public static class MoqWireCodec
         return w;
     }
 
-    // ---- shared write helpers ----
-
     private static void StartControlMessage(Span<byte> b, ulong type, out int body)
     {
-        // Every known control type fits a 1-byte varint, so the header is
-        // exactly three bytes: type + u16 length.
+
         if (WirePrimitives.VarintLength(type) != 1 || b.Length < 3)
         {
             ThrowTooSmall();
@@ -1039,9 +963,6 @@ public static class MoqWireCodec
     private static bool ValidStreamType(ulong type) =>
         (type & ~0x3fUL) == 0 && (type & 0x10) != 0 && (type & 0x6) != 0x6;
 
-    // Strict UTF-8 with the same semantics as new UTF8Encoding(false, true):
-    // overlong forms, lone surrogate halves, code points above U+10FFFF and
-    // stray continuation bytes are all invalid.
     private static bool ValidUtf8(ReadOnlySpan<byte> b)
     {
         int i = 0;
@@ -1092,12 +1013,12 @@ public static class MoqWireCodec
 
                 if (first == 0xE0 && second < 0xA0)
                 {
-                    return false; // 3-byte overlong
+                    return false;
                 }
 
                 if (first == 0xED && second >= 0xA0)
                 {
-                    return false; // surrogate halves
+                    return false;
                 }
             }
             else if (extra == 3)
@@ -1109,12 +1030,12 @@ public static class MoqWireCodec
 
                 if (first == 0xF0 && second < 0x90)
                 {
-                    return false; // 4-byte overlong
+                    return false;
                 }
 
                 if (first == 0xF4 && second > 0x8F)
                 {
-                    return false; // above U+10FFFF
+                    return false;
                 }
             }
 
@@ -1123,8 +1044,6 @@ public static class MoqWireCodec
 
         return true;
     }
-
-    // ---- span cursor shared by every TryRead ----
 
     private ref struct MoqSpanReader(ReadOnlySpan<byte> data)
     {
@@ -1199,8 +1118,6 @@ public static class MoqWireCodec
             return TryReadPairList((int)count, out values);
         }
 
-        // A count-free list fills the remaining span. First pass validates and
-        // counts without allocating; second pass materializes the exact array.
         public bool TryReadExtensionPairs(out MoqParameter[] values)
         {
             values = [];
@@ -1264,8 +1181,7 @@ public static class MoqWireCodec
                 }
 
                 ulong sum = key + delta;
-                // delta and key are each at most VarintMax, so the sum cannot
-                // wrap; keys must ascend strictly and stay varint-representable.
+
                 if (sum > WirePrimitives.VarintMax || (i > 0 && sum <= key))
                 {
                     values = [];
@@ -1313,8 +1229,6 @@ public static class MoqWireCodec
             return true;
         }
     }
-
-    // ---- throw helpers (programmer error only) ----
 
     private static void ThrowTooSmall() => throw new ArgumentException("destination span too small");
 

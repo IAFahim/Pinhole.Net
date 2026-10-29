@@ -2,8 +2,6 @@ using System.Buffers.Binary;
 
 namespace Pinhole.Blobs;
 
-// Facade over Pinhole.Crypto's zero-allocation BLAKE3. The public surface is the
-// shipped blob-layer contract; every member now delegates to the shared core.
 public static class Blake3
 {
     public const int ChunkSize = Crypto.Blake3.ChunkSize;
@@ -76,8 +74,7 @@ public static class Blake3
 
             if (_retainOutboard)
             {
-                // Per-chunk feeding so every completed chunk's CV lands in the outboard;
-                // the shared core handles the no-outboard fast path with vectorized batches.
+
                 Span<uint> chunkCv = stackalloc uint[8];
                 while (data.Length > 0)
                 {

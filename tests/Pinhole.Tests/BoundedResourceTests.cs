@@ -11,8 +11,6 @@ using Pinhole.Sim;
 
 namespace Pinhole.Tests;
 
-// GC.GetTotalMemory measures the whole test process. Run these measurements while
-// other collections are idle so their allocations cannot masquerade as a leak.
 [CollectionDefinition(nameof(ProcessResourceCollection), DisableParallelization = true)]
 public sealed class ProcessResourceCollection { }
 
@@ -30,7 +28,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         new Random(0x34).NextBytes(buffer);
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         long before = GC.GetTotalMemory(false);
-        for (int block = 0; block < 512; block++) tree.Update(buffer); // 32 MiB streamed through one buffer
+        for (int block = 0; block < 512; block++) tree.Update(buffer);
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         long growth = GC.GetTotalMemory(false) - before;
         Assert.True(growth <= 512 * 1024, $"streaming root retained {growth / 1024} KiB for 32 MiB of data");
@@ -55,12 +53,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             var budget = new BlobFlowBudget(4 * 1024 * 1024);
             string outDir = Path.Combine(dir, "out");
 
-            // One full download first: JIT, pools, and one-time allocations belong to the
-            // process, not the loop — the slope check starts after the warmup. Its own
-            // destination: since resume became idempotent at a completed destination
-            // (R3/P5), a warmup that finished inside outDir would make every cycle
-            // below a correct wire no-op instead of a mid-flight cancel. The warmup
-            // warms the process, not the destination the cycles chain on.
             BlobDownloadResult warm = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "warm"),
                 options: DownOptions(lab, 34020) with { FlowBudget = budget }).WaitAsync(Budget);
             Assert.Equal(FlowBytes, warm.Bytes);
@@ -77,15 +69,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 Task<BlobDownloadResult>? run = null;
                 try
                 {
-                // Cancel is issued from INSIDE the downloader's pump: Report runs
-                // synchronously on the verify path, so cancellation lands mid-transfer
-                // with no scheduling race. The 64 KiB-remaining guard is 8× the window —
-                // nothing queued or requested could finish the file before the next
-                // cancellation check, on any machine, under any starvation. Verified
-                // runs commit at 64 KiB granularity (v4): the threshold sits one run
-                // past the first commit so a cancelled attempt always leaves an
-                // honestly resumable checkpoint — bytes staged short of a run commit
-                // are unverifiable and correctly leave nothing behind.
+
                 var progress = new SyncProgress(p =>
                 {
                     if (p.VerifiedBytes > 72 * 1024 && p.TotalBytes - p.VerifiedBytes > 64 * 1024)
@@ -102,25 +86,21 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
 
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run).WaitAsync(TestBudget.Scenario);
 
-                Assert.Equal(0, budget.UsedBytes); // every reservation returned, immediately
-                Assert.Equal(socketsAtRest, lab.Net.LiveSockets); // downloader node released its socket
-                // Finalizer-aware collection: an object released by a finalizer needs a
-                // second collection to vanish from GetTotalMemory, and macOS teardown
-                // otherwise surfaces one cycle late as a false sawtooth.
+                Assert.Equal(0, budget.UsedBytes);
+                Assert.Equal(socketsAtRest, lab.Net.LiveSockets);
+
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
                 heapSamples.Add(GC.GetTotalMemory(forceFullCollection: true));
                 output.WriteLine($"cycle {i}: heap {heapSamples[^1]} bytes");
 
-                // A cancelled attempt must leave an honest resumable prefix behind.
                 Assert.True(Directory.Exists(Path.Combine(outDir, "rung.bin.pinhole-part")),
                     "cancelled attempt left no checkpoint to resume from");
                 }
                 catch (Exception ex)
                 {
-                    // Parallel-suite flake forensics: if this ever fails under load, the
-                    // failure message carries the whole cycle state with it.
+
                     throw new Exception(
                         $"cycle {i}: run={run?.Status.ToString() ?? "unstarted"} verified={stats.VerifiedBytes} " +
                         $"window={stats.WindowBytes} retransmits={stats.Retransmits} " +
@@ -129,27 +109,15 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 }
             }
 
-            // Per-cycle heap growth as an end-to-end slope. A median of consecutive
-            // sample deltas is the wrong estimator here: delayed teardown (or GC segment
-            // churn) can alternate the plateau ~1 MiB between cycles, and the median then
-            // reports the oscillation amplitude, not growth — the macOS matrix showed a
-            // flat 7.4 -> 8.2 MiB envelope failing a "975 KiB/cycle" gate. The slope plus
-            // a hard total cap catch any real monotone leak of >= 512 KiB/cycle (8 cycles
-            // would grow the heap by >= 4 MiB) while staying deaf to oscillation.
-            // Collection isolation excludes allocations from other tests; the per-layer
-            // counters above stay exact.
             long totalGrowth = heapSamples[^1] - heapSamples[0];
             long perCycle = totalGrowth / (cycles - 1);
             output.WriteLine($"after {cycles} cancel/resume cycles: heap {heapAtRest / 1048576.0:F1} -> " +
                              $"{heapSamples[^1] / 1048576.0:F1} MiB (slope {perCycle / 1024.0:F0} KiB/cycle, total {totalGrowth / 1024.0:F0} KiB), " +
                              $"sockets {socketsAtRest}, budget used {budget.UsedBytes}");
             Assert.True(perCycle < 512 * 1024, $"heap grows ~{perCycle / 1024.0:F0} KiB per cancelled cycle");
-            // Secondary drift guard: 2 MiB is 2x the largest teardown/GC oscillation the
-            // macOS matrix has shown, and still half of what a threshold-level leak
-            // (512 KiB x 8) would produce.
+
             Assert.True(totalGrowth < 2 * 1024 * 1024, $"heap grew {totalGrowth / 1024.0:F0} KiB over {cycles} cancelled cycles");
 
-            // The stacked checkpoints resume: one clean pass finishes byte-exact.
             BlobDownloadResult done = await BlobClient.DownloadAsync(server.Ticket, outDir,
                 options: DownOptions(lab, 34020) with { FlowBudget = budget }).WaitAsync(Budget);
             Assert.True(done.Resumed, "the cancelled attempts' checkpoints were resumed, not discarded");
@@ -167,8 +135,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // Restart after restart, one surviving call: each dead provider disposes a
-            // node and each successor binds one — socket and heap ledgers must settle.
+
             using VirtualLab lab = new();
             byte[] data = new byte[FlowBytes];
             Random.Shared.NextBytes(data);
@@ -179,7 +146,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
 
             BlobServeOptions Opts() => new()
             {
-                Encrypt = false, // a restarted server mints a fresh ticket key; pinned-key restart is the identity case
+                Encrypt = false,
                 NodeOptions = lab.BaseOptions(o => o with
                 {
                     IdentityKeySeed = seed,
@@ -189,7 +156,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
 
             BlobServer server = await BlobServer.ServeAsync(src, Opts());
             BlobTicket ticket = server.Ticket;
-            // A private budget — the shared pie is legitimately held by parallel tests.
+
             var budget = new BlobFlowBudget(4 * 1024 * 1024);
             Task<BlobDownloadResult> run = Task.Run(() => BlobClient.DownloadAsync(ticket,
                 Path.Combine(dir, "out"), options: DownOptions(lab, 34020) with { FlowBudget = budget }).WaitAsync(Budget));
@@ -224,10 +191,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // Healthy peers under declared load: twelve transfers share a pie that fits
-            // only ~4 files' worth of reservations at once. Contention is the point —
-            // queued for the budget, every peer still finishes byte-exact, and the pie
-            // returns to zero when the last one drains.
+
             using VirtualLab lab = new();
             byte[] data = new byte[FlowBytes];
             Random.Shared.NextBytes(data);
@@ -267,9 +231,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
     [Fact]
     public async Task RepeatedNodeDisposal_LeavesTheSocketLedgerFlat()
     {
-        // Bind-and-drop the raw node — the shape the downloader takes per attempt. The
-        // virtual ledger catches any socket that outlives its owner; Connections must be
-        // empty at dispose-time so no pump or timer pins the host afterward.
+
         using VirtualLab lab = new();
         int atRest = lab.Net.LiveSockets;
         for (int i = 0; i < 12; i++)
@@ -293,8 +255,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             UdpSocketFactory = _ => lab.Net.CreateHost(new IPEndPoint(IPAddress.Parse("198.51.100.20"), 34020)),
         }));
 
-        // A peer that answered once and is gone forever: its string stays valid, its
-        // endpoint goes silent — the failed-dial path must reap every attempt.
         string deadString;
         await using (PinholeNode dead = await PinholeNode.BindAsync(lab.BaseOptions(o => o with
         {
@@ -311,7 +271,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             Assert.Empty(node.Connections);
         }
 
-        // And concurrently: twenty-four dials at once must still leave zero husks.
         Task<PinholeConnection>[] dials = Enumerable.Range(0, 24)
             .Select(_ => node.ConnectAsync(deadString)).ToArray();
         await Assert.ThrowsAsync<TimeoutException>(() => Task.WhenAll(dials)).WaitAsync(TimeSpan.FromSeconds(30));
@@ -325,11 +284,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // The ticket IS the capability, so a hostile holder is in scope: it completes
-            // the engine handshake, then floods the provider's blob layer with undecryptable
-            // junk and fresh-session Hellos. The provider's contract is strictly ≤ 1
-            // answer per answerable request — garbage costs it one datagram, nothing more —
-            // while an honest download completes undisturbed.
+
             using VirtualLab lab = new();
             byte[] data = new byte[FlowBytes];
             Random.Shared.NextBytes(data);
@@ -349,7 +304,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             Task<BlobDownloadResult> honest = Task.Run(() => BlobClient.DownloadAsync(server.Ticket,
                 Path.Combine(dir, "out"), options: DownOptions(lab, 34020)).WaitAsync(Budget));
 
-            // Phase 1: undecryptable junk — every datagram is dropped without a reply.
             var junk = new byte[64];
             for (int i = 0; i < 200; i++)
             {
@@ -360,9 +314,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             await Task.Delay(400);
             Assert.Equal(0, Interlocked.Read(ref answers));
 
-            // Phase 2: Hellos — the provider binds the FIRST session id seen and answers
-            // Hellos carrying it; foreign session ids get nothing (a session swap is
-            // refused, never negotiated mid-connection).
             ulong stream = BlobWire.StreamId(server.Ticket.Root);
             byte[] boundId = BlobWire.Cipher.FreshSessionId();
             for (int i = 0; i < 40; i++)
@@ -505,7 +456,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                         cutStarted.TrySetResult();
                     }
                     if (kind == 1 && p.VerifiedBytes >= 64 * 1024 && p.TotalBytes - p.VerifiedBytes > 64 * 1024)
-                        cts.Cancel(); // on the verifier: cancellation cannot race past completion
+                        cts.Cancel();
                 });
                 var options = DownOptions(lab, port) with
                 {
@@ -561,7 +512,7 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 }
                 finally
                 {
-                    // Keep disk usage constant for 24h/72h; observations live outside dir.
+
                     if (Directory.Exists(first)) Directory.Delete(first, recursive: true);
                     if (Directory.Exists(second)) Directory.Delete(second, recursive: true);
                 }
@@ -570,7 +521,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
                 Assert.Equal(0, BlobFlowBudget.Shared.UsedBytes);
             }
 
-            // Warm all three workloads with both peers before deriving budgets.
             SoakSample warmStart = ReadSample();
             for (int kind = 0; kind < 3; kind++) await CycleAsync(kind);
             SoakSample warmEnd = ReadSample();
@@ -685,8 +635,6 @@ public sealed class BoundedResourceTests(ITestOutputHelper output)
             }
         }
     }
-
-    // ------------------------------------------------------------------ plumbing
 
     private sealed class SyncProgress(Action<BlobProgress> on) : IProgress<BlobProgress>
     {

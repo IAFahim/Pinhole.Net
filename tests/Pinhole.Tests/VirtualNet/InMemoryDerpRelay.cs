@@ -6,8 +6,6 @@ using System.Threading.Channels;
 
 namespace Pinhole.Tests;
 
-// DERP's server-side layout, modeled without sockets or external services. Receives
-// split across messages and coalesced control frames exercise its byte-stream framing.
 internal sealed class InMemoryDerpRelay : IDisposable
 {
     internal sealed record Datagram(byte[] Source, byte[] Destination, byte[] Payload);
@@ -61,7 +59,7 @@ internal sealed class InMemoryDerpRelay : IDisposable
         {
             _relay = relay;
             byte[] greeting = Frame(0x01, [.. "DERP🔑"u8, .. relay._server.PublicKey]);
-            // A header and its body may span independently completed WS messages.
+
             Enqueue(greeting[..3]); Enqueue(greeting[3..]);
         }
 
@@ -114,7 +112,7 @@ internal sealed class InMemoryDerpRelay : IDisposable
                 _key = key;
                 if (!_relay._clients.TryAdd(Convert.ToHexString(key), this)) throw new WebSocketException("duplicate DERP identity");
                 Interlocked.Increment(ref _relay.Authentications);
-                // Several DERP frames can also share a single WS message.
+
                 Enqueue([.. Frame(0x03, box), .. Frame(0x12, [1, 2, 3, 4, 5, 6, 7, 8]), .. Frame(0x06, [])]);
             }
             else if (frame[0] == 0x13 && body.AsSpan().SequenceEqual(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }))

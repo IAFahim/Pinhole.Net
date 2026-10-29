@@ -21,7 +21,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
         now += 100;
         budget.End();
 
-        now += 300_000; // Five minutes of healthy progress after the first dial.
+        now += 300_000;
         budget.Check();
         Assert.Equal(TimeSpan.FromMilliseconds(900), budget.Remaining);
 
@@ -45,7 +45,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
 
         budget.Begin();
         now += 300;
-        budget.Begin(); // A retry inside this outage cannot restart its clock.
+        budget.Begin();
         now += 99;
         budget.Check();
         Assert.Equal(TimeSpan.FromMilliseconds(1), budget.Remaining);
@@ -159,21 +159,13 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     [Fact]
     public void SweepArm_YieldsToTheStallClockButNeverSpins()
     {
-        // Healthy tail: a fresh 30s limit against a young flight never bites,
-        // so the arm is exactly the PTO's, backoff and all.
+
         Assert.Equal(12_000, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 10_000,
             lastVerifiedMs: 9_900, limitMs: 30_000, answerMs: 3_000));
 
-        // The CI-stress shape: srtt pegged at the PTO ceiling puts the next
-        // natural re-request 12s out while the spent allowance bounds the death
-        // clock at lastVerified + 5.5s. The arm collapses to whatever still
-        // lets a re-request fire and be answered in time — 2.5s here.
         Assert.Equal(2_500, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 5_000,
             lastVerifiedMs: 5_000, limitMs: 5_500, answerMs: 3_000));
 
-        // Inside the answer window the arm floors at 250ms — a dying tail
-        // re-requests instead of idling, but never spins the loop — and the
-        // floor never stretches the arm past the PTO itself.
         Assert.Equal(BlobClient.SweepFloorMs, BlobClient.SweepArmMs(ptoMs: 12_000, sentAtMs: 9_000,
             lastVerifiedMs: 5_000, limitMs: 5_500, answerMs: 3_000));
         Assert.Equal(150, BlobClient.SweepArmMs(ptoMs: 150, sentAtMs: 9_000,
@@ -183,20 +175,12 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     [Fact]
     public void LocalStallCredit_IgnoresJitterAndForgivesOnlyBlockedTime()
     {
-        const long tick = 5; // the downloader's ControlTick cadence
+        const long tick = 5;
 
-        // Normal iteration cadence and scheduling jitter around it — including the
-        // ~16 ms idle-wake granularity of Windows timers — credit nothing: a
-        // healthy flight keeps aging toward its PTO.
         Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 3, tickMs: tick));
-        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 16, tickMs: tick)); // Windows idle-wake gap
-        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 50, tickMs: tick)); // at the threshold, not past it
+        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 16, tickMs: tick));
+        Assert.Equal(0, BlobClient.LocalStallCreditMs(gapMs: 50, tickMs: tick));
 
-        // A blocked loop — a verifier stall on the loop's own thread, a GC pause —
-        // is not wire time: all but one tick comes back, so a flight's age at
-        // resume is its pre-stall age plus one tick. A 350 ms verifier stall (the
-        // BufferedResponses shape) cannot age a young flight toward the 150 ms
-        // PTO floor, while a flight already at its PTO edge still expires.
         Assert.Equal(55, BlobClient.LocalStallCreditMs(gapMs: 60, tickMs: tick));
         Assert.Equal(345, BlobClient.LocalStallCreditMs(gapMs: 350, tickMs: tick));
         Assert.Equal(4_995, BlobClient.LocalStallCreditMs(gapMs: 5_000, tickMs: tick));
@@ -206,8 +190,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
     public async Task HealthyTimeBeforeProviderRestart_DoesNotSpendRecoveryAllowance()
     {
         string dir = TempDir();
-        // The whole scenario is shaper-paced (1 Mbps token bucket), so every phase has a
-        // hard wall-clock floor that runner load can only lengthen, never shrink.
+
         TimeSpan allowance = TimeSpan.FromSeconds(10);
         TimeSpan halfFloor = TimeSpan.FromSeconds(12);
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(75));
@@ -235,25 +218,12 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
                 if (p.VerifiedBytes >= half) halfDone.TrySetResult();
             });
             var watch = Stopwatch.StartNew();
-            // Half the file is 1.5 MiB over a 1 Mbps shaper: at least ~12.4 s (minus the
-            // bucket's 0.2 s burst credit) plus the dial — a floor the 10 s allowance stays
-            // under, so "the healthy portion exceeds the allowance" is physics, not timing.
-            // The allowance itself covers the restart chain: silent path death (~5 s of
-            // ride-out with these validation knobs), a 0.5 s backoff, re-dial and the first
-            // verified chunk — 5 s could not absorb that on a loaded runner (CI failures at
-            // ~14 s: recovery expired right after the restart).
-            // Clock accounting is also tested above without scheduler/timer noise;
-            // this scenario verifies actual provider replacement and checkpoint reuse.
+
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with
                 {
                     RecoveryTimeout = allowance,
-                    // The blackout fixtures use one 20 ms probe, shorter than this
-                    // link's 40 ms RTT. Give healthy traffic a valid probe budget here.
-                    // The knobs are also near their safe minimum: the 128-packet queue
-                    // drains for ~1 s at 1 Mbps, so probe replies can legitimately lag
-                    // a full interval; anything tighter falsely declares the healthy
-                    // path dead mid-transfer.
+
                     NodeOptions = ClientOptions(lab) with
                     {
                         PathValidationIdle = TimeSpan.FromSeconds(2),
@@ -264,7 +234,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             Task first = await Task.WhenAny(halfDone.Task, download).WaitAsync(TimeSpan.FromSeconds(45));
             if (first == download)
             {
-                await download; // Report a transfer failure immediately, before the progress wait.
+                await download;
                 Assert.Fail("the transfer finished before the provider-restart trigger");
             }
             Assert.True(watch.Elapsed > allowance, "the healthy portion must exceed the recovery allowance");
@@ -313,13 +283,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             byte[] expected = TestDispose.Pattern(2 * 1024 * 1024, 0xA3);
             string source = Path.Combine(dir, "asset.bin");
             await File.WriteAllBytesAsync(source, expected);
-            // The shaper rule carries both directions' loss as runtime toggles:
-            // the virtual network consults only the first matching rule, so a
-            // blackout rule added at run time would sit forever behind the
-            // bottleneck and drop nothing. Address order picks sides — the
-            // loss model applied is the one whose source compares smaller, and
-            // the provider's .10 sorts before the client's .20, so
-            // ForwardLoss carries provider→client data.
+
             ToggleLoss providerToClient = new();
             ToggleLoss clientToProvider = new();
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
@@ -332,15 +296,6 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
                 NodeOptions = ServerOptions(lab) with { IdentityKeySeed = seed },
             });
 
-            // Phase one spends most of the allowance through a real path loss.
-            // Phase two recreates the loss shape of the CI-stress failures:
-            // the provider→client direction goes dark mid-tail while the path
-            // itself stays valid — client requests keep reaching the provider,
-            // whose answers die in the dark — so nothing trips path validation
-            // and the stall clock runs the whole cut. The clamp that keeps the
-            // sweep inside the death clock is unit-tested above; this scenario
-            // proves the whole path end to end: ride out the cut, sweep, heal,
-            // finish against what remains of the allowance.
             long total = expected.Length;
             var fullCut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var tailCut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -363,11 +318,7 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             download = BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"), progress,
                 Options(lab) with
                 {
-                    // 16s was calibrated before the handshake's v4 mac1 armor: each
-                    // re-dial under total silence now spends the 3s v4 fallback window
-                    // (v4 PUNCs into the dark, then the one-shot unversioned retry)
-                    // before the handshake can complete — a bounded, documented
-                    // protocol cost the allowance must have room for.
+
                     RecoveryTimeout = TimeSpan.FromSeconds(20),
                     NodeOptions = ClientOptions(lab) with
                     {
@@ -378,13 +329,6 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
                     },
                 }, stop.Token);
 
-            // The full cut must outlast the ~5s these validation knobs need to
-            // declare the silent path dead; the tail cut must outlast the first
-            // natural PTO expiry (~3s at the ceiling) so the re-request flight
-            // is genuinely lost, not merely late. The allowance is sized so
-            // that even a slow runner's redial and answer latencies leave the
-            // post-cut remainder more than a round trip of headroom — the
-            // scenario must finish on every matrix leg, not race its budget.
             await fullCut.Task.WaitAsync(TimeSpan.FromSeconds(20));
             await Task.Delay(TimeSpan.FromSeconds(7), stop.Token);
             providerToClient.Disable();
@@ -446,11 +390,9 @@ public sealed class BlobRecoveryDeadlineTests(ITestOutputHelper output)
             Volatile.Write(ref allowedChunks, 16);
             lab.Net.RemoveRule(cut);
             Task second = await Task.WhenAny(secondCut.Task, download).WaitAsync(Ceiling);
-            if (second == download) await download; // report the real fault instead of hiding it behind a wait
+            if (second == download) await download;
             await secondCut.Task;
 
-            // The first outage used over half the allowance. A fresh eight-second
-            // clock on the second outage would fail to terminate within this wait.
             TimeoutException failure = await Assert.ThrowsAsync<TimeoutException>(async () =>
                 await download.WaitAsync(TimeSpan.FromSeconds(4.5)));
             Assert.Contains("re-established", failure.Message);

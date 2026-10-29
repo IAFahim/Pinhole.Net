@@ -4,14 +4,17 @@ Verified 2026-10-11 during the physical phone trials and QUIC probe runs.
 Read this before running any device or network work; it exists so agents stop
 re-deriving the environment (or wrongly declaring it blocked) each session.
 
-## Code style rule: NO `///` XML doc comments
+## Code style rule: NO code comments of any kind
 
-The maintainer finds them noise. Every `///` line was stripped repo-wide once
-(2026-10-25) — **never write `///` doc comments in this repo, on any member,
-public or internal.** `Directory.Build.props` suppresses the missing-doc
-warnings (CS1591 & co.) so builds stay clean without them. State a constraint
-in a plain `//` comment only where the code cannot say it itself; anything a
-user needs lives in `docs/*.md`, not in the source.
+The maintainer finds them noise. XML doc comments (`///`) were stripped once
+(2026-10-25), and **every remaining comment in live code — `///` docs, `//`
+full-line, `//` trailing, `/* */` blocks — was stripped repo-wide on 2026-10-29**
+(202 files; string literals untouched; `docs/` evidence scripts stay as the
+historical record). **Never write a comment in this repo's code again, on any
+member or statement, public or internal — not `//`, not `///`, not block
+comments.** If a constraint or rationale is worth stating, it goes in
+`docs/*.md`, the commit message, or a test name. `Directory.Build.props`
+suppresses the missing-doc warnings (CS1591 & co.) so builds stay clean.
 
 ## This machine's environment (Arch/Omarchy desktop)
 

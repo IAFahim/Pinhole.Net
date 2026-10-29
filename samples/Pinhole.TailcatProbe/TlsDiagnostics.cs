@@ -6,8 +6,6 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 
-// Diagnose the operating system TLS handshake without DERP or WebSockets.
-// The callback records validation results and accepts only a valid chain/name.
 internal static class TlsDiagnostics
 {
     internal static async Task<int> RunAsync(IEnumerable<Uri> relays, string? output)

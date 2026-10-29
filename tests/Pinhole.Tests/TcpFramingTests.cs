@@ -45,7 +45,7 @@ public sealed class TcpFramingTests
         Assert.Equal(new byte[] { 1, 1 }, packet[..2]);
         Assert.Equal(frame, packet[2..]);
         frame[0] = 99;
-        Assert.Equal(0, packet[2]); // the queued writer owns a snapshot
+        Assert.Equal(0, packet[2]);
         Assert.Throws<ArgumentOutOfRangeException>(() => TcpFrameCodec.Encode(new byte[12]));
         Assert.Throws<ArgumentOutOfRangeException>(() => TcpFrameCodec.Encode(new byte[8193]));
         Assert.Equal(new byte[] { 32, 0 }, TcpFrameCodec.Encode(new byte[8192])[..2]);
@@ -98,7 +98,7 @@ public sealed class TcpFramingTests
         using var idle = new Duplex();
         Task<int> pending = TcpFrameCodec.ReadAsync(idle, new byte[2], new byte[8192], TimeSpan.FromMilliseconds(50), default).AsTask();
         await Task.Delay(120);
-        Assert.False(pending.IsCompleted); // an empty, idle session has no body deadline
+        Assert.False(pending.IsCompleted);
         idle.Feed(new byte[] { 0 });
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(2)));
         using var body = new Duplex();

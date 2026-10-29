@@ -13,26 +13,22 @@ public enum PmtuInputKind : byte
 public struct PmtuInput
 {
     public PmtuInputKind Kind;
-    public bool PathEligible; // Tick: Open, direct, UDP, remote known
-    public bool IPv4;         // Tick/InboundEvidence: remote address family picks the ceiling
-    public long Nonce;        // PongAcked: the nonce the pong echoed
-    public int WireLength;    // InboundEvidence: wire bytes of the frame that just arrived
+    public bool PathEligible;
+    public bool IPv4;
+    public long Nonce;
+    public int WireLength;
 }
 
-// RFC 8899-style path MTU discovery decisions. The presumed-good floor is never probed;
-// padded pings climb from it, a confirmed size raises the app payload ceiling, and a size
-// that stops traversing demotes the wire capacity back to the floor. Decision state only:
-// the shell owns where a probe goes (target/socket fields) and the send counters.
 public struct PmtuState
 {
-    public int Wire;          // confirmed wire capacity; 0 = unprobed
-    public bool VerifiedSize; // the confirmed size itself was (re)verified
+    public int Wire;
+    public bool VerifiedSize;
     public bool Outstanding;
-    public long Nonce;        // tick | PmtuMachine.ProbeMarker
-    public int ProbeSize;     // wire bytes of the outstanding probe
+    public long Nonce;
+    public int ProbeSize;
     public int Tries;
     public long DeadlineTicks;
-    public long NextProbeTicks; // cooldown after a failed climb / park at the ceiling
+    public long NextProbeTicks;
     public int BaseWire;
     public int StepBytes;
     public int MaxAttempts;
@@ -58,8 +54,7 @@ public struct PmtuState
 
 public static class PmtuMachine
 {
-    // Positive marker: an over-MTU probe's nonce cannot collide with path-probe nonces
-    // (sign bit) or caller ping timestamps (plain ticks).
+
     public const long ProbeMarker = 1L << 62;
 
     public static int Step(ref PmtuState state, in PmtuInput input, Tick now, Span<Effect> effects)
@@ -78,7 +73,7 @@ public static class PmtuMachine
                 StepPathMigrated(ref state);
                 return 0;
             default:
-                return 0; // unknown input values are a no-op, never an exception
+                return 0;
         }
     }
 
@@ -87,9 +82,7 @@ public static class PmtuMachine
         long nowMs = now.Milliseconds;
         if (!input.PathEligible)
         {
-            // Off the direct UDP path the measurement is void. VerifiedSize rides along
-            // as-is; only a migration (new endpoint) resets it. ProbeSize/Tries/Deadline
-            // are dead once Outstanding clears — the next climb rewrites them.
+
             if (s.Wire != 0 || s.Outstanding)
             {
                 s.Wire = 0;
@@ -104,27 +97,23 @@ public static class PmtuMachine
         {
             if (nowMs < s.DeadlineTicks)
             {
-                return 0; // this probe's pong may still land
+                return 0;
             }
 
             s.Tries++;
             if (s.Tries >= s.MaxAttempts)
             {
-                // An over-MTU probe is silently dropped by the network, not errored, so
-                // absence of a pong IS the measurement.
+
                 s.Outstanding = false;
                 if (s.ProbeSize == s.Wire && s.Wire > s.BaseWire)
                 {
-                    // The CONFIRMED size no longer traverses: the path's MTU shrank under
-                    // us. Fall back to the guaranteed floor and re-climb.
+
                     s.Wire = s.BaseWire;
                     s.VerifiedSize = false;
                     s.NextProbeTicks = 0;
                     return 0;
                 }
 
-                // A failed climb starts the cooldown; the cycle after EVERY cooldown
-                // re-verifies the confirmed size first (VerifiedSize cleared here).
                 s.VerifiedSize = false;
                 s.NextProbeTicks = nowMs + s.ReprobeIntervalMs;
                 return AddArm(effects, s.NextProbeTicks);
@@ -139,9 +128,7 @@ public static class PmtuMachine
             int next;
             if (s.Wire > s.BaseWire && !s.VerifiedSize)
             {
-                // RFC 8899 size re-verification: prove the CONFIRMED size still traverses
-                // before climbing further, or a mid-connection MTU shrink blackholes
-                // app-sized frames while small validation probes keep passing.
+
                 next = s.Wire;
             }
             else
@@ -149,7 +136,7 @@ public static class PmtuMachine
                 next = NextSize(ref s, input.IPv4);
                 if (next <= 0)
                 {
-                    s.NextProbeTicks = nowMs + s.ReprobeIntervalMs; // ceiling reached; re-climb later
+                    s.NextProbeTicks = nowMs + s.ReprobeIntervalMs;
                     return AddArm(effects, s.NextProbeTicks);
                 }
             }
@@ -169,8 +156,7 @@ public static class PmtuMachine
 
     private static void StepPongAcked(ref PmtuState s, in PmtuInput input)
     {
-        // The shell has already proven the pong came from the endpoint the probe went to;
-        // nonce ownership and confirmation bookkeeping are the machine's.
+
         if (!s.Outstanding || s.Nonce != input.Nonce)
         {
             return;
@@ -180,19 +166,19 @@ public static class PmtuMachine
         if (s.ProbeSize > s.Wire)
         {
             s.Wire = s.ProbeSize;
-            s.VerifiedSize = false; // the new size earns its own re-verification later
+            s.VerifiedSize = false;
         }
         else
         {
-            s.VerifiedSize = true; // the confirmed size re-verified; keep climbing
+            s.VerifiedSize = true;
         }
 
-        s.NextProbeTicks = 0; // climb again on the next tick
+        s.NextProbeTicks = 0;
     }
 
     private static void StepInboundEvidence(ref PmtuState s, in PmtuInput input)
     {
-        // A datagram this size arrived, so the path carries it. Never lowers the floor.
+
         int ceiling = input.IPv4 ? s.CeilingV4 : s.CeilingV6;
         if (input.WireLength >= s.BaseWire && input.WireLength > s.Wire && input.WireLength <= ceiling)
         {
@@ -202,8 +188,7 @@ public static class PmtuMachine
 
     private static void StepPathMigrated(ref PmtuState s)
     {
-        // The endpoint changed (roam, family switch): the confirmed MTU belongs to the
-        // OLD path. Forget it and re-climb.
+
         if (s.Wire != 0 || s.Outstanding)
         {
             s.Wire = 0;

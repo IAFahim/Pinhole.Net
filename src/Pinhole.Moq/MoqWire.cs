@@ -67,8 +67,7 @@ internal sealed class MoqReader(byte[] data)
     public string Namespace()
     {
         var count = Integer();
-        // The public API publishes exactly one UTF-8 namespace element.
-        // Joining multiple elements with '/' would conflate distinct protocol names.
+
         if (count != 1) throw new MoqProtocolException("Only single-element namespaces are supported");
         return Text();
     }

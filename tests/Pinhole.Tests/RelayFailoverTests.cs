@@ -11,13 +11,8 @@ namespace Pinhole.Tests;
 public sealed class RelayFailoverTests
 {
     private readonly ITestOutputHelper _output;
-    private const int Lifetime = 12; // seconds: refresh ticks clamp to 5s; expiry leaves two spare ticks, and a dead server is declared after 3 missed ticks (≈15s)
+    private const int Lifetime = 12;
 
-    // A relay-first dial is a chain of TURN round trips (allocation, permission, sealed
-    // handshake); under a fully parallel suite its honest duration stretches past the 15 s
-    // production default, and the engine would condemn its own dial. This class measures
-    // failover behavior, not dial latency — the dials get headroom, and passing runs never
-    // wait for it (the awaits complete the moment the handshake lands).
     private static readonly TimeSpan RelayHandshake = TimeSpan.FromSeconds(45);
 
     public RelayFailoverTests(ITestOutputHelper output) => _output = output;
@@ -44,7 +39,7 @@ public sealed class RelayFailoverTests
         }
         catch (InvalidOperationException)
         {
-            return false; // pathless pending state: sending is refused until a path returns
+            return false;
         }
         finally
         {
@@ -95,8 +90,6 @@ public sealed class RelayFailoverTests
         Assert.True(await ExchangeUntilAsync(atA, atB, "before the failure", TimeSpan.FromSeconds(25)),
             "relay-only session never flowed before the failure");
 
-        // One whole relay dies. The session must keep flowing — same connection objects,
-        // no ticket, no application action — on the surviving server.
         x.Dispose();
         bool healed = false;
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -139,8 +132,6 @@ public sealed class RelayFailoverTests
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(15), () => wounded.Path.Kind == PathKind.Relay);
         Assert.True(await ExchangeUntilAsync(atA, atB, "before the restart", TimeSpan.FromSeconds(15)));
 
-        // The relay dies and comes back on the same port: every allocation it ever handed
-        // out is gone, so both peers' relayed addresses change.
         IPEndPoint where = x.Control;
         x.Dispose();
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(30),
@@ -149,8 +140,6 @@ public sealed class RelayFailoverTests
             "the session must not flow while its only relay is gone");
         FakeTurnServer revived = new(port: where.Port, lifetimeSeconds: Lifetime, bindAddress: where.Address);
 
-        // Time compression only: the ladder wait before a retry is expedited the way its
-        // natural 30 s step would expire; every other mechanism runs at real speed.
         a.Engine.TestExpediteRelayRetry();
         b.Engine.TestExpediteRelayRetry();
 
@@ -168,7 +157,7 @@ public sealed class RelayFailoverTests
         try
         {
             Assert.True(healed, $"the session never healed after the in-place relay restart ({sw.Elapsed})");
-            Assert.Same(wounded, atA); // the very same connection object, never redialed
+            Assert.Same(wounded, atA);
             Assert.Equal(PathKind.Relay, atA.Path.Kind);
             Assert.True(revived.Allocations >= 2, "both peers reallocated on the revived server");
             Assert.NotEqual(oldRelayedA, RelayCandidate(a).Address);
@@ -214,15 +203,11 @@ public sealed class RelayFailoverTests
         Assert.Equal(0, x.Allocations);
         int afterBind = x.AllocateRejections;
 
-        // While the quota stands, forced ensures inside the backoff window attempt NOTHING:
-        // the ladder gates every retry, which is precisely the no-storm property.
         await node.Engine.ForceRelayEnsureAsync();
         await node.Engine.ForceRelayEnsureAsync();
         Assert.Equal(0, x.Allocations);
         Assert.Equal(afterBind, x.AllocateRejections);
 
-        // One deliberate attempt per ladder step, not a flood: expedite the (compressed)
-        // ladder twice more and each pass costs at most one rejected ALLOCATE.
         node.Engine.TestExpediteRelayRetry();
         await node.Engine.ForceRelayEnsureAsync();
         node.Engine.TestExpediteRelayRetry();
@@ -241,9 +226,7 @@ public sealed class RelayFailoverTests
     [Fact]
     public async Task AllRelaysTemporarilyDown_SessionPendsThenRecoversOnRestoration()
     {
-        // When EVERY relay dies, both peers' relayed addresses change on revival — the same
-        // both-endpoints-moved situation as the in-place restart, so the same authenticated
-        // lookup route (seeds + rendezvous records) is what carries the recovery.
+
         await using RendezvousServer rendezvous = RendezvousServer.Start();
         IPEndPoint lookup = new(IPAddress.IPv6Loopback, rendezvous.LocalEndPoint.Port);
         using VirtualLab lab = new(withTurn: true, turnLifetimeSeconds: Lifetime);
@@ -266,15 +249,13 @@ public sealed class RelayFailoverTests
         x.Dispose();
         y.Dispose();
 
-        // Pending, not closed: the connection objects stay alive in a non-Open state while
-        // every route is gone — an honest "waiting for infrastructure" instead of a lie.
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(30),
             () => atA.State is PinholeConnectionState.Punching or PinholeConnectionState.Degraded);
         Assert.False(await TryExchangeAsync(atA, atB, "nothing flows while every relay is down"));
 
         FakeTurnServer backX = new(port: whereX.Port, lifetimeSeconds: Lifetime, bindAddress: whereX.Address);
         FakeTurnServer backY = new(port: whereY.Port, lifetimeSeconds: Lifetime, bindAddress: whereY.Address);
-        a.Engine.TestExpediteRelayRetry(); // ladder expiry compressed; mechanisms at real speed
+        a.Engine.TestExpediteRelayRetry();
         b.Engine.TestExpediteRelayRetry();
         try
         {

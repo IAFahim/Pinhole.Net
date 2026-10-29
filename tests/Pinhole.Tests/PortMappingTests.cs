@@ -10,9 +10,7 @@ namespace Pinhole.Tests;
 
 public sealed class PortMappingTests
 {
-    // The fallback ladder this suite exercises (PCP → PMP → SSDP → SOAP) runs several
-    // protocol round trips before the mapping lands; a steal-heavy shared runner can
-    // stretch one retry cycle past a tight budget. Healthy runs finish in milliseconds.
+
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
     private static PinholeOptions Opts(IPEndPoint? ssdp = null, IReadOnlyList<IPEndPoint>? gateways = null,
@@ -25,7 +23,7 @@ public sealed class PortMappingTests
         EnableLanDiscovery = false,
         EnableNetworkWatch = false,
         EnablePathValidation = false,
-        EnableTcpTransport = false, // this suite's existing lease assertions concern UDP
+        EnableTcpTransport = false,
         EnablePortMapping = enabled,
         SsdpUnicastOverride = ssdp,
         GatewayOverride = gateways ?? [],
@@ -142,9 +140,7 @@ public sealed class PortMappingTests
     [Fact]
     public async Task LiveMapping_MakesTheHintCone_EvenBehindSymmetricObservations()
     {
-        // A symmetric NAT whose router nevertheless grants a mapping: the mapped endpoint
-        // is punchable from anywhere, so telling dialers "symmetric, skip the punch" would
-        // throw away a working direct path. The honest hint is cone.
+
         using FakeStunServer s1 = new() { ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 40000) };
         using FakeStunServer s2 = new() { ReportMappedOverride = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 41000) };
         using var gateway = new FakeGateway();
@@ -251,7 +247,7 @@ public sealed class FakeGateway : IDisposable
             reply[1] = 128;
             if (RefusePmp)
             {
-                BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2), 3); // NetworkFailure
+                BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2), 3);
             }
             else
             {
@@ -290,9 +286,7 @@ public sealed class FakeGateway : IDisposable
 
     private async Task HandlePcpAsync(byte[] d, IPEndPoint from)
     {
-        // RFC 6887 sections 7.1 and 11.1: a 24-byte common header, then
-        // a 36-byte MAP body. Refuse requests whose claimed client differs
-        // from the source address, as a real PCP server must do.
+
         if (d[1] != 1 || d[36] is not (6 or 17)
             || !d.AsSpan(8, 16).SequenceEqual(from.Address.MapToIPv6().GetAddressBytes()))
         {
@@ -307,7 +301,7 @@ public sealed class FakeGateway : IDisposable
         byte[] reply = new byte[RefusePcp ? 24 : 60];
         reply[0] = 2;
         reply[1] = 129;
-        reply[3] = RefusePcp ? (byte)4 : (byte)0; // UNSUPP_OPCODE
+        reply[3] = RefusePcp ? (byte)4 : (byte)0;
         BinaryPrimitives.WriteUInt32BigEndian(reply.AsSpan(4), lifetime);
         if (RefusePcp)
         {
@@ -315,7 +309,7 @@ public sealed class FakeGateway : IDisposable
             return;
         }
         nonce.CopyTo(reply, 24);
-        reply[36] = d[36]; // TCP=6 or UDP=17
+        reply[36] = d[36];
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(40), (ushort)internalPort);
         if (!RefusePcp)
         {
@@ -344,8 +338,7 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
 
     public FakeUpnpIgd()
     {
-        // The port-0 probe and the listener bind are two steps: another concurrent test can
-        // claim the probed port in between, so a collision retries with a fresh one.
+
         for (int attempt = 0; ; attempt++)
         {
             using var port = new TcpListener(IPAddress.Loopback, 0);
@@ -456,7 +449,7 @@ public sealed class FakeUpnpIgd : IAsyncDisposable
                     body = Response($"<NewExternalIPAddress>{ExternalIp}</NewExternalIPAddress>");
                     break;
                 case "AddAnyPortMapping" when RejectAddAnyPort:
-                    body = Fault(401); // InvalidAction: IGDv1 vocabulary only
+                    body = Fault(401);
                     ctx.Response.StatusCode = 500;
                     break;
                 case "AddAnyPortMapping":

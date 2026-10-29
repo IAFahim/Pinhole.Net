@@ -20,8 +20,6 @@ internal static class RelayProbe
         var aServer = new IPEndPoint(ip, aCredentials.Port);
         var bServer = new IPEndPoint(ip, bCredentials.Port);
 
-        // Expose TURN authentication/permission failures before the engine's best-effort
-        // allocation logic would otherwise absorb them as missing candidates.
         stage("turn_allocation");
         await using var rawA = await TurnClient.AllocateAsync(aServer, aCredentials.Username, aCredentials.Credential, ct);
         await using var rawB = await TurnClient.AllocateAsync(bServer, bCredentials.Username, bCredentials.Credential, ct);
@@ -62,9 +60,7 @@ internal static class RelayProbe
                 $"rawMatchesNodeB={rawB.RelayedAddress!.Address.Equals(relayB.Address)}");
         }
         stage("encrypted_handshake");
-        // TURN permissions depend on the remote allocation's data IP. Exchange both
-        // candidates before dialing, as an application's signaling service must do:
-        // Cloudflare may place the allocations on different data IPs even here.
+
         var connected = await Task.WhenAll(a.ConnectAsync(bTicket, ct), b.ConnectAsync(aTicket, ct));
         await using var atA = connected[0];
         await using var atB = connected[1];

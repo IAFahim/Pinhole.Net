@@ -39,7 +39,7 @@ public sealed class BlobTicket
 
         byte[] psk = PreSharedKey ?? Array.Empty<byte>();
         var payload = new MemoryStream(13 + 32 + psk.Length + 2 + cs.Length + name.Length);
-        payload.WriteByte(1); // version
+        payload.WriteByte(1);
         payload.WriteByte((byte)((Kind == BlobKind.Directory ? 1 : 0) | (PreSharedKey is null ? 0 : 2)));
         payload.WriteByte((byte)name.Length);
         payload.Write(name);
@@ -200,8 +200,7 @@ internal static class Manifest
             var reader = new Reader(data);
             string name = Encoding.UTF8.GetString(reader.ReadBytes(reader.ReadU16()));
             uint count = reader.ReadU32();
-            // The count is hostile input: pre-allocate a sliver and let the list grow —
-            // the loop terminates on the first truncated entry regardless of the claim.
+
             var entries = new List<Entry>((int)Math.Min(count, 64));
             for (int i = 0; i < count; i++)
             {

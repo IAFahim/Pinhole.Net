@@ -10,14 +10,11 @@ using BcChaChaPoly = Org.BouncyCastle.Crypto.Modes.ChaCha20Poly1305;
 
 namespace Pinhole.Tests.Crypto;
 
-// R1 gates for the AEAD span wrappers: Wycheproof rows (valid and tampered) for both
-// algorithms, differential against BouncyCastle for ChaCha20-Poly1305, rejection of
-// every wire-controlled mutation, and 0 allocations per seal/open.
 public sealed class AeadTests
 {
     private static readonly (int Id, int KeyLen, string Key, string Iv, string Aad, string Msg, string Ct, string Tag, bool ExpectOpen)[] AesGcmRows =
     [
-        // AesGcm Wycheproof subset (tcId, keyLen, key, iv, aad, msg, ct, tag, expectOpen)
+
             (1, 16, "5b9604fe14eadba931b0ccf34843dab9", "028318abc1824029138141a2", "", "001d0c231287c1182784554ca3a21908", "26073cc1d851beff176384dc9896d5ff", "0a3ea7a5487cb5f7d70fb6c58d038554", true),
             (2, 16, "5b9604fe14eadba931b0ccf34843dab9", "921d2507fa8007b7bd067d34", "00112233445566778899aabbccddeeff", "001d0c231287c1182784554ca3a21908", "49d8b9783e911913d87094d1f63cc765", "1e348ba07cca2cf04c618cb4d43a5b92", true),
             (3, 16, "aa023d0478dcb2b2312498293d9a9129", "0432bc49ac34412081288127", "aac39231129872a2", "2035af313d1346ab00154fea78322105", "eea945f3d0f98cc0fbab472a0cf24e87", "4bb9b4812519dadf9e1232016d068133", true),
@@ -56,7 +53,7 @@ public sealed class AeadTests
 
     private static readonly (int Id, int KeyLen, string Key, string Iv, string Aad, string Msg, string Ct, string Tag, bool ExpectOpen)[] ChaChaRows =
     [
-        // ChaCha Wycheproof subset (tcId, keyLen, key, iv, aad, msg, ct, tag, expectOpen)
+
             (1, 32, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f", "070000004041424344454647", "50515253c0c1c2c3c4c5c6c7", "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e", "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116", "1ae10b594f09e26a7e902ecbd0600691", true),
             (2, 32, "80ba3192c803ce965ea371d5ff073cf0f43b6a2ab576b208426e11409c09b9b0", "4da5bf8dfd5852c1ea12379d", "", "", "", "76acb342cf3166a5b63c0c0ea1383c8d", true),
             (3, 32, "7a4cd759172e02eb204db2c3f5c746227df584fc1345196391dbb9577a250742", "a92ef0ac991dd516a3c6f689", "bd506764f2d2c410", "", "", "906fa6284b52f87b7359cbaa7563c709", true),
@@ -216,7 +213,6 @@ public sealed class AeadTests
             wire[bit / 8] ^= (byte)(1 << (bit % 8));
         }
 
-        // wrong nonce and wrong aad reject too
         Assert.False(aead.TryOpen("ffffffffffff"u8, [], wire, opened));
         Assert.False(aead.TryOpen(nonce, "x"u8, wire, opened));
         Assert.True(aead.TryOpen(nonce, [], wire, opened));
@@ -227,8 +223,7 @@ public sealed class AeadTests
     [InlineData(false)]
     public void PerOpCost_IsConstant_IndependentOfPayloadSize(bool useAesGcm)
     {
-        // The BCL ciphers spend a small fixed allocation per call on some platforms;
-        // the property under gate is that cost does not scale with bytes.
+
         if (useAesGcm && !Aead.AesGcmSupported) return;
         if (!useAesGcm && !Aead.ChaCha20Poly1305Supported) return;
         using var aead = useAesGcm
@@ -267,11 +262,11 @@ public sealed class AeadTests
         using var aead = Aead.CreateChaCha20Poly1305("0123456789abcdef0123456789abcdef0123456789abcdef"u8[..32]);
         byte[] wire = new byte[50];
         byte[] outBuf = new byte[50];
-        Assert.False(aead.TryOpen(new byte[11], [], wire, outBuf)); // short nonce: false, not throw
-        Assert.False(aead.TryOpen(new byte[12], [], wire[..15], outBuf)); // shorter than a tag
-        Assert.False(aead.TryOpen(new byte[12], [], Array.Empty<byte>(), outBuf)); // empty is below tag size
-        Assert.Throws<ArgumentException>(() => aead.Seal(new byte[11], [], wire, outBuf)); // programmer error throws
-        Assert.Throws<ArgumentException>(() => aead.Seal(new byte[12], [], wire, outBuf[..30])); // output too small
+        Assert.False(aead.TryOpen(new byte[11], [], wire, outBuf));
+        Assert.False(aead.TryOpen(new byte[12], [], wire[..15], outBuf));
+        Assert.False(aead.TryOpen(new byte[12], [], Array.Empty<byte>(), outBuf));
+        Assert.Throws<ArgumentException>(() => aead.Seal(new byte[11], [], wire, outBuf));
+        Assert.Throws<ArgumentException>(() => aead.Seal(new byte[12], [], wire, outBuf[..30]));
         Assert.Throws<ArgumentException>(() => Aead.CreateChaCha20Poly1305("short"u8));
         Assert.Throws<ArgumentException>(() => Aead.CreateAesGcm("0123456789abcde"u8[..13]));
     }

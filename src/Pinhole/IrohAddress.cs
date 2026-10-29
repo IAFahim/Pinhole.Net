@@ -7,8 +7,7 @@ public sealed class IrohAddress
 {
     internal const int MaxAddresses = 64;
     internal byte[] Key { get; }
-    // Signed Pinhole extension in pkarr TXT records. Native iroh tickets and the
-    // raw IrohTransport deliberately keep their original address representation.
+
     internal IReadOnlyList<Uri> DerpRelayUrls { get; init; } = [];
     private readonly IPEndPoint[] _direct;
     private readonly Uri[] _relays;
@@ -33,10 +32,10 @@ public sealed class IrohAddress
     public override string ToString()
     {
         using var wire = new MemoryStream();
-        wire.WriteByte(0); // EndpointTicket::Variant1
+        wire.WriteByte(0);
         wire.Write(Key);
         IrohEncoding.WriteVarint(wire, (ulong)(_relays.Length + _direct.Length));
-        // Match TransportAddr's BTreeSet order: Relay, Ip; then URL/SocketAddr order.
+
         foreach (Uri relay in _relays.OrderBy(x => x.AbsoluteUri, StringComparer.Ordinal))
         {
             wire.WriteByte(0);

@@ -21,8 +21,6 @@ public sealed class OptionsResolutionTests
         var catalog = new[] { new IPEndPoint(IPAddress.Parse("198.51.100.1"), 3478) };
         Task<IPEndPoint[]> Source(CancellationToken _) => Task.FromResult<IPEndPoint[]>(catalog);
 
-        // The parameterless default and a timeout-only customization resolve the exact
-        // same infrastructure when they see the same catalog.
         PinholeOptions def = await PinholeOptions.ResolveAsync(new PinholeOptions { StunCatalog = Source });
         PinholeOptions customized = await PinholeOptions.ResolveAsync(
             new PinholeOptions { ConnectTimeout = TimeSpan.FromSeconds(30), StunCatalog = Source });
@@ -33,8 +31,8 @@ public sealed class OptionsResolutionTests
         Assert.Equal(PinholeOptions.PublicDerpRelays, customized.ResolvedDerpRelays);
         Assert.Equal(catalog, def.ResolvedStun);
         Assert.Equal(catalog, customized.ResolvedStun);
-        Assert.Equal(TimeSpan.FromSeconds(30), customized.ConnectTimeout); // scalar kept
-        Assert.Empty(customized.ResolvedRelays);                            // no TURN by default
+        Assert.Equal(TimeSpan.FromSeconds(30), customized.ConnectTimeout);
+        Assert.Empty(customized.ResolvedRelays);
         Assert.True(def.EnableLanDiscovery);
         Assert.True(customized.EnableLanDiscovery);
         Assert.True(def.PublishIrohAddress);
@@ -118,18 +116,15 @@ public sealed class OptionsResolutionTests
             StunCatalog = _ => { Interlocked.Increment(ref lookedUp); return Task.FromResult(Array.Empty<IPEndPoint>()); },
         });
 
-        // The caller's server was probed for real (the reflexive candidate landed)…
         await TestPoll.UntilAsync(Timeout, () => node.PublicEndpoints.Count > 0);
-        // …and the free catalog was never consulted.
+
         Assert.Equal(0, lookedUp);
     }
 
     [Fact]
     public async Task BindTimeProbe_RetransmitsThroughDatagramLoss()
     {
-        // The bind-time reflexive probe is a UDP transaction too: losing the
-        // first exchanges must cost retransmit intervals, not the node's whole
-        // candidate budget (the EmptyLists flake's mechanism under load).
+
         using FakeStunServer stun = new() { DropFirstRequests = 2 };
         await using var node = await PinholeNode.BindAsync(new PinholeOptions
         {
@@ -168,7 +163,7 @@ public sealed class OptionsResolutionTests
         });
 
         await TestPoll.UntilAsync(Timeout, () => withStun.PublicEndpoints.Count > 0);
-        await Task.Delay(200); // an empty STUN list is structural: nothing can appear late
+        await Task.Delay(200);
         Assert.Empty(withoutStun.PublicEndpoints);
         Assert.False(withoutStun.HasRelay);
     }
@@ -188,7 +183,7 @@ public sealed class OptionsResolutionTests
             BindProbeBudget = TimeSpan.FromSeconds(1),
         }));
 
-        await Task.Delay(300); // any stray warming would show up here
+        await Task.Delay(300);
         Assert.Equal(0, Volatile.Read(ref _catalogCalls));
         Assert.False(node.HasRelay);
         Assert.Empty(node.PublicEndpoints);
@@ -213,8 +208,7 @@ public sealed class OptionsResolutionTests
     [Fact]
     public async Task BlackHoledStunCatalog_CannotStallTheBind_BeyondItsBudget()
     {
-        // A-08: catalog resolution ran before the bind's own probe budget even started,
-        // so a resolver that never answer stalled BindAsync indefinitely.
+
         var never = new TaskCompletionSource<IPEndPoint[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var options = new PinholeOptions
         {
@@ -227,15 +221,14 @@ public sealed class OptionsResolutionTests
 
         using var backstop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         await using PinholeNode node = await PinholeNode.BindAsync(options, backstop.Token)
-            .WaitAsync(TimeSpan.FromSeconds(10)); // budget + slack + engine bind, never forever
-        Assert.Empty(node.PublicEndpoints); // the stall cost the STUN candidates, nothing else
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(node.PublicEndpoints);
     }
 
     [Fact]
     public async Task CancelledWhileResolutionHangs_HaltsTheBindPromptly()
     {
-        // A-08: a hanging catalog must not outwait the caller's token — cancellation
-        // halts the bind during resolution, it is not tolerated into an empty catalog.
+
         var never = new TaskCompletionSource<IPEndPoint[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var options = new PinholeOptions
         {

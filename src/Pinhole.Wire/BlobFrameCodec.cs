@@ -2,11 +2,6 @@ using System.Buffers.Binary;
 
 namespace Pinhole.Wire;
 
-// A zero-copy view of a parsed blob frame: scalars are decoded up front, and
-// every byte region (session id, chunk data, ...) is an offset+length into the
-// input span, so the hot receive path allocates nothing (audit H-05). A view is
-// only meaningful after BlobFrameCodec.TryParse returned true; a default view
-// reads as type 0 with empty spans and zero scalars, never out of range.
 public readonly ref struct BlobFrameView
 {
     private readonly ReadOnlySpan<byte> _frame;
@@ -126,26 +121,6 @@ public readonly ref struct BlobFrameView
     public readonly ReadOnlySpan<byte> Sibling(int index) => SiblingCvs.Slice(32 * index, 32);
 }
 
-// Span-based codec for the blob transport frames, byte-compatible with
-// BlobWire.Frame.TryParse. Layout: u8 type, u64 BE stream id, then a per-type
-// body with no length prefix (the enclosing transport delimits frames).
-//
-// Acceptance rules, preserved exactly from the existing parser:
-//   Hello    body 0 (v1), 32 (v2), or 33 with leading version byte 3 (v3) or
-//            4 (v4); 33 with any other version byte, or any other length,
-//            rejects
-//   Welcome  body exactly 1+64+49 with leading version byte 3 or 4
-//   Bye      body empty
-//   Head     body 16; TotalBytes >= 0 and TotalChunks == ceil(TotalBytes/1024)
-//   Req      body 10; StartChunk >= 0 and Count in [1, 64]
-//   Chunk    body in [41, 1064]; Index >= 0; data (body[40..]) non-empty
-//   Proof    body exactly 9 + count*32; runIndex >= 0 and count <= 64
-//   anything else (short frames, unknown types) rejects
-// The Write side defaults to the legacy v3 Hello/Welcome and emits the v4
-// forms when asked. The v1/v2 Hello forms are recognized receive-side only so
-// callers can refuse them explicitly (wire v1/v2 are refused by design, issue
-// #49) and have no writer. Unlike BlobWire.Head and BlobWire.Request, the
-// writers refuse to emit what the parser would reject.
 public static class BlobFrameCodec
 {
     public const byte TypeHello = 1;
@@ -161,7 +136,6 @@ public static class BlobFrameCodec
     public const int HeaderLength = 9;
     public const int SessionIdLength = 32;
 
-    // 8-byte counter + a sealed 25-byte Head frame + 16-byte tag, opaque here
     public const int SealedHeadLength = 8 + 25 + 16;
 
     public const int MaxChunkData = 1024;
@@ -171,10 +145,10 @@ public static class BlobFrameCodec
     public const int HelloV1Length = HeaderLength;
     public const int HelloV2Length = HeaderLength + SessionIdLength;
     public const int HelloV3Length = HelloV2Length + 1;
-    public const int HelloV4Length = HelloV3Length; // same shape, version byte 4
+    public const int HelloV4Length = HelloV3Length;
     public const int WelcomeLength = HeaderLength + 1 + 2 * SessionIdLength + SealedHeadLength;
-    public const int WelcomeV4Length = WelcomeLength; // same shape, version byte 4
-    public const int ProofMinLength = HeaderLength + 8 + 1; // runIndex + count byte, no siblings
+    public const int WelcomeV4Length = WelcomeLength;
+    public const int ProofMinLength = HeaderLength + 8 + 1;
     public const int ProofMaxLength = HeaderLength + 8 + 1 + MaxProofSiblings * 32;
     public const int HeadLength = HeaderLength + 16;
     public const int RequestLength = HeaderLength + 10;
@@ -232,7 +206,7 @@ public static class BlobFrameCodec
                 long totalChunks = BinaryPrimitives.ReadInt64LittleEndian(frame.Slice(17, 8));
                 if (totalBytes < 0 || totalChunks != ChunkCount(totalBytes))
                 {
-                    return false; // only (0, 0) represents the empty blob; lying counts reject
+                    return false;
                 }
 
                 break;
@@ -278,7 +252,7 @@ public static class BlobFrameCodec
                 if (BinaryPrimitives.ReadInt64LittleEndian(frame.Slice(9, 8)) < 0 || count > MaxProofSiblings
                     || frame.Length != ProofMinLength + count * 32)
                 {
-                    return false; // count promises a sibling run that is not exactly there
+                    return false;
                 }
 
                 break;
@@ -435,7 +409,6 @@ public static class BlobFrameCodec
         return total;
     }
 
-    // Sibling CVs run bottom-up: from the verified run's root toward the file root.
     public static int WriteProof(Span<byte> destination, ulong stream, long runIndex, ReadOnlySpan<byte> siblingCvs)
     {
         if (runIndex < 0)

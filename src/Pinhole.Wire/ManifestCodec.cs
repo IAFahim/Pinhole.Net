@@ -3,24 +3,10 @@ using System.Text;
 
 namespace Pinhole.Wire;
 
-// One directory-manifest entry. Root is always a 32-byte BLAKE3 root.
 public readonly record struct ManifestEntry(string Path, long Size, byte[] Root);
 
-// The directory manifest as a value. Manifest bytes are BLAKE3-hashed into the
-// ticket root, so Write must be byte-exact: the same value always produces the
-// same bytes, and decoding a payload then re-encoding it reproduces the payload.
 public readonly record struct ManifestValue(string Name, ManifestEntry[] Entries);
 
-// Canonical codec for the directory manifest, mirrored from BlobTicket's
-// internal Manifest encode/decode. Layout (all integers little-endian):
-//   u16 nameLen, nameLen bytes of UTF-8
-//   u32 entryCount
-//   per entry: u16 pathLen, pathLen bytes of UTF-8, i64 size (>= 0), 32-byte root
-//   and nothing else: trailing bytes are rejected.
-// Tightenings over the legacy decoder: names and paths must be valid UTF-8 (the
-// legacy GetString replaces bad bytes with U+FFFD, silently changing the hash
-// preimage) and Write refuses the values the legacy encoder could emit but its
-// own decoder rejects (negative sizes, non-32-byte roots, >65535-byte text).
 public static class ManifestCodec
 {
     public const int RootLength = 32;
@@ -53,7 +39,7 @@ public static class ManifestCodec
         pos += 4;
         if ((long)count * MinEntryBytes > data.Length - pos)
         {
-            return false; // the claimed count cannot fit in what is left: truncated (or lying) input
+            return false;
         }
 
         var entries = new ManifestEntry[(int)count];
@@ -61,7 +47,7 @@ public static class ManifestCodec
         {
             if (!WirePrimitives.TryReadU16Le(data[pos..], out ushort pathLen))
             {
-                return false; // the count fit-check guarantees these two bytes; total regardless
+                return false;
             }
 
             pos += 2;
@@ -92,7 +78,7 @@ public static class ManifestCodec
 
         if (pos != data.Length)
         {
-            return false; // trailing bytes are not part of any entry
+            return false;
         }
 
         value = new ManifestValue(name, entries);
@@ -157,10 +143,6 @@ public static class ManifestCodec
         return (int)total;
     }
 
-    // Strict UTF-8 well-formedness: rejects bare continuations, overlong forms
-    // (C0/C1 leads, E0 <A0, F0 <90), surrogate halves (ED >=A0), and anything
-    // above U+10FFFF (F4 >8F) — everything the lossy Encoding.UTF8 decode would
-    // quietly turn into U+FFFD.
     private static bool IsValidUtf8(ReadOnlySpan<byte> span)
     {
         int i = 0;
@@ -218,7 +200,7 @@ public static class ManifestCodec
                     throw new ArgumentException("text contains an unpaired surrogate and has no UTF-8 encoding", nameof(text));
                 }
 
-                i++; // the low half is consumed with its lead
+                i++;
             }
             else if (char.IsLowSurrogate(text[i]))
             {

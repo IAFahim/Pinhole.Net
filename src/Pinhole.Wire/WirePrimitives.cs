@@ -2,11 +2,6 @@ using System.Buffers.Binary;
 
 namespace Pinhole.Wire;
 
-// Shared low-level wire primitives: total, allocation-free, bounds-checked. Every
-// codec in this assembly builds on these so endianness and varint canonicality are
-// decided once. TryRead returns false on any malformed input and never throws on
-// wire-controlled bytes; Write throws only on programmer error (destination too
-// small, value out of range).
 public static class WirePrimitives
 {
     public const ulong VarintMax = (1UL << 62) - 1;
@@ -106,9 +101,6 @@ public static class WirePrimitives
         return 8;
     }
 
-    // QUIC variable-length integer (RFC 9000 section 16): 2-bit length prefix,
-    // 62-bit value. Only the minimal encoding of a value is canonical: a padded
-    // longer form of a small value is rejected.
     public static bool TryReadVarint(ReadOnlySpan<byte> b, out ulong value, out int length)
     {
         value = 0;
@@ -143,7 +135,7 @@ public static class WirePrimitives
 
         if (VarintLength(value) != size)
         {
-            // non-minimal encoding: reject as non-canonical
+
             value = 0;
             length = 0;
             return false;

@@ -4,10 +4,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Core;
 
-// Tick-driven, deterministic machine tests: every "clock" is a literal millisecond
-// handed to the machine as a Tick; nothing here sleeps or races. The engines wire
-// the machines with base=1200, step=128, attempts=3, ceilings 1472/1452 — these
-// tests use the same numbers so a machine regression is an engine regression.
 public sealed class MachineTests
 {
     private const int BaseWire = 1200;
@@ -68,16 +64,12 @@ public sealed class MachineTests
     private static int KeepaliveStep(ref KeepaliveState s, in KeepaliveInput input, long nowMs, Span<Effect> effects) =>
         KeepaliveMachine.Step(ref s, in input, new Tick(nowMs), effects);
 
-    // ------------------------------------------------------------------ PMTU: climb
-
     [Fact]
     public void Pmtu_ClimbsStepwise_VerifyingEachSize_TillTheCeilingParks()
     {
         PmtuState s = Pmtu();
         Span<Effect> effects = stackalloc Effect[2];
 
-        // Every size is probed twice in the engine: once to confirm (Wire rises),
-        // once to re-verify (VerifiedSize rises). Only then does the next climb go.
         long t = 1000;
         int[] expected = [1328, 1328, 1456, 1456, 1472, 1472];
         foreach (int size in expected)
@@ -89,7 +81,7 @@ public sealed class MachineTests
             Assert.Equal(size, probe.Size);
             Assert.Equal(t + ProbeTimeoutMs, probe.Deadline);
             Assert.True(probe.Nonce > 0, "PMTUD nonces are positive (bit 62 marker)");
-            Assert.Equal(t, probe.Nonce & ~PmtuMachine.ProbeMarker); // nonce = t | marker
+            Assert.Equal(t, probe.Nonce & ~PmtuMachine.ProbeMarker);
 
             Assert.Equal(0, PmtuStep(ref s, PmtuAck(probe.Nonce), t + 10, effects));
             Assert.False(s.Outstanding);
@@ -99,7 +91,6 @@ public sealed class MachineTests
         Assert.Equal(CeilingV4, s.Wire);
         Assert.True(s.VerifiedSize);
 
-        // At the ceiling there is nothing left to climb: an Arm-only cooldown.
         int parked = PmtuStep(ref s, PmtuTick(), t, effects);
         Assert.Equal(1, parked);
         Assert.Equal(EffectKind.Arm, effects[0].Kind);
@@ -116,15 +107,12 @@ public sealed class MachineTests
         Assert.Equal(1328, Probe(effects, n)!.Value.Size);
         Assert.Equal(0, PmtuStep(ref s, PmtuAck(Probe(effects, n)!.Value.Nonce), 1, effects));
 
-        // v6 ceiling clamps the second climb: min(1452, 1328 + 128) = 1452, not 1456.
         n = PmtuStep(ref s, PmtuTick(ipv4: false), 2, effects);
         Assert.Equal(1328, Probe(effects, n)!.Value.Size);
         Assert.Equal(0, PmtuStep(ref s, PmtuAck(Probe(effects, n)!.Value.Nonce), 3, effects));
         n = PmtuStep(ref s, PmtuTick(ipv4: false), 4, effects);
         Assert.Equal(1452, Probe(effects, n)!.Value.Size);
     }
-
-    // ------------------------------------------------------------------ PMTU: loss and shrink
 
     [Fact]
     public void Pmtu_LostProbeRetriesAtTheExactDeadline_ThenCooldownsAfterMaxAttempts()
@@ -136,25 +124,22 @@ public sealed class MachineTests
         long deadline = Probe(effects, n)!.Value.Deadline;
         Assert.Equal(1500, deadline);
 
-        Assert.Equal(0, PmtuStep(ref s, PmtuTick(), 1499, effects)); // still hoping
+        Assert.Equal(0, PmtuStep(ref s, PmtuTick(), 1499, effects));
         Assert.True(s.Outstanding);
 
-        // Exactly at the deadline the absence of a pong IS the measurement: retransmit.
         n = PmtuStep(ref s, PmtuTick(), 1500, effects);
         Assert.Equal(1328, Probe(effects, n)!.Value.Size);
         Assert.Equal(2000, Probe(effects, n)!.Value.Deadline);
         n = PmtuStep(ref s, PmtuTick(), 2000, effects);
         Assert.Equal(1328, Probe(effects, n)!.Value.Size);
 
-        // Third strike: no transmit, an Arm-only cooldown at now + reprobe interval.
         int cooled = PmtuStep(ref s, PmtuTick(), 2500, effects);
         Assert.Equal(1, cooled);
         Assert.Equal(EffectKind.Arm, effects[0].Kind);
         Assert.Equal(2500 + ReprobeMs, effects[0].Value);
         Assert.False(s.Outstanding);
-        Assert.Equal(0, s.Wire); // nothing was ever confirmed
+        Assert.Equal(0, s.Wire);
 
-        // During the cooldown nothing moves; at its end the climb restarts from the floor.
         Assert.Equal(0, PmtuStep(ref s, PmtuTick(), 2500 + ReprobeMs - 1, effects));
         int restart = PmtuStep(ref s, PmtuTick(), 2500 + ReprobeMs, effects);
         Assert.Equal(1328, Probe(effects, restart)!.Value.Size);
@@ -170,14 +155,13 @@ public sealed class MachineTests
         Assert.Equal(0, PmtuStep(ref s, PmtuAck(Probe(effects, n)!.Value.Nonce), 1010, effects));
         Assert.Equal(1328, s.Wire);
 
-        // The re-verification probe of the confirmed size loses all three attempts.
-        n = PmtuStep(ref s, PmtuTick(), 2000, effects); // re-verify 1328
+        n = PmtuStep(ref s, PmtuTick(), 2000, effects);
         Assert.Equal(1328, Probe(effects, n)!.Value.Size);
         PmtuStep(ref s, PmtuTick(), 2500, effects);
         PmtuStep(ref s, PmtuTick(), 3000, effects);
         int after = PmtuStep(ref s, PmtuTick(), 3500, effects);
 
-        Assert.Equal(0, after); // no cooldown: fall back and re-climb immediately
+        Assert.Equal(0, after);
         Assert.Equal(BaseWire, s.Wire);
         Assert.False(s.VerifiedSize);
         Assert.False(s.Outstanding);
@@ -198,8 +182,6 @@ public sealed class MachineTests
         Assert.Equal(0, PmtuStep(ref s, PmtuAck(Probe(effects, n)!.Value.Nonce), 2010, effects));
         Assert.True(s.VerifiedSize);
 
-        // A failed climb (1328 -> 1456 never answers) starts the cooldown and schedules
-        // a re-verification of 1328 for the cycle after it.
         n = PmtuStep(ref s, PmtuTick(), 3000, effects);
         Assert.Equal(1456, Probe(effects, n)!.Value.Size);
         PmtuStep(ref s, PmtuTick(), 3500, effects);
@@ -209,10 +191,8 @@ public sealed class MachineTests
         Assert.Equal(1328, s.Wire);
 
         int reverify = PmtuStep(ref s, PmtuTick(), 4500 + ReprobeMs, effects);
-        Assert.Equal(1328, Probe(effects, reverify)!.Value.Size); // the confirmed size, not 1456
+        Assert.Equal(1328, Probe(effects, reverify)!.Value.Size);
     }
-
-    // ------------------------------------------------------------------ PMTU: evidence, migration, acks
 
     [Fact]
     public void Pmtu_InboundEvidenceRaisesTheWireButNeverLowersOrBreachesTheFloor()
@@ -230,15 +210,15 @@ public sealed class MachineTests
         }
 
         Assert.Equal(0, PmtuStep(ref s, evidence(1100), 0, effects));
-        Assert.Equal(0, s.Wire); // below the guaranteed floor: not evidence of anything
+        Assert.Equal(0, s.Wire);
         Assert.Equal(0, PmtuStep(ref s, evidence(2000), 0, effects));
-        Assert.Equal(0, s.Wire); // above the probe ceiling: loopback-sized, ignored
+        Assert.Equal(0, s.Wire);
         Assert.Equal(0, PmtuStep(ref s, evidence(1400), 0, effects));
         Assert.Equal(1400, s.Wire);
         Assert.Equal(0, PmtuStep(ref s, evidence(1300), 0, effects));
-        Assert.Equal(1400, s.Wire); // a small datagram never demotes a bigger confirmation
+        Assert.Equal(1400, s.Wire);
         Assert.Equal(0, PmtuStep(ref s, evidence(1460, ipv4: false), 0, effects));
-        Assert.Equal(1400, s.Wire); // v6 ceiling applies to v6-sized evidence
+        Assert.Equal(1400, s.Wire);
     }
 
     [Fact]
@@ -250,7 +230,6 @@ public sealed class MachineTests
         Assert.Equal(0, PmtuStep(ref s, PmtuAck(Probe(effects, n)!.Value.Nonce), 1010, effects));
         Assert.Equal(1328, s.Wire);
 
-        // Relay/TCP detour: the measurement is void but quietly — no effects, no throw.
         Assert.Equal(0, PmtuStep(ref s, PmtuTick(eligible: false), 2000, effects));
         Assert.Equal(0, s.Wire);
         Assert.False(s.Outstanding);
@@ -262,7 +241,7 @@ public sealed class MachineTests
         PmtuInput migrated = default;
         migrated.Kind = PmtuInputKind.PathMigrated;
         Assert.Equal(0, PmtuStep(ref s, migrated, 4000, effects));
-        Assert.Equal(0, s.Wire); // the confirmation belonged to the old endpoint
+        Assert.Equal(0, s.Wire);
         Assert.False(s.VerifiedSize);
     }
 
@@ -283,8 +262,6 @@ public sealed class MachineTests
         Assert.Equal(1328, s.Wire);
     }
 
-    // ------------------------------------------------------------------ keepalive: cadence
-
     [Fact]
     public void Keepalive_FiresOnTheFirstEligibleTick_ThenExactlyAtEachIntervalBoundary()
     {
@@ -303,18 +280,17 @@ public sealed class MachineTests
         Assert.Equal(2, n);
         Assert.Equal(EffectKind.Transmit, effects[0].Kind);
         Assert.Equal(EffectPath.Direct, effects[0].Path);
-        Assert.Equal(0, effects[0].Value); // the shell stamps its own send time
+        Assert.Equal(0, effects[0].Value);
         Assert.Equal(EffectKind.Arm, effects[1].Kind);
         Assert.Equal(1005, effects[1].Value);
 
-        Assert.Equal(0, KeepaliveStep(ref s, tick(), 1004, effects)); // one ms early: silence
-        Assert.Equal(0, KeepaliveStep(ref s, tick(eligible: false), 1004, effects)); // closed: silence
+        Assert.Equal(0, KeepaliveStep(ref s, tick(), 1004, effects));
+        Assert.Equal(0, KeepaliveStep(ref s, tick(eligible: false), 1004, effects));
 
-        n = KeepaliveStep(ref s, tick(), 1005, effects); // exactly on the boundary
+        n = KeepaliveStep(ref s, tick(), 1005, effects);
         Assert.Equal(2, n);
         Assert.Equal(2005, effects[1].Value);
 
-        // An ineligible stretch (Closed) never advances the cadence.
         Assert.Equal(0, KeepaliveStep(ref s, tick(eligible: false), 2000, effects));
         n = KeepaliveStep(ref s, tick(), 2005, effects);
         Assert.Equal(2, n);
@@ -332,8 +308,6 @@ public sealed class MachineTests
         Assert.Equal(0, KeepaliveStep(ref s, input, 0, effects));
         Assert.Equal(0, KeepaliveStep(ref s, input, long.MaxValue / 2, effects));
     }
-
-    // ------------------------------------------------------------------ keepalive: probe ladder
 
     [Fact]
     public void Keepalive_UnansweredProbesEscalateOnExactDeadlines_ToNotifyThenReset()
@@ -354,23 +328,22 @@ public sealed class MachineTests
         (long nonce, long deadline) = DirectProbe(effects, n);
         Assert.Equal(1000 | KeepaliveMachine.ProbeMarker, nonce);
         Assert.Equal(1300, deadline);
-        Assert.True(nonce < 0); // sign-bit marker: never mistaken for a caller ping timestamp
+        Assert.True(nonce < 0);
 
-        Assert.Equal(0, KeepaliveStep(ref s, ProbeTickFor(), 1299, effects)); // may still land
+        Assert.Equal(0, KeepaliveStep(ref s, ProbeTickFor(), 1299, effects));
         Assert.True(s.ProbeOutstanding);
 
-        Assert.Equal(0, KeepaliveStep(ref s, ProbeTickFor(), 1300, effects)); // strike one, no effect yet
+        Assert.Equal(0, KeepaliveStep(ref s, ProbeTickFor(), 1300, effects));
         Assert.False(s.ProbeOutstanding);
         Assert.Equal(1, s.UnansweredProbes);
 
-        n = KeepaliveStep(ref s, ProbeTickFor(), 1301, effects); // next tick sends the next probe
+        n = KeepaliveStep(ref s, ProbeTickFor(), 1301, effects);
         Assert.Equal(1301 | KeepaliveMachine.ProbeMarker, DirectProbe(effects, n).Nonce);
 
-        KeepaliveStep(ref s, ProbeTickFor(), 1601, effects); // strike two
-        KeepaliveStep(ref s, ProbeTickFor(), 1602, effects); // probe three, deadline 1902
-        n = KeepaliveStep(ref s, ProbeTickFor(), 1902, effects); // strike three
+        KeepaliveStep(ref s, ProbeTickFor(), 1601, effects);
+        KeepaliveStep(ref s, ProbeTickFor(), 1602, effects);
+        n = KeepaliveStep(ref s, ProbeTickFor(), 1902, effects);
 
-        // Max unanswered reached: a Notify, the ladder resets, no probe is armed.
         Assert.Equal(1, n);
         Assert.Equal(EffectKind.Notify, effects[0].Kind);
         Assert.Equal(EffectPath.Direct, effects[0].Path);
@@ -414,7 +387,7 @@ public sealed class MachineTests
         ack.Kind = KeepaliveInputKind.ProbeAcked;
         ack.Echo = nonce + 1;
         Assert.Equal(0, KeepaliveStep(ref s, ack, 1010, effects));
-        Assert.True(s.ProbeOutstanding); // an unrelated echo confirms nothing
+        Assert.True(s.ProbeOutstanding);
 
         ack.Echo = nonce;
         Assert.Equal(0, KeepaliveStep(ref s, ack, 1020, effects));
@@ -422,7 +395,7 @@ public sealed class MachineTests
         Assert.Equal(0, s.UnansweredProbes);
 
         int next = KeepaliveStep(ref s, probeTick, 1030, effects);
-        Assert.Equal(2, next); // alive again: fresh probe, fresh nonce
+        Assert.Equal(2, next);
         Assert.NotEqual(nonce, DirectProbe(effects, next).Nonce);
     }
 
@@ -438,13 +411,13 @@ public sealed class MachineTests
         KeepaliveInput activeTick = idleTick;
         activeTick.RecentActivity = true;
 
-        KeepaliveStep(ref s, idleTick, 1000, effects); // probe one, deadline 1300
-        KeepaliveStep(ref s, idleTick, 1300, effects); // strike one
-        KeepaliveStep(ref s, idleTick, 1301, effects); // probe two, deadline 1601
+        KeepaliveStep(ref s, idleTick, 1000, effects);
+        KeepaliveStep(ref s, idleTick, 1300, effects);
+        KeepaliveStep(ref s, idleTick, 1301, effects);
         Assert.True(s.ProbeOutstanding);
         Assert.Equal(1, s.UnansweredProbes);
 
-        Assert.Equal(0, KeepaliveStep(ref s, activeTick, 1500, effects)); // traffic returned
+        Assert.Equal(0, KeepaliveStep(ref s, activeTick, 1500, effects));
         Assert.False(s.ProbeOutstanding);
         Assert.Equal(0, s.UnansweredProbes);
     }
@@ -462,7 +435,7 @@ public sealed class MachineTests
         int n = KeepaliveStep(ref s, probeTick, 1000, effects);
         Assert.Equal(2, n);
         Assert.Equal(EffectPath.Relay, effects[0].Path);
-        Assert.Equal(0, effects[0].Value); // the shell's own ping carries no machine nonce
+        Assert.Equal(0, effects[0].Value);
         Assert.True(s.ProbeOutstanding);
         Assert.Equal(0, s.ProbeNonce);
         Assert.Equal(1300, effects[1].Value);
@@ -478,7 +451,7 @@ public sealed class MachineTests
         probeTick.PathEligible = true;
         probeTick.Path = EffectPath.Direct;
         KeepaliveStep(ref s, probeTick, 1000, effects);
-        KeepaliveStep(ref s, probeTick, 1300, effects); // strike one
+        KeepaliveStep(ref s, probeTick, 1300, effects);
 
         KeepaliveInput changed = default;
         changed.Kind = KeepaliveInputKind.PathChanged;
@@ -486,8 +459,6 @@ public sealed class MachineTests
         Assert.False(s.ProbeOutstanding);
         Assert.Equal(0, s.UnansweredProbes);
     }
-
-    // ------------------------------------------------------------------ keepalive: RTT EWMA
 
     [Fact]
     public void Keepalive_RttEwmaMatchesTheEngineFormula()
@@ -503,14 +474,12 @@ public sealed class MachineTests
             return input;
         }
 
-        KeepaliveStep(ref s, Sample(1000), 1030, effects); // 30 ms
+        KeepaliveStep(ref s, Sample(1000), 1030, effects);
         Assert.Equal(30 * TimeSpan.TicksPerMillisecond, (long)s.RttEwmaTicks);
 
-        KeepaliveStep(ref s, Sample(2000), 2050, effects); // 50 ms sample, 0.25 gain
+        KeepaliveStep(ref s, Sample(2000), 2050, effects);
         Assert.Equal(35 * TimeSpan.TicksPerMillisecond, (long)s.RttEwmaTicks);
     }
-
-    // ------------------------------------------------------------------ path selector
 
     private static int SelectorStep(ref PathSelectorState s, in PathSelectorInput input, Span<Effect> effects) =>
         PathSelectorMachine.Step(ref s, in input, new Tick(1000), effects);
@@ -528,15 +497,13 @@ public sealed class MachineTests
             Assert.Equal(1, n);
             Assert.Equal(ConnPhase.Open, s.Phase);
             Assert.Equal(PathSel.Direct, s.Path);
-            // The verdict packs the new pair: phase << 8 | path.
+
             Assert.Equal(((long)ConnPhase.Open << (int)PathSelectorMachine.VerdictShift) | (uint)(byte)PathSel.Direct, effects[0].Value);
         }
 
-        // Open + direct is the steady state: a fresh confirmation is not a transition.
         PathSelectorState steady = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
         Assert.Equal(0, SelectorStep(ref steady, Selector(PathSelectorInputKind.DirectConfirmed), effects));
 
-        // Closed is absorbing: stray frames never revive a closed connection.
         PathSelectorState closed = PathSelectorState.Create(ConnPhase.Closed, PathSel.None);
         Assert.Equal(0, SelectorStep(ref closed, Selector(PathSelectorInputKind.DirectConfirmed), effects));
         Assert.Equal(ConnPhase.Closed, closed.Phase);
@@ -559,18 +526,18 @@ public sealed class MachineTests
         PathSelectorInput unconfirmed = Selector(PathSelectorInputKind.RelayConfirmed);
         unconfirmed.PeerConfirmed = false;
         PathSelectorState pending = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
-        Assert.Equal(0, SelectorStep(ref pending, in unconfirmed, effects)); // relay proves reachability, not the peer
+        Assert.Equal(0, SelectorStep(ref pending, in unconfirmed, effects));
 
         PathSelectorInput signaling = Selector(PathSelectorInputKind.RelayConfirmed);
         signaling.PeerConfirmed = true;
         signaling.RelaySignalingOnly = true;
         PathSelectorState reserved = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
-        Assert.Equal(0, SelectorStep(ref reserved, in signaling, effects)); // signaling relays never carry sessions
+        Assert.Equal(0, SelectorStep(ref reserved, in signaling, effects));
 
         PathSelectorInput live = Selector(PathSelectorInputKind.RelayConfirmed);
         live.PeerConfirmed = true;
         PathSelectorState open = PathSelectorState.Create(ConnPhase.Open, PathSel.Direct);
-        Assert.Equal(0, SelectorStep(ref open, in live, effects)); // relay evidence never displaces direct
+        Assert.Equal(0, SelectorStep(ref open, in live, effects));
     }
 
     [Fact]
@@ -590,14 +557,12 @@ public sealed class MachineTests
         Assert.Equal(ConnPhase.Punching, open2.Phase);
         Assert.Equal(PathSel.None, open2.Path);
 
-        // Degraded with a live relay keeps it; without one there is nothing to send on.
         PathSelectorState degradedLive = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
         Assert.Equal(0, SelectorStep(ref degradedLive, in withRelay, effects));
         PathSelectorState degradedDead = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
         Assert.Equal(1, SelectorStep(ref degradedDead, in withoutRelay, effects));
         Assert.Equal(ConnPhase.Punching, degradedDead.Phase);
 
-        // Pending connections have no carrying path to lose.
         PathSelectorState punching = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
         Assert.Equal(0, SelectorStep(ref punching, in withoutRelay, effects));
     }
@@ -618,14 +583,13 @@ public sealed class MachineTests
         PathSelectorState relayed = PathSelectorState.Create(ConnPhase.Degraded, PathSel.Relay);
         Assert.Equal(1, SelectorStep(ref relayed, in condemn, effects));
         Assert.Equal(ConnPhase.Dead, relayed.Phase);
-        Assert.Equal(PathSel.Relay, relayed.Path); // Dead is revivable; the path survives for the revival
+        Assert.Equal(PathSel.Relay, relayed.Path);
     }
 
     [Fact]
     public void PathSelector_AnEventuallyGoodPathReachesOpenAgainAfterEveryFall()
     {
-        // P2 in miniature: whatever the fall, live direct evidence restores Open, and
-        // the fall never strands the session in Open on a dead path.
+
         Span<Effect> effects = stackalloc Effect[1];
         PathSelectorState s = PathSelectorState.Create(ConnPhase.Punching, PathSel.None);
 
@@ -644,8 +608,6 @@ public sealed class MachineTests
         Assert.Equal(ConnPhase.Open, s.Phase);
         Assert.Equal(PathSel.Direct, s.Path);
     }
-
-    // ------------------------------------------------------------------ handshake
 
     private static HandshakeState Handshake(uint self = 0xA0A0_1010, bool offeredCrypto = false) =>
         HandshakeState.Create(self, offeredCrypto);
@@ -694,9 +656,8 @@ public sealed class MachineTests
         (long kind, long reply, _) = HandshakeStep(ref s, in punc, effects);
         Assert.Equal(HandshakeMachine.NeedKeys, kind);
         Assert.Equal(-1, reply);
-        Assert.False(s.RemoteTokenKnown); // a low-order PUNC must not install even a provisional token
+        Assert.False(s.RemoteTokenKnown);
 
-        // Rejected keys leave the latch untouched; an honest retry still works.
         HandshakeInput badKeys = default;
         badKeys.Kind = HandshakeInputKind.PuncKeys;
         badKeys.Accepted = false;
@@ -722,15 +683,13 @@ public sealed class MachineTests
         s.RemoteTokenAuthenticated = true;
         Span<Effect> effects = stackalloc Effect[2];
 
-        // All three would apply; the pin verdict wins.
         HandshakeInput pinned = default;
         pinned.Kind = HandshakeInputKind.PuncBegin;
         pinned.CryptoBody = true;
         pinned.PinMatches = false;
-        pinned.FrameToken = 0x9999_9999; // not the latched token
+        pinned.FrameToken = 0x9999_9999;
         Assert.Equal(HandshakeMachine.RejectPin, HandshakeStep(ref s, in pinned, effects).Kind);
 
-        // Stale frames from an older connection: a known token that stopped matching.
         HandshakeInput stale = default;
         stale.Kind = HandshakeInputKind.PuncBegin;
         stale.CryptoBody = true;
@@ -738,14 +697,12 @@ public sealed class MachineTests
         stale.FrameToken = 0x9999_9999;
         Assert.Equal(HandshakeMachine.RejectPuncToken, HandshakeStep(ref s, in stale, effects).Kind);
 
-        // Crossed modes: plaintext PUNC on a crypto connection.
         HandshakeInput crossed = default;
         crossed.Kind = HandshakeInputKind.PuncBegin;
         crossed.CryptoBody = false;
-        crossed.FrameToken = 0x1111_2222; // token matches, so the mode check is reached
+        crossed.FrameToken = 0x1111_2222;
         Assert.Equal(HandshakeMachine.RejectMixedMode, HandshakeStep(ref s, in crossed, effects).Kind);
 
-        // An UNauthenticated latched token may still be replaced by the real one.
         s.RemoteTokenAuthenticated = false;
         HandshakeInput replace = default;
         replace.Kind = HandshakeInputKind.PuncBegin;
@@ -767,15 +724,14 @@ public sealed class MachineTests
         Assert.Equal(HandshakeMachine.RejectPackLength, HandshakeStep(ref s, in pack, effects).Kind);
 
         pack.BodyPlausible = true;
-        pack.FrameToken = 0xDEAD_BEEF; // not ours
+        pack.FrameToken = 0xDEAD_BEEF;
         Assert.Equal(HandshakeMachine.RejectPackEcho, HandshakeStep(ref s, in pack, effects).Kind);
 
-        pack.FrameToken = 0xA0A0_1010; // ours
+        pack.FrameToken = 0xA0A0_1010;
         pack.LengthClassOk = false;
-        Assert.Equal(0, HandshakeStep(ref s, in pack, effects).Kind); // silently ignored
+        Assert.Equal(0, HandshakeStep(ref s, in pack, effects).Kind);
         Assert.False(s.RemoteTokenKnown);
 
-        // Legacy body on a plaintext connection: latch the responder's token.
         pack.LengthClassOk = true;
         pack.CryptoBody = false;
         pack.PeerToken = 0x5555_6666;
@@ -789,8 +745,6 @@ public sealed class MachineTests
     {
         Span<Effect> effects = stackalloc Effect[2];
 
-        // PUNC with a failed mac1: silent refusal, and it wins over every other check —
-        // feed it a bad pin AND a stale token AND crossed modes to prove ordering.
         HandshakeState s = Handshake(offeredCrypto: true);
         s.RemoteToken = 0x1111_2222;
         s.RemoteTokenKnown = true;
@@ -801,15 +755,13 @@ public sealed class MachineTests
         badPunc.PinMatches = false;
         badPunc.Mac1Present = true;
         badPunc.Mac1Ok = false;
-        badPunc.FrameToken = 0x9999_9999; // not the latched token
+        badPunc.FrameToken = 0x9999_9999;
         (long kind, long reply, long fail) = HandshakeStep(ref s, in badPunc, effects);
         Assert.Equal(HandshakeMachine.RejectMac1, kind);
-        Assert.Equal(-1, reply);       // no PACK
-        Assert.Equal(0, fail);         // no Close — the frame simply did not exist
-        Assert.Equal(0x1111_2222u, s.RemoteToken); // no state moved
+        Assert.Equal(-1, reply);
+        Assert.Equal(0, fail);
+        Assert.Equal(0x1111_2222u, s.RemoteToken);
 
-        // PACK with a failed mac1: silent before the echo verdict too — a forger must not
-        // even learn whether the echoed token was right.
         HandshakeState dialer = Handshake(offeredCrypto: true);
         HandshakeInput badPack = default;
         badPack.Kind = HandshakeInputKind.PackBegin;
@@ -819,14 +771,13 @@ public sealed class MachineTests
         badPack.PinMatches = false;
         badPack.Mac1Present = true;
         badPack.Mac1Ok = false;
-        badPack.FrameToken = 0xDEAD_BEEF; // wrong echo
+        badPack.FrameToken = 0xDEAD_BEEF;
         (kind, reply, fail) = HandshakeStep(ref dialer, in badPack, effects);
         Assert.Equal(HandshakeMachine.RejectMac1, kind);
         Assert.Equal(-1, reply);
         Assert.Equal(0, fail);
         Assert.False(dialer.RemoteTokenKnown);
 
-        // Present and verified: the frame proceeds exactly as its v3 twin would.
         HandshakeState ok = Handshake(offeredCrypto: true);
         HandshakeInput goodPunc = default;
         goodPunc.Kind = HandshakeInputKind.PuncBegin;
@@ -839,7 +790,6 @@ public sealed class MachineTests
         Assert.Equal(HandshakeMachine.NeedKeys, kind);
         Assert.Equal(-1, reply);
 
-        // Absent (v3 during the support window): nothing changes for today's shapes.
         HandshakeState v3 = Handshake(offeredCrypto: true);
         HandshakeInput plain = default;
         plain.Kind = HandshakeInputKind.PuncBegin;
@@ -855,7 +805,6 @@ public sealed class MachineTests
         HandshakeState s = Handshake(offeredCrypto: true);
         Span<Effect> effects = stackalloc Effect[2];
 
-        // A stripped handshake never falls back to plaintext.
         HandshakeInput stripped = default;
         stripped.Kind = HandshakeInputKind.PackBegin;
         stripped.BodyPlausible = true;
@@ -866,7 +815,6 @@ public sealed class MachineTests
         Assert.Equal(HandshakeMachine.RejectMixedMode, kind);
         Assert.Equal(HandshakeMachine.RejectMixedMode, fail);
 
-        // A pinned static key that stops matching is a MITM: refused, failed.
         HandshakeInput mitm = default;
         mitm.Kind = HandshakeInputKind.PackBegin;
         mitm.BodyPlausible = true;
@@ -878,7 +826,6 @@ public sealed class MachineTests
         Assert.Equal(HandshakeMachine.RejectPin, kind);
         Assert.Equal(HandshakeMachine.RejectPin, fail);
 
-        // Keys rejected, then confirm rejected: each with its own kind, only confirm fails closed.
         HandshakeInput begin = default;
         begin.Kind = HandshakeInputKind.PackBegin;
         begin.BodyPlausible = true;
@@ -904,8 +851,6 @@ public sealed class MachineTests
         Assert.Equal(HandshakeMachine.RejectPackConfirm, fail);
         Assert.False(s.RemoteTokenKnown);
 
-        // Success: verified keys latch the token, the confirm goes out once, and a
-        // replayed PACK re-confirms without a second flight.
         keys.ConfirmOk = true;
         (kind, long reply, long none) = HandshakeStep(ref s, in keys, effects);
         Assert.Equal(HandshakeMachine.PeerConfirmed, kind);
@@ -935,12 +880,10 @@ public sealed class MachineTests
         edited.CryptoBody = true;
         edited.PinMatches = true;
         edited.FrameToken = 0xA0A0_1010;
-        edited.PeerToken = 0x9999_9999; // the authenticated session's token, edited
+        edited.PeerToken = 0x9999_9999;
         Assert.Equal(HandshakeMachine.RejectPackPeerToken, HandshakeStep(ref s, in edited, effects).Kind);
         Assert.Equal(0x1111_2222u, s.RemoteToken);
     }
-
-    // ------------------------------------------------------------------ punch scheduler
 
     private static PunchState Punch(long connectTimeoutMs = 60_000) => PunchState.Create(connectTimeoutMs);
 
@@ -995,7 +938,6 @@ public sealed class MachineTests
         PunchState s = Punch(connectTimeoutMs: 5000);
         Span<Effect> effects = stackalloc Effect[8];
 
-        // Before the deadline: no verdict, ordinary scheduling.
         PunchInput before = PunchTick(now: 5000);
         var pre = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in before, new Tick(5000), effects));
         Assert.False(pre.Condemn);
@@ -1004,9 +946,8 @@ public sealed class MachineTests
         int n = PunchSchedulerMachine.Step(ref s, in deadline, new Tick(5001), effects);
         var husk = PunchFx(effects, n);
         Assert.True(husk.Condemn);
-        Assert.True(husk.Stop); // never-connected husks never beacon: no reflection amplification
+        Assert.True(husk.Stop);
 
-        // A real session keeps beeping until the five-minute budget is spent.
         PunchState live = Punch(connectTimeoutMs: 5000);
         PunchInput condemned = PunchTick(now: 5001);
         condemned.ConnectedCompleted = true;
@@ -1016,32 +957,24 @@ public sealed class MachineTests
         Assert.True(beacons.Relay);
         Assert.Equal(5001 + PunchSchedulerMachine.DeadBeaconPaceMs, beacons.WakeAt);
 
-        // Regression: on a host up longer than the budget, the condemn tick still sees
-        // the PRE-stamp dead-since (0). The budget must read the condemn's own instant,
-        // not the stale zero — or every long-lived host stops the beacon at birth and
-        // dead sessions never revive.
         PunchState longUp = Punch(connectTimeoutMs: 5000);
         PunchInput lateCondemn = PunchTick(now: 10_000_000_000);
         lateCondemn.ConnectedCompleted = true;
-        lateCondemn.DeadSinceMs = 0; // captured before the shell stamps it
+        lateCondemn.DeadSinceMs = 0;
         var stillBeacons = PunchFx(effects, PunchSchedulerMachine.Step(ref longUp, in lateCondemn, new Tick(0), effects));
         Assert.True(stillBeacons.Condemn);
         Assert.False(stillBeacons.Stop);
         Assert.True(stillBeacons.Relay);
 
-        // An UNSTAMPED dead-since on an ordinary Dead tick keeps the old shell reading:
-        // the budget reads as long spent and the loop goes quiet.
         PunchState unstamped = Punch();
         PunchInput stale = PunchTick(phase: (byte)ConnPhase.Dead, now: 10_000_000_000, deadSince: 0);
         Assert.True(PunchFx(effects, PunchSchedulerMachine.Step(ref unstamped, in stale, new Tick(0), effects)).Stop);
 
-        // Dead past the budget: passive revival is all that is left.
         PunchInput spent = PunchTick(phase: (byte)ConnPhase.Dead, now: 5001 + PunchSchedulerMachine.DeadBeaconBudgetMs + 1, deadSince: 5001);
         var after = PunchFx(effects, PunchSchedulerMachine.Step(ref live, in spent, new Tick(6001), effects));
         Assert.True(after.Stop);
         Assert.False(after.Relay);
 
-        // Inside the budget the beacon keeps a slow pace.
         PunchInput inside = PunchTick(phase: (byte)ConnPhase.Dead, now: 5001 + 1000, deadSince: 5001);
         var pacing = PunchFx(effects, PunchSchedulerMachine.Step(ref live, in inside, new Tick(6100), effects));
         Assert.False(pacing.Stop);
@@ -1054,13 +987,11 @@ public sealed class MachineTests
         PunchState s = Punch();
         Span<Effect> effects = stackalloc Effect[8];
 
-        // Direct already won on UDP: nothing left to upgrade.
         PunchInput open = PunchTick(phase: (byte)ConnPhase.Open);
         open.OpenWithoutDirectTcp = true;
         var won = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in open, new Tick(5000), effects));
         Assert.True(won.Stop);
 
-        // Degraded poking is budgeted: MaxUpgradeAttempts rounds, then passive.
         PunchState degraded = Punch();
         PunchInput tick = PunchTick(phase: (byte)ConnPhase.Degraded);
         bool stopped = false;
@@ -1072,7 +1003,6 @@ public sealed class MachineTests
 
         Assert.True(stopped);
 
-        // A fresh kick resets the budget — a new run pokes again.
         PunchInput kick = default;
         kick.Kind = PunchInputKind.Kick;
         PunchSchedulerMachine.Step(ref degraded, in kick, new Tick(9999), Span<Effect>.Empty);
@@ -1088,20 +1018,16 @@ public sealed class MachineTests
         PunchInput tick = PunchTick();
         tick.SymmetricHint = true;
 
-        // Window open (never punched): directs go out and stamp the clock.
         var first = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in tick, new Tick(5000), effects));
         Assert.True(first.Direct);
         Assert.True(first.Relay);
 
-        // Half a second later the trickle window is closed: relays only.
         PunchInput throttledInput = PunchTick(now: 5500);
         throttledInput.SymmetricHint = true;
         var throttled = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in throttledInput, new Tick(5500), effects));
         Assert.False(throttled.Direct);
         Assert.True(throttled.Relay);
 
-        // A fresh window at +1s, but port prediction holds directs — and does not
-        // consume the trickle stamp, so the window stays open for the next tick.
         PunchInput predicting = PunchTick(now: 6001);
         predicting.SymmetricHint = true;
         predicting.PredictionActive = true;
@@ -1113,7 +1039,7 @@ public sealed class MachineTests
         PunchInput released = PunchTick(now: 6100);
         released.SymmetricHint = true;
         var resumed = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in released, new Tick(6100), effects));
-        Assert.True(resumed.Direct); // the window survived the hold
+        Assert.True(resumed.Direct);
     }
 
     [Fact]
@@ -1122,7 +1048,6 @@ public sealed class MachineTests
         PunchState s = Punch();
         Span<Effect> effects = stackalloc Effect[8];
 
-        // Before the fallback delay: ordinary directs yes, link-local no.
         PunchInput early = PunchTick(now: 5000 + PunchSchedulerMachine.LinkLocalFallbackDelayMs - 1, kickedAt: 5000);
         var e = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in early, new Tick(5599), effects));
         Assert.True(e.Direct);
@@ -1132,7 +1057,6 @@ public sealed class MachineTests
         var l = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in late, new Tick(5601), effects));
         Assert.True(l.LinkLocal);
 
-        // The peer's candidate exchange gates directs; relays are always worth a datagram.
         PunchState exchanging = Punch();
         PunchInput waiting = PunchTick(now: 9000);
         waiting.AwaitExchange = true;
@@ -1145,7 +1069,7 @@ public sealed class MachineTests
         waiting.PeerCandidatesReceived = true;
         var ready = PunchFx(effects, PunchSchedulerMachine.Step(ref exchanging, in waiting, new Tick(9100), effects));
         Assert.True(ready.Direct);
-        Assert.True(ready.LinkLocal); // past the delay, exchange done
+        Assert.True(ready.LinkLocal);
     }
 
     [Fact]
@@ -1154,7 +1078,6 @@ public sealed class MachineTests
         PunchState s = Punch();
         Span<Effect> effects = stackalloc Effect[8];
 
-        // Lookup: pinned key + providers, retried at most once per LookupRetryMs.
         PunchInput lookup = PunchTick(now: 5000);
         lookup.PinnedLookupPossible = true;
         var first = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in lookup, new Tick(5000), effects));
@@ -1168,7 +1091,6 @@ public sealed class MachineTests
         var later = PunchFx(effects, PunchSchedulerMachine.Step(ref s, in laterInput, new Tick(6001), effects));
         Assert.True(later.Lookup);
 
-        // Announce: only relay-signaling sessions still punching, on the retry window.
         PunchState announcing = Punch();
         PunchInput announce = PunchTick(now: 5000);
         announce.RelaySignalingOnly = true;
@@ -1178,7 +1100,6 @@ public sealed class MachineTests
         announce.Phase = (byte)ConnPhase.Degraded;
         Assert.False(PunchFx(effects, PunchSchedulerMachine.Step(ref announcing, in announce, new Tick(5200), effects)).Announce);
 
-        // TCP: eligible after the kick delay, never before.
         PunchState tcp = Punch();
         PunchInput before = PunchTick(now: PunchSchedulerMachine.TcpKickDelayMs - 1);
         before.TcpEligible = true;
@@ -1210,19 +1131,16 @@ public sealed class MachineTests
         }
     }
 
-    // ------------------------------------------------------------------ totality and span discipline
-
     [Fact]
     public void Machines_AdvanceStateEvenWhenTheEffectSpanIsFull()
     {
         PmtuState p = Pmtu();
         Span<Effect> one = stackalloc Effect[1];
         int n = PmtuStep(ref p, PmtuTick(), 1000, one);
-        Assert.Equal(1, n); // the Transmit fit, the Arm did not — no throw
+        Assert.Equal(1, n);
         Assert.True(p.Outstanding);
         Assert.Equal(1328, p.ProbeSize);
 
-        // A zero-length span reports decisions only.
         int zero = PmtuStep(ref p, PmtuTick(), 2000, Span<Effect>.Empty);
         Assert.Equal(0, zero);
 
@@ -1249,21 +1167,21 @@ public sealed class MachineTests
         for (int i = 0; i < 10_000; i++)
         {
             PmtuInput pi = default;
-            pi.Kind = (PmtuInputKind)rng.Next(256); // deliberately includes invalid kinds
+            pi.Kind = (PmtuInputKind)rng.Next(256);
             pi.PathEligible = rng.Next(2) == 0;
             pi.IPv4 = rng.Next(2) == 0;
             pi.Nonce = rng.NextInt64(long.MinValue, long.MaxValue);
             pi.WireLength = rng.Next(-1000, 5000);
             int pn = PmtuMachine.Step(ref p, in pi, new Tick(rng.NextInt64(0, long.MaxValue / 2)), effects);
             Assert.InRange(pn, 0, effects.Length);
-            // The wire figure is only ever a real confirmation: unprobed, or on [floor, ceiling].
+
             Assert.True(p.Wire == 0 || (p.Wire >= BaseWire && p.Wire <= Math.Max(CeilingV4, CeilingV6)));
 
             KeepaliveInput ki = default;
             ki.Kind = (KeepaliveInputKind)rng.Next(256);
             ki.PathEligible = rng.Next(2) == 0;
             ki.RecentActivity = rng.Next(2) == 0;
-            ki.Path = rng.Next(3) - 1; // includes the invalid -1
+            ki.Path = rng.Next(3) - 1;
             ki.Echo = rng.NextInt64(long.MinValue, long.MaxValue);
             int kn = KeepaliveMachine.Step(ref k, in ki, new Tick(rng.NextInt64(0, long.MaxValue / 2)), effects);
             Assert.InRange(kn, 0, effects.Length);
@@ -1275,14 +1193,14 @@ public sealed class MachineTests
             si.PeerConfirmed = rng.Next(2) == 0;
             si.RelaySignalingOnly = rng.Next(2) == 0;
             si.RelayUsable = rng.Next(2) == 0;
-            si.ForcedPhase = (byte)rng.Next(256); // includes phases that are not ConnPhase values
+            si.ForcedPhase = (byte)rng.Next(256);
             int sn = PathSelectorMachine.Step(ref sel, in si, new Tick(rng.NextInt64(0, long.MaxValue / 2)), effects);
             Assert.InRange(sn, 0, effects.Length);
             Assert.True(sel.Phase is >= (ConnPhase)0 and <= ConnPhase.Closed);
             Assert.True(sel.Path is >= (PathSel)0 and <= PathSel.Relay);
             if (sel.Phase == ConnPhase.Closed)
             {
-                Assert.Equal(PathSel.None, sel.Path); // Closed always clears the path
+                Assert.Equal(PathSel.None, sel.Path);
             }
 
             PunchInput pin = default;
@@ -1311,7 +1229,7 @@ public sealed class MachineTests
                 if (effects[e].Kind == EffectKind.Notify && effects[e].Value == (long)PunchNotify.Stop) punchStopped = true;
                 if (punchStopped)
                 {
-                    // A stopped scheduler emits nothing schedulable after the verdict.
+
                     Assert.NotEqual(EffectKind.Transmit, effects[e].Kind);
                     Assert.NotEqual(EffectKind.Arm, effects[e].Kind);
                 }
@@ -1333,7 +1251,6 @@ public sealed class MachineTests
             Assert.InRange(hn, 0, effects.Length);
         }
 
-        // Default-constructed states (all-zero options) stay total too.
         PmtuState pz = default;
         KeepaliveState kz = default;
         for (int i = 0; i < 10_000; i++)

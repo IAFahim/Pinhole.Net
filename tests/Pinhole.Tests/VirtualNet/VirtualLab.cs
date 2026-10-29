@@ -6,9 +6,9 @@ namespace Pinhole.Tests;
 
 internal sealed class VirtualLab : IDisposable
 {
-    public const string Hosts4 = "192.0.2.0/24";                 // internet-attached hosts + STUN
-    public const string Hosts4SecondRegion = "198.51.100.0/24";  // a second v4 region (the v4↔v6 roam victim)
-    public const string NatPublic = "203.0.113.0/24";            // NAT public sides
+    public const string Hosts4 = "192.0.2.0/24";
+    public const string Hosts4SecondRegion = "198.51.100.0/24";
+    public const string NatPublic = "203.0.113.0/24";
     public const string Hosts6 = "2001:db8::/48";
 
     private static int _nextHostPort = 30000;
@@ -38,7 +38,7 @@ internal sealed class VirtualLab : IDisposable
         }
     }
 
-    private static int _nextRelayHost = 2; // 127.0.0.2, 127.0.0.3, ... — one IP per server
+    private static int _nextRelayHost = 2;
 
     public FakeTurnServer AddTurn(int port = 0, int lifetimeSeconds = 600, IPAddress? bindAddress = null)
     {

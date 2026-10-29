@@ -25,44 +25,6 @@ public sealed record TurnMessage(ushort MessageType, byte[] TransactionId, TurnA
     }
 }
 
-// Canonical TURN codec (RFC 5766 over RFC 5389 framing) covering exactly the
-// framing Pinhole.Turn.TurnClient produces and consumes — no crypto: integrity
-// values are opaque 20-byte blobs. Total: TryRead never throws on
-// wire-controlled bytes and returns false on every non-canonical form; Write
-// throws only on programmer error. Canonical rules, all enforced by TryRead:
-//   1. the span is at least 20 bytes, so the 12-byte transaction id is complete;
-//   2. the message type is below 0x4000 (the two top bits of a STUN type are
-//      zero; TurnClient never checks this, it just never sees such types);
-//   3. the magic cookie at offset 4 is exactly 0x2112A442 (checked by
-//      TurnClient's receive loop);
-//   4. the header length field equals span length - 20: datagram exact, no
-//      trailing bytes (checked by the receive loop);
-//   5. the whole datagram — hence the header length — is a multiple of 4
-//      (checked explicitly by the receive loop via (n & 3) != 0);
-//   6. every attribute's 4-byte header and padded extent (4 + align4(length))
-//      lie inside the body, and the walk ends exactly at the body end.
-//      TurnClient.Attributes clamps overflowing attribute lengths and drops
-//      stray tail bytes instead; the canonical codec rejects both;
-//   7. attribute padding bytes are zero (the canonical form every encoder here
-//      writes; TurnClient's walkers ignore padding bytes);
-//   8. a MESSAGE-INTEGRITY attribute carries exactly 20 bytes —
-//      TurnClient.TryAuthenticateResponse rejects any other length outright;
-//   9. REQUESTED-TRANSPORT is 4 bytes: the protocol number then three zero
-//      RFFU bytes (TurnClient writes [17,0,0,0] and never parses it back);
-//  10. ERROR-CODE is at least 4 bytes with zero reserved bytes, class/number
-//      in bytes [2]/[3], UTF-8 reason phrase after (TurnClient reads the same
-//      layout but does not check the reserved bytes);
-//  11. LIFETIME is exactly 4 big-endian bytes (TurnClient accepts any value of
-//      at least 4 bytes and ignores the rest — the canonical form is exact);
-//  12. address attributes (XOR-PEER, XOR-RELAYED, XOR-MAPPED, MAPPED) decode
-//      with reserved byte 0, family 1 or 2, exact value length 8 or 20, and
-//      the cookie||transaction-id XOR mask; the transaction id must be the full
-//      12 bytes for the XOR form. TurnClient.DecodeAddress accepts values
-//      longer than the address and ignores trailing bytes, and the receive loop
-//      only requires >= 8 — the canonical codec rejects both;
-//  13. data indications (0x0017) carry XOR-PEER-ADDRESS and DATA, and the last
-//      occurrence of each wins, mirroring the receive loop's parse (an empty
-//      DATA attribute is present, not absent — same as the receive loop).
 public static class TurnCodec
 {
     public const uint Cookie = 0x2112A442;
@@ -282,9 +244,6 @@ public static class TurnCodec
         return 4;
     }
 
-    // Byte-identical to TurnClient.Request: attributes in the given order, then
-    // MESSAGE-INTEGRITY last, with the header length field covering the
-    // attribute bytes plus the 24-byte integrity attribute.
     public static int WriteAuthenticatedRequest(Span<byte> destination, ushort messageType, ReadOnlySpan<byte> transactionId, ReadOnlySpan<TurnAttribute> attributes, ReadOnlySpan<byte> messageIntegrity)
     {
         if (messageIntegrity.Length != 20) ThrowIntegrityLength();
@@ -299,8 +258,6 @@ public static class TurnCodec
         return WriteMessage(destination, messageType, transactionId, all);
     }
 
-    // The unauthenticated first allocate request TurnClient sends: one
-    // REQUESTED-TRANSPORT attribute for UDP.
     public static int WriteAllocateRequest(Span<byte> destination, ReadOnlySpan<byte> transactionId)
     {
         TurnAttribute[] attributes = [new TurnAttribute(AttrRequestedTransport, [TransportUdp, 0, 0, 0])];

@@ -61,14 +61,12 @@ public sealed class LanDiscoveryTests
         var announcedAddress = new IPAddress(new byte[] { 192, 168, 1, 42 });
         using var announcerSide = new DirectChannel();
         using var browserSide = new DirectChannel();
-        announcerSide.Group = browserSide.Local; // "the group" is wherever the other side listens
+        announcerSide.Group = browserSide.Local;
         browserSide.Group = announcerSide.Local;
 
         using var announcer = new LanDiscovery(
             announcerSide, peerId, key, () => [announcedAddress], port: 7777, NatHint.Cone);
 
-        // The browser's window covers both paths: its query provoking a unicast answer,
-        // and the startup announcements that arrive unsolicited.
         IReadOnlyList<LanPeer> found = await LanDiscovery.BrowseAsync(browserSide, TimeSpan.FromSeconds(2), CancellationToken.None);
         LanPeer peer = Assert.Single(found);
         Assert.Equal(peerId, peer.PeerId);
@@ -77,7 +75,6 @@ public sealed class LanDiscoveryTests
         IPEndPoint ep = Assert.Single(peer.Endpoints);
         Assert.Equal(new IPEndPoint(announcedAddress, 7777), ep);
 
-        // The discovered string is a fully dialable v2 string: same key pin, same endpoint.
         ConnectionString cs = peer.ToConnectionString();
         Assert.Equal(peerId, cs.PeerId);
         Assert.Equal(key, cs.StaticKey);
@@ -94,7 +91,6 @@ public sealed class LanDiscoveryTests
         byte[] query = w.ToArray();
         Assert.True(DnsCodec.AsksForOurService(query));
 
-        // A query for some other service, or random bytes, must not trigger answers.
         var other = new DnsCodec.Writer();
         other.Header(flags: 0x0000, questions: 1, answers: 0, 0, 0);
         other.WritePtrQuestion("_http._tcp.local");
@@ -111,7 +107,7 @@ public sealed class LanDiscoveryTests
         await TestPoll.UntilAsync(Timeout, () =>
         {
             lock (side.Sent) { return side.Sent.Count >= 3; }
-        }); // all three startup announcements are out; nothing else sends until the heartbeat
+        });
 
         int before;
         lock (side.Sent) { before = side.Sent.Count; }
@@ -119,7 +115,7 @@ public sealed class LanDiscoveryTests
         int after;
         lock (side.Sent) { after = side.Sent.Count; }
 
-        Assert.Equal(before + 1, after); // exactly the goodbye went out
+        Assert.Equal(before + 1, after);
         byte[] goodbye;
         lock (side.Sent) { goodbye = side.Sent[^1].Packet; }
         Assert.True(DnsCodec.TryParsePeers(goodbye, out IReadOnlyList<LanPeer> peers));
@@ -141,7 +137,7 @@ public sealed class LanDiscoveryTests
 
         for (int cut = 0; cut <= real.Length; cut++)
         {
-            DnsCodec.TryParsePeers(real.AsSpan(0, cut), out _); // any outcome, no exception
+            DnsCodec.TryParsePeers(real.AsSpan(0, cut), out _);
         }
 
         var rng = new Random(20261005);
@@ -167,31 +163,25 @@ public sealed class LanDiscoveryTests
         w.WritePtr(LanDiscovery.Service, "0123456789abcdef", 120);
         byte[] packet = w.ToArray();
 
-        // A self-pointing compression pointer (offset 0xC0 | 0) where a name starts: the
-        // canonical infinite loop. The parser must refuse, not spin.
         byte[] loop = (byte[])packet.Clone();
         int rdata = FindPtrRdata(loop);
         loop[rdata] = 0xC0;
         loop[rdata + 1] = (byte)rdata;
         Assert.False(DnsCodec.TryParsePeers(loop, out _));
 
-        // Pointer chasing backwards forever (two mutually-referencing names) is bounded too.
         byte[] zigzag = (byte[])packet.Clone();
         zigzag[rdata] = 0xC0;
-        zigzag[rdata + 1] = 0x0D; // points near the header; the walk must terminate
+        zigzag[rdata + 1] = 0x0D;
         DnsCodec.TryParsePeers(zigzag, out _);
     }
 
     private static int FindPtrRdata(byte[] packet)
     {
-        // Walk past the header and the PTR owner name to the rdata start: first byte after
-        // the fixed 10-byte record tail (type+class+ttl+rdlength) whose rdlength equals
-        // the remaining instance-name bytes. Simpler: hunt for the record's rdlength slot
-        // by re-deriving it — the owner is "_pinhole._udp.local", 22 wire bytes + header 12.
+
         int owner = 12;
         int pos = owner;
         while (packet[pos] != 0) pos += 1 + packet[pos];
-        return pos + 1 + 10; // root label + type/class/ttl/rdlength, rdata starts here
+        return pos + 1 + 10;
     }
 
     [Fact]
@@ -247,7 +237,7 @@ public sealed class LanDiscoveryTests
         Assert.Contains(found.Endpoints, ep => ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 42);
         Assert.DoesNotContain(found.Endpoints, ep => ep.Address.Equals(IPAddress.Parse("192.168.4.99")));
         Assert.All(ConnectionString.Parse(found.ToConnectionString().ToString()).Candidates.Where(c => c.Address.Address.IsIPv6LinkLocal),
-            c => Assert.Equal(0, c.Address.Address.ScopeId)); // local scope never goes in a ticket
+            c => Assert.Equal(0, c.Address.Address.ScopeId));
     }
 
     private static byte[] Announcement(ulong id, byte[] key, IPAddress address)
@@ -298,7 +288,7 @@ public sealed class LanDiscoveryTests
         foreach (IPAddress address in new[] { IPAddress.Any, IPAddress.IPv6Any, IPAddress.Parse("ff02::1"), IPAddress.Parse("224.1.2.3") })
             Assert.False(DnsCodec.TryParsePeers(Announcement(99, new byte[32], address), out _));
         byte[] packet = Announcement(99, new byte[32], IPAddress.Parse("2001:db8::1"));
-        // The last AAAA record advertises 15 bytes and supplies exactly that amount.
+
         packet[^18] = 0;
         packet[^17] = 15;
         Assert.False(DnsCodec.TryParsePeers(packet.AsSpan(0, packet.Length - 1), out _));
@@ -354,7 +344,7 @@ public sealed class LanDiscoveryTests
     [Fact]
     public async Task DefaultLanDiscovery_BindsAndDialsWhenMulticastIsUnavailable()
     {
-        // Inject the OS failure so every runner exercises best-effort default discovery.
+
         await using PinholeNode announcing = await PinholeNode.BindAsync(new PinholeOptions
         {
             StunServers = [],

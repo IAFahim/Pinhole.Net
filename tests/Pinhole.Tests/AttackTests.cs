@@ -49,8 +49,6 @@ public sealed class AttackTests
         return frame;
     }
 
-    // ---------------------------------------------------------------- STUN lies
-
     [Fact]
     public async Task MalformedStunResponse_DoesNotDeafenPeerSocket()
     {
@@ -64,7 +62,6 @@ public sealed class AttackTests
         await evilResponder.WaitAsync(Timeout);
         evil.Dispose();
 
-        // The receive loop must still be alive: a punch through the same socket completes.
         using var peer = new PeerSocket(0xB0B);
         _ = peer.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, victim.LocalPort));
         _ = victim.ConnectDirectAsync(new IPEndPoint(IPAddress.Loopback, peer.LocalPort));
@@ -77,7 +74,7 @@ public sealed class AttackTests
         await using PinholeNode node = await PinholeNode.BindAsync(Opts());
 
         (var evil, var evilEp, byte[] request) = await BindEvilServerAsync();
-        Task evilResponder = RespondEvilStunAsync(evil, request, 0x0001); // MAPPED-ADDRESS, lying length
+        Task evilResponder = RespondEvilStunAsync(evil, request, 0x0001);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(800));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
@@ -85,7 +82,6 @@ public sealed class AttackTests
         await evilResponder.WaitAsync(Timeout);
         evil.Dispose();
 
-        // The node still hears the world: a fresh dial connects and carries data.
         await using PinholeNode other = await PinholeNode.BindAsync(Opts());
         (PinholeConnection dialer, PinholeConnection atNode) = await ConnectPairAsync(node, other);
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -93,8 +89,6 @@ public sealed class AttackTests
         dialer.Send("after attack"u8);
         Assert.Equal("after attack"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
-
-    // ---------------------------------------------------------------- spoofed frames
 
     [Fact]
     public async Task SpoofedBye_WithoutTheConnectionToken_CannotCloseASession()
@@ -108,7 +102,6 @@ public sealed class AttackTests
         attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         IPEndPoint bWire = new(IPAddress.Loopback, b.LocalPort);
 
-        // A Bye with no token at all, and one with a wrong token — both claim to be A.
         attacker.SendTo(Frame(0x56, a.PeerId, 0), SocketFlags.None, bWire);
         attacker.SendTo(Frame(0x56, a.PeerId, 0xDEADBEEF), SocketFlags.None, bWire);
         await Task.Delay(500);
@@ -125,9 +118,7 @@ public sealed class AttackTests
     {
         await using PinholeNode a = await PinholeNode.BindAsync(Opts());
         await using PinholeNode b = await PinholeNode.BindAsync(Opts());
-        // Loopback-only dial: Path.Remote must stay the peer's loopback endpoint on every
-        // OS (multi-homed Windows runners otherwise legitimately migrate the direct path
-        // between interfaces mid-test, which is roaming working, not spoofing).
+
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b, LoopbackString(a));
         IPEndPoint realRemote = atB.Path.Remote!;
         Assert.Equal(IPAddress.Loopback, realRemote.Address);
@@ -150,8 +141,6 @@ public sealed class AttackTests
         Assert.Equal("genuine"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
-    // ---------------------------------------------------------------- stranger floods
-
     [Fact]
     public async Task PuncFlood_FromStrangers_ConnectionTableStaysBounded()
     {
@@ -166,7 +155,7 @@ public sealed class AttackTests
         punc[0] = 0x50;
         for (int i = 0; i < 3000; i++)
         {
-            RandomNumberGenerator.Fill(punc.AsSpan(1, 8)); // a fresh fake sender per frame
+            RandomNumberGenerator.Fill(punc.AsSpan(1, 8));
             attacker.SendTo(punc, SocketFlags.None, aWire);
         }
 
@@ -174,7 +163,6 @@ public sealed class AttackTests
         Assert.True(a.Connections.Count <= NodeEngine.MaxConnections,
             $"stranger flood materialized {a.Connections.Count} connections");
 
-        // The real session keeps flowing through the noise.
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         atA.Received += p => got.TrySetResult(p.ToArray());
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -197,25 +185,19 @@ public sealed class AttackTests
         using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         IPEndPoint listenerWire = new(IPAddress.Loopback, listener.LocalPort);
-        // Crypto-shaped PUNC (77 B): under the default Required policy this is the only
-        // stranger probe that materializes state. Random peer ids, random "ephemeral"
-        // key material — the responder still creates a husk per frame (finding C-11);
-        // none of them ever completes a handshake.
+
         byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
         punc[0] = 0x50;
         for (int i = 0; i < cap * 5; i++)
         {
-            RandomNumberGenerator.Fill(punc.AsSpan(1)); // fresh junk peer id and body per frame
+            RandomNumberGenerator.Fill(punc.AsSpan(1));
             attacker.SendTo(punc, SocketFlags.None, listenerWire);
         }
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap);
 
-        // Past the listener's connect timeout (plus reap cadence) the junk husks must be
-        // gone: they never handshook, and holding the slots locks every real peer out.
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(10), () => listener.Connections.Count == 0);
 
-        // The freed table admits a genuine peer.
         await using PinholeNode real = await PinholeNode.BindAsync(Opts() with { ConnectTimeout = TimeSpan.FromSeconds(5) });
         await using PinholeConnection conn = await real.ConnectAsync(LoopbackString(listener)).WaitAsync(Timeout);
         Assert.True(conn.IsEncrypted);
@@ -247,8 +229,6 @@ public sealed class AttackTests
             Assert.True(listener.Connections.Count <= cap,
                 $"cap exceeded: {listener.Connections.Count} materialized");
 
-            // A closed slot is handed to the next stranger: the table does not pin
-            // refused capacity.
             await results.First(r => r is not null)!.DisposeAsync();
             await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => listener.Connections.Count == cap - 1);
 
@@ -276,8 +256,6 @@ public sealed class AttackTests
         }
     }
 
-    // ---------------------------------------------------------------- dial races
-
     [Fact]
     public async Task ConcurrentDials_ToSameTarget_ShareOneConnectionObject()
     {
@@ -302,8 +280,6 @@ public sealed class AttackTests
         Assert.Equal("one object, one session"u8.ToArray(), await got.Task.WaitAsync(Timeout));
     }
 
-    // ---------------------------------------------------------------- API abuse
-
     [Fact]
     public async Task Send_EnforcesPayloadBoundaries()
     {
@@ -312,9 +288,7 @@ public sealed class AttackTests
         (PinholeConnection atB, PinholeConnection atA) = await ConnectPairAsync(a, b);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(ReadOnlySpan<byte>.Empty));
-        // The ceiling is whatever the path has PROVEN it can carry: PMTUD can lift it past
-        // MaxPayload on a jumbo-capable path (loopback), so the boundary assert must use a
-        // size no discovered MTU can ever legalize — not MaxPayload + 1, which races PMTUD.
+
         Assert.Throws<ArgumentOutOfRangeException>(() => atB.Send(new byte[66_000]));
 
         byte[] max = new byte[PinholeConnection.MaxPayload];
@@ -324,7 +298,7 @@ public sealed class AttackTests
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (!got.Task.IsCompleted && sw.Elapsed < Timeout)
         {
-            atB.Send(max); // single datagrams can drop; retransmit is the app's job
+            atB.Send(max);
             await Task.Delay(100);
         }
 
@@ -383,10 +357,8 @@ public sealed class AttackTests
         Assert.True(atB.Stats.PingsLost <= 300);
 
         await atB.CloseAsync();
-        atB.Ping(); // closed connections swallow probes, not exceptions
+        atB.Ping();
     }
-
-    // ---------------------------------------------------------------- roaming under attack conditions
 
     [Fact]
     public async Task Rebind_WithUnreachableRelayCandidates_DoesNotThrowAndRecoversDirect()
@@ -404,8 +376,6 @@ public sealed class AttackTests
         Task<PinholeConnection> accept = a.AcceptAsync();
         PinholeConnection atA = await accept.WaitAsync(Timeout);
 
-        // B's candidate list carries a relay we have no allocation on; the rebind's
-        // announce blast must skip it instead of failing the whole recovery.
         await b.Engine.SimulateInterfaceLossAsync();
 
         var got = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -419,7 +389,7 @@ public sealed class AttackTests
             }
             catch (InvalidOperationException)
             {
-                // honestly Punching again mid-recovery; the next tick retries
+
             }
 
             await Task.Delay(200);
@@ -427,8 +397,6 @@ public sealed class AttackTests
 
         Assert.Equal("after rebind"u8.ToArray(), await got.Task.WaitAsync(TimeSpan.FromSeconds(1)));
     }
-
-    // ---------------------------------------------------------------- parser fuzz
 
     [Fact]
     public void ConnectionString_EveryTruncationAndCorruption_HasExactlyTwoOutcomes()
@@ -456,7 +424,7 @@ public sealed class AttackTests
         {
             char original = chars[i];
             chars[i] = '\xFF';
-            ConnectionString.TryParse(new string(chars), out _); // must not throw
+            ConnectionString.TryParse(new string(chars), out _);
             chars[i] = original;
         }
 
@@ -520,8 +488,6 @@ public sealed class AttackTests
         Assert.Equal(port, node.LocalPort);
     }
 
-    // ---------------------------------------------------------------- lying infrastructure
-
     [Fact]
     public async Task TurnServerThatGrantsNothing_FailsAllocationWithCleanError()
     {
@@ -561,7 +527,6 @@ public sealed class AttackTests
             attacker.SendTo(junk, SocketFlags.None, rdEp);
         }
 
-        // The introducer must still work for honest peers after the barrage.
         client.ReceiveTimeout = 3000;
         client.SendTo(Encoding.ASCII.GetBytes("REG aabbccdd\n"), SocketFlags.None, rdEp);
         byte[] resp = new byte[256];
@@ -572,7 +537,6 @@ public sealed class AttackTests
 
     private static Socket NewLoopbackSocket() =>
         new(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
-
 
     private static Task RespondEvilStunAsync(Socket evil, byte[] request, ushort attributeType) =>
         Task.Run(() =>
@@ -604,9 +568,7 @@ public sealed class AttackTests
             {
                 EndPoint from = new IPEndPoint(IPAddress.Any, 0);
                 SocketReceiveFromResult result = await liar.ReceiveFromAsync(buf, SocketFlags.None, from).ConfigureAwait(false);
-                // Challenge the exact Allocate method, then authenticate the empty
-                // success. The property is rejection of a verified grant with no relay
-                // address; unsigned/mismatched replies are independently ignored.
+
                 byte[] challenge =
                 [
                     0x00, 0x09, 0x00, 0x04, 0, 0, 4, 1,
@@ -629,8 +591,6 @@ public sealed class AttackTests
                 await liar.SendToAsync(resp, SocketFlags.None, result.RemoteEndPoint).ConfigureAwait(false);
             }
         });
-
-    // ---------------------------------------------------------------- provider catalog contract
 
     [Fact]
     public void ProviderCatalog_OpenRelayCarriesPublishedCredentials()

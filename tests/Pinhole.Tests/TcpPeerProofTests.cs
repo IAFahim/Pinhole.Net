@@ -39,9 +39,9 @@ public sealed class TcpPeerProofTests
         Assert.Equal(0, a1.CompareTo(b1));
         Assert.Equal(0, a2.CompareTo(b2));
         Assert.Equal(Math.Sign(a1.CompareTo(a2)), Math.Sign(b1.CompareTo(b2)));
-        a1.ObserveChallenge(0); // later application pings cannot change selection order
+        a1.ObserveChallenge(0);
         Assert.Equal(0, a1.CompareTo(b1));
-        Assert.False(a1.Confirm(11, aSecond)); // proof from another stream has no authority here
+        Assert.False(a1.Confirm(11, aSecond));
         Assert.True(a1.Confirm(11, aFirst));
     }
 }

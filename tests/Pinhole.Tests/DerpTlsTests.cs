@@ -78,8 +78,7 @@ public sealed class DerpTlsTests
         }
         catch
         {
-            // Report a server fixture failure instead of hiding it behind the
-            // client's EOF/handshake error.
+
             await server;
             throw;
         }
@@ -103,9 +102,7 @@ public sealed class DerpTlsTests
         get
         {
             yield return [SslProtocols.Tls12];
-            // .NET's macOS SslStream backend cannot serve TLS 1.3. The managed
-            // client supports it; the independent TLS 1.3 server test runs on
-            // Windows/Linux and the public Go DERP fleet exercises it too.
+
             if (!OperatingSystem.IsMacOS()) yield return [SslProtocols.Tls13];
         }
     }
@@ -153,8 +150,7 @@ public sealed class DerpTlsTests
             using var publicLeaf = request.Create(Root, DateTimeOffset.UtcNow.AddHours(-1),
                 DateTimeOffset.UtcNow.AddHours(1), RandomNumberGenerator.GetBytes(16));
             using var withKey = publicLeaf.CopyWithPrivateKey(key);
-            // Schannel server credentials need an imported private key, rather
-            // than the ephemeral key attached by CopyWithPrivateKey.
+
             byte[] encoded = withKey.Export(X509ContentType.Pkcs12);
             try
             {

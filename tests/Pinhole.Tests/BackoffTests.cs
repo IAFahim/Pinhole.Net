@@ -18,7 +18,7 @@ public sealed class BackoffTests
     {
         for (int i = 0; i < 50; i++)
         {
-            // 8 s ±10% versus 2 s ±10%: the ranges cannot overlap, so the ladder strictly climbs.
+
             Assert.True(IrohRelay.RetryDelay(3) > IrohRelay.RetryDelay(1));
             Assert.InRange(IrohRelay.RetryDelay(50).TotalSeconds, 27, 33);
         }

@@ -7,13 +7,6 @@ using System.Runtime.Intrinsics.X86;
 
 namespace Pinhole.Crypto;
 
-// BLAKE3 with three execution paths over one shared correctness contract:
-//   - scalar per-chunk compression (always available, the reference path),
-//   - Vector256 8-way chunk columns (AVX2),
-//   - Vector128 4-way chunk columns (SSE4.1/NEON).
-// Hashing is exposed as map (HashChunks) then reduce (ReduceLevel/RootFromTopPair) so
-// later phases can parallelize the leaves; the streaming core uses the same seam
-// internally. Every public span-taking operation is allocation-free.
 public static class Blake3
 {
     public const int ChunkSize = 1024;
@@ -28,16 +21,10 @@ public static class Blake3
     internal const uint DeriveKeyContext = 1u << 5;
     internal const uint DeriveKeyMaterial = 1u << 6;
 
-    // CV-stack depth. Each entry is a complete aligned subtree; the strictly increasing
-    // size profile from bottom to top bounds depth at log2(chunks)+1, so 64 covers any
-    // input the chunk counter can address.
     internal const int MaxStackDepth = 64;
 
-    // Largest streaming supergroup, in chunks. Bigger groups amortize the scalar
-    // tail of the level reduction (levels of four nodes and below stay scalar).
     internal const int BatchChunks = 512;
 
-    // Descending powers of two, each aligned by the previous one.
     private static readonly int[] BatchSizes = [512, 256, 128, 64, 32, 16, 8];
 
     [ThreadStatic]
@@ -47,9 +34,6 @@ public static class Blake3
 
     internal static void KeyToWords(ReadOnlySpan<byte> key32, Span<uint> words) => LoadWords(key32, words);
 
-    // The context phase of key derivation: DERIVE_KEY_CONTEXT domain-separates context
-    // keys from plain hashes; the material phase then runs keyed by this value under
-    // DERIVE_KEY_MATERIAL.
     internal static void ContextKey(ReadOnlySpan<byte> context, Span<byte> contextKey)
     {
         Span<uint> stack = stackalloc uint[8 * MaxStackDepth];
@@ -113,17 +97,11 @@ public static class Blake3
         RunStreaming(material, contextWords, DeriveKeyMaterial, digest, ref stack);
     }
 
-    // Map step: hash every whole chunk in data (plain mode), writing 8 CV words per
-    // chunk into chunkCvs, starting at chunk counter firstChunkIndex. Returns the
-    // number of chunks hashed. Independent chunks: callers may split data and call
-    // this from any number of threads.
     public static int HashChunks(ReadOnlySpan<byte> data, ulong firstChunkIndex, Span<uint> chunkCvs)
     {
         return HashBatch(data, firstChunkIndex, chunkCvs.Length / 8, Iv, 0, chunkCvs);
     }
 
-    // A single chunk's CV in plain mode. root: true computes the final digest of an
-    // input that is exactly this chunk (the single-chunk tree).
     public static void HashChunk(ReadOnlySpan<byte> chunk, ulong chunkIndex, bool root, Span<uint> cvOut)
     {
         if (chunk.Length > ChunkSize) ThrowChunkTooBig();
@@ -131,16 +109,11 @@ public static class Blake3
         HashChunkWords(chunk, chunkIndex, Iv, 0, root, cvOut);
     }
 
-    // Reduce step: fold nodeCount adjacent subtree CVs pairwise-with-carry, in place.
-    // Node i is cvs[i*8..(i+1)*8]. Returns the new node count. Repeated until one
-    // node remains (or two, for RootFromTopPair).
     public static int ReduceLevel(Span<uint> cvs, int nodeCount)
     {
         return ReduceLevelInto(cvs, nodeCount, Iv, 0);
     }
 
-    // Final reduce: the top pair compress with the ROOT flag. Use when exactly two
-    // nodes remain.
     public static void RootFromTopPair(ReadOnlySpan<uint> left, ReadOnlySpan<uint> right, Span<byte> digest)
     {
         if (digest.Length < DigestLength) ThrowDigestTooSmall();
@@ -149,7 +122,6 @@ public static class Blake3
         WordsToBytes(rootCv, digest);
     }
 
-    // The scalar compression function. cv is 8 words, blockWords 16, output 16.
     public static void Compress(ReadOnlySpan<uint> cv, ReadOnlySpan<uint> blockWords, ulong counter, uint blockLength, uint flags, Span<uint> output)
     {
         if (cv.Length < 8 || blockWords.Length < 16 || output.Length < 16) ThrowCompressShapes();
@@ -258,10 +230,6 @@ public static class Blake3
         return parents;
     }
 
-    // Eight parent nodes at once: lane j hashes the pair of subtrees at source
-    // indices (firstPair + 2j, firstPair + 2j + 1) into destination index
-    // firstParent + j. Node words are 8 uints each, so pair strides match the
-    // transpose network with a 64-byte lane stride.
     private static void ParentColumn256(ReadOnlySpan<uint> src, int firstPair, Span<uint> dst, int firstParent,
         ReadOnlySpan<uint> cvInit, uint baseFlags)
     {
@@ -279,9 +247,8 @@ public static class Blake3
             m12 = default, m13 = default, m14 = default, m15 = default;
         ref uint r = ref MemoryMarshal.GetReference(src);
         r = ref Unsafe.Add(ref r, firstPair * 16);
-        nint laneStride = 16 * 4; // bytes per pair
+        nint laneStride = 16 * 4;
 
-        // one 16-word block: left CV words 0..7, right CV words 8..15, per lane
         LoadMessage256(ref Unsafe.As<uint, byte>(ref r), 0, laneStride,
             ref m0, ref m1, ref m2, ref m3, ref m4, ref m5, ref m6, ref m7,
             ref m8, ref m9, ref m10, ref m11, ref m12, ref m13, ref m14, ref m15);
@@ -357,20 +324,12 @@ public static class Blake3
         return total;
     }
 
-    // Streaming core. Update appends data; Finish folds. The pending buffer holds the
-    // open chunk, the CV stack holds complete aligned subtrees with strictly
-    // increasing chunk counts from top to bottom.
     internal static void UpdateChunks(ReadOnlySpan<byte> data, ReadOnlySpan<uint> cvInit, uint baseFlags,
         Span<byte> pending, ref int pendingLen, ref ulong chunkCounter, ref long totalBytes,
         Span<uint> stack, Span<long> stackChunks, ref int stackCount)
     {
         totalBytes += data.Length;
 
-        // Aligned-subtree batches only run while the pending chunk is empty, the
-        // counter sits on the group boundary, and at least one chunk beyond the
-        // group remains — the reserve keeps the stream's final chunk foldable.
-        // Groups shrink as 64/32/16/8 so a batch window's remainder still
-        // vectorizes down to eight scalar chunks.
         if (!SimdBypass && pendingLen == 0)
         {
             Span<uint> group = stackalloc uint[8 * BatchChunks];
@@ -399,9 +358,7 @@ public static class Blake3
             data[..take].CopyTo(pending.Slice(pendingLen, take));
             pendingLen += take;
             data = data[take..];
-            // A full buffer only closes the chunk once the NEXT byte arrives: the very
-            // last chunk's final compress is where the ROOT flag could belong, and that
-            // is unknowable until the input ends.
+
             if (pendingLen == ChunkSize && data.Length > 0)
             {
                 HashChunkWords(pending, chunkCounter, cvInit, baseFlags, root: false, chunkCv);
@@ -418,7 +375,7 @@ public static class Blake3
         Span<uint> acc = stackalloc uint[8];
         if (stackCount == 0)
         {
-            // Whole input is one chunk (possibly empty): its final compress carries ROOT.
+
             HashChunkWords(pending[..pendingLen], 0, cvInit, baseFlags, root: true, acc);
             WordsToBytes(acc, digest);
             return;
@@ -426,15 +383,10 @@ public static class Blake3
 
         if (pendingLen == 0)
         {
-            // Unreachable: the streaming reserve always parks the final chunk in
-            // pending. Fail loudly rather than fold a phantom empty chunk.
+
             throw new InvalidOperationException("finish called with an open stack but no pending chunk");
         }
 
-        // The pending chunk (full but unflushed, or partial) is the rightmost leaf.
-        // Fold it up the stack spine, smallest subtree first; the last fold — against
-        // the bottom, largest subtree — carries the ROOT flag. The fold produces the
-        // canonical left-complete tree for any chunk count.
         HashChunkWords(pending[..pendingLen], chunkCounter, cvInit, baseFlags, root: false, acc);
         Span<uint> parent = stackalloc uint[8];
         for (int i = stackCount - 1; i >= 0; i--)
@@ -511,8 +463,7 @@ public static class Blake3
         int rem = src.Length & 3;
         if (rem > 0)
         {
-            // Sub-word tail: the block is zero-padded; assemble the little-endian
-            // remainder by hand because the primitive reader demands four bytes.
+
             uint v = 0;
             ReadOnlySpan<byte> tail = src.Slice(4 * full, rem);
             for (int i = 0; i < rem; i++)
@@ -534,8 +485,7 @@ public static class Blake3
 
     private static void HashChunkColumn256(ReadOnlySpan<byte> data, ulong firstIndex, ReadOnlySpan<uint> cvInit, uint baseFlags, Span<uint> cvs)
     {
-        // All state lives in locals so the JIT keeps the lanes in ymm registers;
-        // Span<Vector256> indexing would round-trip memory on every mixing step.
+
         Vector256<uint> s0 = Vector256.Create(cvInit[0]);
         Vector256<uint> s1 = Vector256.Create(cvInit[1]);
         Vector256<uint> s2 = Vector256.Create(cvInit[2]);
@@ -603,9 +553,6 @@ public static class Blake3
         StoreLanes256(cvs, 0, s0, s1, s2, s3, s4, s5, s6, s7);
     }
 
-    // One 64-byte block from each of the 8 strided lanes, transposed into the 16
-    // column registers the mixing step consumes: 32 vector loads plus an unpack
-    // network instead of 128 scalar word reads.
     private static void LoadMessage256(ref byte baseRef, nint blockOffset, nint laneStride,
         ref Vector256<uint> m0, ref Vector256<uint> m1, ref Vector256<uint> m2, ref Vector256<uint> m3,
         ref Vector256<uint> m4, ref Vector256<uint> m5, ref Vector256<uint> m6, ref Vector256<uint> m7,
@@ -618,8 +565,6 @@ public static class Blake3
             ref m8, ref m9, ref m10, ref m11, ref m12, ref m13, ref m14, ref m15);
     }
 
-    // Transposes words [wordByte, wordByte+32) of one block across all 8 lanes into
-    // eight column vectors of 8 elements.
     private static void Transpose8(ref byte baseRef, nint blockOffset, nint laneStride, nint wordByte,
         ref Vector256<uint> m0, ref Vector256<uint> m1, ref Vector256<uint> m2, ref Vector256<uint> m3,
         ref Vector256<uint> m4, ref Vector256<uint> m5, ref Vector256<uint> m6, ref Vector256<uint> m7)

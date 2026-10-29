@@ -2,8 +2,6 @@ using System.Net;
 
 namespace Pinhole.Sim;
 
-// What one datagram crossing the shaped internet leg owes the caller: hand it
-// over now, hold it for Delay, or nothing at all (parked in a shaper FIFO / lost).
 public enum LinkDecisionKind : byte
 {
     Deliver = 0,
@@ -18,12 +16,6 @@ public readonly record struct LinkDecision(LinkDecisionKind Kind, TimeSpan Delay
     public static LinkDecision Drop => new(LinkDecisionKind.Dropped, TimeSpan.Zero);
 }
 
-// The internet leg of a virtual network, minus the delivery vehicle: first-match
-// rules with their loss models and counters, per-rule bandwidth shapers, and
-// delay/jitter draws. Emitted from the test tree's VirtualNetwork so a future
-// event-driven sim can reuse the exact pipeline semantics on a SimClock instead
-// of a scheduler thread. The jitter stream is injected, never ambient — the old
-// fixture drew it from Random.Shared, which no seed could pin.
 internal sealed class LinkPipeline
 {
     private readonly object _gate = new();
@@ -54,15 +46,6 @@ internal sealed class LinkPipeline
         }
     }
 
-    // Post-NAT crossing of one datagram: match the first rule, let its loss model
-    // speak, and either park it in the rule's shaper FIFO or report the crossing
-    // delay the caller must wait out. Counters match the fixture's old inline
-    // pipeline: lost datagrams bump the rule's Lost and DroppedByPolicy. The
-    // payload may be corrupted in place (the array belongs to this crossing), and
-    // duplicated crossings — fresh clones with their own corruption draw and their
-    // own delay draw, so a copy can overtake its original — land in `duplicates`
-    // for the delivery vehicle to carry; a shaped rule enqueues copies into the
-    // same FIFO instead. Pass null to decline carrying duplicates at all.
     public LinkDecision Cross(IPEndPoint source, IPEndPoint dest, byte[] payload,
         List<(byte[] Payload, TimeSpan Delay)>? duplicates = null)
     {
@@ -93,8 +76,6 @@ internal sealed class LinkPipeline
             Interlocked.Increment(ref rule.Passed);
         }
 
-        // The duplicate is a copy of what the sender put on the wire; the original
-        // and the copy then corrupt (or pass) independently.
         byte[]? copy = null;
         if (rule?.DuplicateFor(source, dest)?.DuplicateNext() == true && duplicates is not null)
         {
@@ -108,9 +89,6 @@ internal sealed class LinkPipeline
             CorruptInPlace(rule, source, dest, copy);
         }
 
-        // A finite-bandwidth rule parks the packet in its shared FIFO instead of
-        // crossing now; the caller drains it at the configured rate and applies
-        // the rule's propagation delay as the packet leaves the queue.
         if (rule is { BitsPerSecond: > 0 } shaped)
         {
             Shaper shaper;
@@ -135,7 +113,7 @@ internal sealed class LinkPipeline
         TimeSpan delay = PropagationDelay(rule);
         if (copy is not null)
         {
-            duplicates!.Add((copy, PropagationDelay(rule))); // fresh draw: copies reorder
+            duplicates!.Add((copy, PropagationDelay(rule)));
         }
 
         return delay <= TimeSpan.Zero
@@ -153,8 +131,6 @@ internal sealed class LinkPipeline
         }
     }
 
-    // True when any installed rule can emit duplicates — the delivery vehicle uses
-    // this to skip the per-crossing duplicates list on ordinary networks.
     public bool AnyDuplication
     {
         get
@@ -166,7 +142,6 @@ internal sealed class LinkPipeline
         }
     }
 
-    // The rule's propagation delay plus jitter drawn from the injected stream.
     public TimeSpan PropagationDelay(LinkRule? rule)
     {
         TimeSpan delay = rule?.Delay ?? TimeSpan.Zero;
@@ -178,9 +153,6 @@ internal sealed class LinkPipeline
         return delay;
     }
 
-    // Drain every shaper at the caller's notion of now. Emitted packets have left
-    // the bottleneck but still owe their propagation delay: the caller schedules
-    // the crossing via PropagationDelay.
     public List<(LinkRule Rule, List<(IPEndPoint Source, IPEndPoint Dest, byte[] Payload)> Emitted)> DrainShapers(
         DateTimeOffset now)
     {
@@ -200,7 +172,6 @@ internal sealed class LinkPipeline
         return drained;
     }
 
-    // Rule and shaper counters in the format the fixture's Counters() line embeds.
     public string RuleCounters()
     {
         lock (_gate)
@@ -254,8 +225,7 @@ internal sealed class LinkPipeline
 
                 _creditBits += (now - _lastDrain).TotalSeconds * bitsPerSecond;
                 _lastDrain = now;
-                // A modest burst allowance keeps the link from idling between scheduler
-                // ticks; real links serialize packet-by-packet, the lab per 5 ms tick.
+
                 _creditBits = Math.Min(_creditBits, bitsPerSecond * 0.2);
                 var emitted = new List<(IPEndPoint, IPEndPoint, byte[])>();
                 while (_queue.Count > 0 && _queue.Peek().Payload.Length * 8L <= _creditBits)

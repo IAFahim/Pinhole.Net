@@ -28,10 +28,6 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             var sw = Stopwatch.StartNew();
             Task<BlobDownloadResult> run = Task.Run(() => DownloadAsync(lab, server, dir, stats));
 
-            // The whole region goes dark for 30 s — past every engine probe cadence and
-            // past the blob layer's own 30 s stall clock. The single call must sit
-            // through it (the stall clock is paused while no path exists) and finish
-            // byte-exact when the light returns, without a second call or ticket.
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
             LinkRule cut = LinkRule.Blackhole(region);
             lab.Net.AddRule(cut);
@@ -56,18 +52,14 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // Relay-capable nodes on a lab with a TURN server: when the direct path is
-            // cut mid-transfer, the engine degrades to the relay and the transfer
-            // continues on the same connection — the blob layer's pathlessness pause
-            // rides the transition without losing verified progress.
+
             using var lab = new VirtualLab(withTurn: true);
             await using BlobServer server = await ServeAtAsync(lab, dir, "198.51.100.10", 34010);
             Shape(lab, 8_000_000);
             Task<BlobDownloadResult> run = Task.Run(() => BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
                 options: DownOptions(lab, 34020)).WaitAsync(Budget));
-            await Task.Delay(600); // let the direct path confirm and chunks flow
+            await Task.Delay(600);
 
-            // Direct traffic between the pair dies; the relay leg stays up.
             var a = Subnet.Parse("198.51.100.10/32");
             var b = Subnet.Parse("198.51.100.20/32");
             lab.Net.AddRule(LinkRule.Directional(a, b, dropAll: true));
@@ -94,11 +86,9 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             Shape(lab, 8_000_000);
             Task<BlobDownloadResult> run = Task.Run(() => DownloadAsync(lab, server, dir));
 
-            await Task.Delay(700); // mid-transfer
-            await server.Node.Engine.SimulateInterfaceLossAsync(); // the provider rebinds to a fresh port
+            await Task.Delay(700);
+            await server.Node.Engine.SimulateInterfaceLossAsync();
 
-            // A simultaneous route dark period on top of the rebind — the downloader's
-            // session must heal onto the provider's new endpoint and keep going.
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
             LinkRule cut = LinkRule.Blackhole(region);
             lab.Net.AddRule(cut);
@@ -121,11 +111,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // Plaintext serving (a trusted-LAN configuration) with a persistent identity
-            // and a fixed port: the restarted provider is the SAME peer the ticket pins,
-            // findable at the same address. The dying connection forces the recovery
-            // loop's re-dial, which resumes the checkpointed prefix — no new call, no
-            // new ticket, nothing re-downloaded from zero.
+
             byte[] seed = RandomNumberGenerator.GetBytes(32);
             using VirtualLab lab = await LabAsync(dir);
             byte[] data = new byte[FlowBytes];
@@ -149,8 +135,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             };
 
             await using BlobServer server = await BlobServer.ServeAsync(src, Opts());
-            // Hold the provider at the intended restart boundary. Packets queued by
-            // the provider are not evidence that the downloader has checkpointed them.
+
             server.DropChunk = index => index >= 120;
             Task<BlobDownloadResult> run = Task.Run(() => RunAsync(server).WaitAsync(Budget));
 
@@ -160,8 +145,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             {
                 try
                 {
-                    // Read the documented PBPART01 prefix without excluding the
-                    // downloader's periodic writer. Ignore a concurrent rewrite.
+
                     using var state = new FileStream(statePath, FileMode.Open, FileAccess.Read,
                         FileShare.ReadWrite | FileShare.Delete);
                     if (state.Length != 56) return false;
@@ -175,15 +159,13 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             });
             await server.DisposeAsync();
 
-            // The successor: same identity, same port, same content — but a brand-new
-            // process that knows nothing of the old connection.
             Subnet region = Subnet.Parse(VirtualLab.Hosts4SecondRegion);
             LinkRule cut = LinkRule.Blackhole(region);
             lab.Net.AddRule(cut);
             await using BlobServer successor = await BlobServer.ServeAsync(src, Opts());
             var requested = new ConcurrentQueue<long>();
             successor.DropChunk = index => { requested.Enqueue(index); return false; };
-            lab.Net.RemoveRule(cut); // no request can precede the observation hook
+            lab.Net.RemoveRule(cut);
 
             BlobDownloadResult result = await run;
             Assert.Equal(FlowBytes, result.Bytes);
@@ -194,11 +176,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
                 $"successor requested chunk {requested.Min()} below saved prefix {savedPrefix}");
             output.WriteLine($"result.Resumed={result.Resumed}, successor connections={successor.ConnectionsAccepted}, " +
                              $"first-server connections={server.ConnectionsAccepted}");
-            // The resume property itself is requested.Min() >= savedPrefix above. This
-            // count check only catches a wholesale from-zero serve; its duplicate
-            // allowance must absorb PTO healing chatter on the shaped link — a loaded
-            // macOS runner once put the successor at 123 re-served duplicates for a
-            // 392-chunk unique need, 4 over the old zero-over-total bound.
+
             long totalChunks = data.Length / 1024;
             Assert.True(successor.ChunksServed < totalChunks + 120,
                 $"the re-dial resumed from the checkpoint, not from zero (successor served {successor.ChunksServed}, "
@@ -218,12 +196,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // A legacy (v1) connection string vouches for no static key, and the
-            // downloader requires encryption: ConnectAsync refuses outright. That is a
-            // permanent fact about the peer, not weather — the recovery budget must not
-            // be spent retrying it. (A stranger answering at the right address with the
-            // wrong identity is different: it drops our packets, which honestly looks
-            // like route loss, and riding that out is what the restart test relies on.)
+
             using VirtualLab lab = await LabAsync(dir);
             var v1 = new ConnectionString(0x1234,
                 [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Parse("198.51.100.10"), 34110))]);
@@ -257,7 +230,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         {
             using VirtualLab lab = await LabAsync(dir);
             await using BlobServer server = await ServeAsync(lab, dir);
-            server.CorruptChunk = (_, data) => data[0] ^= 0xFF; // every chunk lies
+            server.CorruptChunk = (_, data) => data[0] ^= 0xFF;
 
             var sw = Stopwatch.StartNew();
             InvalidDataException ex = await Assert.ThrowsAsync<InvalidDataException>(
@@ -308,11 +281,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // An encrypted provider that stalls its first session on purpose (every
-            // chunk past 80 goes missing on a LIVE path): the 30 s stall clock fires,
-            // the recovery loop re-dials, and the second session — same ticket, same
-            // provider — must still mint a fresh two-sided key. Every Welcome nonce
-            // the downloader adopts is recorded; all must be distinct.
+
             using VirtualLab lab = await LabAsync(dir);
             byte[] data = new byte[FlowBytes];
             Random.Shared.NextBytes(data);
@@ -342,8 +311,6 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
                         Stats = stats,
                     }).WaitAsync(Budget));
 
-                // The stall clock (30 s) plus the re-dial's backoff, then the provider
-                // becomes honest again and the second session finishes the job.
                 await TestPoll.UntilAsync(TimeSpan.FromSeconds(60), () => server.ConnectionsAccepted >= 2);
                 server.DropChunk = null;
                 BlobDownloadResult result = await run;
@@ -357,8 +324,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
                     output.WriteLine($"{perSession.Count} sessions adopted {nonces.Count} Welcomes' provider nonces, " +
                                      $"{server.ConnectionsAccepted} connections");
                     Assert.True(perSession.Count >= 2, $"expected a recreated session after the stall, saw {perSession.Count}");
-                    // Within one connection the provider re-offers the SAME nonce to each
-                    // retried Hello; across recreated sessions every nonce must be fresh.
+
                     Assert.All(perSession.Values, v => Assert.Single(v));
                     Assert.Equal(perSession.Count, perSession.Values.Select(v => v[0]).Distinct().Count());
                 }
@@ -380,10 +346,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
         string dir = TempDir();
         try
         {
-            // A directory download is N streams on one ticket: the manifest, then one
-            // stream per file. A restart mid-tree must not re-fetch the manifest, must
-            // not re-verify finished files, and must resume the in-flight file from its
-            // checkpoint — the successor only ever serves the remaining tail.
+
             using VirtualLab lab = await LabAsync(dir);
             string tree = Path.Combine(dir, "tree");
             Directory.CreateDirectory(Path.Combine(tree, "sub"));
@@ -402,7 +365,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
 
             BlobServeOptions Opts() => new()
             {
-                Encrypt = false, // pinned-key restart is the identity case; ticket keys mint fresh per process
+                Encrypt = false,
                 NodeOptions = lab.BaseOptions(o => o with
                 {
                     IdentityKeySeed = seed,
@@ -411,9 +374,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             };
 
             await using BlobServer server = await BlobServer.ServeAsync(tree, Opts());
-            // Two files fully verified on the wire (their roots carried into
-            // completedRoots) and file three in flight with a checkpoint past its first
-            // bytes — the strongest carry-over state to kill the provider inside.
+
             var filesDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var progress = new Progress<BlobProgress>(p =>
             {
@@ -425,8 +386,6 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             Task<BlobDownloadResult> run = Task.Run(() => BlobClient.DownloadAsync(server.Ticket,
                 Path.Combine(dir, "out"), progress, options: DownOptions(lab, 34020)).WaitAsync(Budget));
 
-            // Two files fully verified on the wire (their roots join completedRoots),
-            // file three in flight — then the provider dies. The re-dial must inherit it.
             await filesDone.Task.WaitAsync(TestBudget.Scenario);
             await server.DisposeAsync();
             await using BlobServer successor = await BlobServer.ServeAsync(tree, Opts());
@@ -437,8 +396,7 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
                 Assert.Equal(content, await File.ReadAllBytesAsync(Path.Combine(dir, "out", "tree", rel)));
             }
             Assert.True(result.Resumed, "the surviving call resumed from the pre-restart checkpoints");
-            // The finished files are skipped entirely and the in-flight file resumed at
-            // its checkpoint, so the successor serves strictly less than the whole tree.
+
             Assert.True(successor.ChunksServed < totalChunks,
                 $"successor re-served the whole tree ({successor.ChunksServed} chunks vs total {totalChunks}) — no carry-over");
             output.WriteLine($"directory restart: successor served {successor.ChunksServed}/{totalChunks} chunks " +
@@ -449,8 +407,6 @@ public sealed class BlobResumeTests(ITestOutputHelper output)
             Directory.Delete(dir, recursive: true);
         }
     }
-
-    // ------------------------------------------------------------------ plumbing
 
     private static string TempDir()
     {

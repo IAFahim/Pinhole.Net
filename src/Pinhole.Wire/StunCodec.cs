@@ -25,41 +25,6 @@ public sealed record StunMessage(ushort MessageType, byte[] TransactionId, StunA
 
 public sealed record StunBindingResult(IPEndPoint Mapped, IPEndPoint? Origin, IPEndPoint? Other);
 
-// Canonical STUN codec (RFC 5389 framing plus the binding shapes Pinhole uses),
-// derived from Pinhole.StunBindingMessage and byte-compatible with it on every
-// form that code produces or accepts. Total: TryRead never throws on
-// wire-controlled bytes and returns false on every non-canonical form; Write
-// throws only on programmer error. Canonical rules, all enforced by TryRead:
-//   1. the span is at least 20 bytes, so the 12-byte transaction id is complete;
-//   2. the message type is below 0x4000 (the two top bits of a STUN type are zero);
-//   3. the magic cookie at offset 4 is exactly 0x2112A442;
-//   4. the header length field equals span length - 20: datagram exact, no
-//      trailing bytes (StunBindingMessage.TryRead requires exactly this);
-//   5. the header length is a multiple of 4 (implied by StunBindingMessage's
-//      attribute tiling; TurnClient's receive loop checks it explicitly);
-//   6. every attribute's 4-byte header and padded extent (4 + align4(length))
-//      lie inside the body, and the walk ends exactly at the body end;
-//   7. attribute padding bytes are zero. RFC 5389 lets receivers ignore them;
-//      the canonical codec rejects non-zero padding. Every encoder in this repo
-//      writes zeros, but StunBindingMessage.TryRead tolerates garbage padding,
-//      so this rule is deliberately stricter than the existing parser.
-// Address attributes (MAPPED-ADDRESS, XOR-MAPPED-ADDRESS, RESPONSE-ORIGIN,
-// OTHER-ADDRESS) decode under the same rules StunBindingMessage.TryAddress uses:
-//   8. reserved byte 0, family 1 (IPv4) or 2 (IPv6), value length exactly 8 or
-//      20 bytes — no trailing bytes inside the value;
-//   9. XOR form: port ^= 0x2112, IPv4 address ^= cookie, IPv6 address ^= the
-//      16-byte mask cookie||transaction-id, and the transaction id must be the
-//      full 12 bytes; the plain form does not involve the transaction id.
-// Binding shapes mirror StunBindingMessage exactly:
-//  10. binding requests are the three forms Request() emits — no attributes, or
-//      one CHANGE-REQUEST attribute with a 4-byte value of 2 or 6;
-//  11. binding responses are 0x0101 messages whose MAPPED-ADDRESS,
-//      XOR-MAPPED-ADDRESS, RESPONSE-ORIGIN and OTHER-ADDRESS attributes decode
-//      (rule 8) and are usable (port > 0, not the unspecified address, not
-//      multicast, IPv4 first octet 1..223); a repeated attribute of one type
-//      must decode identically (SetOnce semantics); XOR-MAPPED wins over
-//      MAPPED; a RESPONSE-ORIGIN, when present, must equal the expected origin,
-//      and the observed address family must match the expected origin's family.
 public static class StunCodec
 {
     public const uint Cookie = 0x2112A442;
@@ -313,8 +278,6 @@ public static class StunCodec
         return true;
     }
 
-    // Mirrors StunBindingMessage.Usable: a mapped address must be a concrete
-    // unicast endpoint or the binding reply is not trustworthy.
     public static bool IsUsable(IPEndPoint endpoint) => endpoint.Port > 0
         && !endpoint.Address.Equals(IPAddress.Any)
         && !endpoint.Address.Equals(IPAddress.IPv6Any)

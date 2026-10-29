@@ -29,7 +29,7 @@ internal static class NatPmpClient
                         TimeSpan.FromSeconds(granted), new IPEndPoint(externalIp, mapped), protocol);
                 }
             }
-            catch (SocketException) { } // another gateway may still work
+            catch (SocketException) { }
         }
 
         return null;
@@ -61,7 +61,7 @@ internal static class NatPmpClient
         byte[] request = new byte[12];
         request[1] = protocol == ProtocolType.Tcp ? (byte)2 : (byte)1;
         BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(4), (ushort)internalPort);
-        // RFC 6886 section 3.4: deletion MUST suggest external port zero.
+
         BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(6), lease == TimeSpan.Zero ? (ushort)0 : (ushort)externalPort);
         BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(8), (uint)lease.TotalSeconds);
         return request;
@@ -89,7 +89,7 @@ internal static class NatPmpClient
         Task<UdpReceiveResult>? pending = null;
         try
         {
-            // Connecting pins the responder as well as selecting the source route.
+
             if (!udp.Client.Connected) udp.Connect(gateway);
             else if (!gateway.Equals(udp.Client.RemoteEndPoint)) return null;
             foreach (int delay in RetryDelaysMs)

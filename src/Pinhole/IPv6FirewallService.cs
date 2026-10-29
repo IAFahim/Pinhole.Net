@@ -41,8 +41,7 @@ internal sealed class IPv6FirewallService : IDisposable
                     IPAddress address = unicast.Address;
                     if (!UpnpIPv6FirewallClient.IsGlobalUnicast(address)
                         || bind is not null && !bind.Address.Equals(IPAddress.IPv6Any) && !bind.Address.Equals(address)) continue;
-                    // Linux does not expose DAD/lifetimes through this API. Do not invent
-                    // readiness from them there; a failed source bind simply yields no lease.
+
                     if (OperatingSystem.IsWindows() && unicast.DuplicateAddressDetectionState != DuplicateAddressDetectionState.Preferred) continue;
                     sources.Add((nic.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? 0 : 1,
                         new IPv6LanSource(address, ipv6.Index)));
@@ -50,7 +49,7 @@ internal sealed class IPv6FirewallService : IDisposable
             }
         }
         catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException) { }
-        // Cover distinct links before spending both slots on one interface's privacy addresses.
+
         var ordered = sources.OrderBy(s => s.Rank).ThenBy(s => s.Source.InterfaceIndex).Select(s => s.Source).Distinct().ToArray();
         return ordered.DistinctBy(s => s.InterfaceIndex).Concat(ordered).Distinct().Take(MaxSources).ToArray();
     }
@@ -84,7 +83,7 @@ internal sealed class IPv6FirewallService : IDisposable
                     worker.Ensure(entry.Value);
                 }
                 else if (invalidate) worker.Rebind(entry.Value);
-                else worker.Ensure(entry.Value); // unchanged input never extends a failed lease
+                else worker.Ensure(entry.Value);
             }
         }
     }

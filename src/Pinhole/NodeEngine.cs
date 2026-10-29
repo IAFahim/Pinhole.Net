@@ -14,24 +14,17 @@ namespace Pinhole;
 
 internal enum FrameType : byte
 {
-    Punc = 0x50, // punch probe; body = the sender's handshake token (u32 LE), or token + X25519 ephemeral + static (v2)
-    Pack = 0x51, // punch ack; body = [echo of the received PUNC token][sender's own token], plus v2 keys + confirm MAC
-    Data = 0x52,  // body = [sender's token][payload] — sealed (counter + AES-GCM) once a session exists
-    Ping = 0x53,  // body = [sender's token][timestamp:8]
-    Pong = 0x54,  // body = [sender's token][timestamp:8]
-    Announce = 0x55, // body = [sender's token][count][candidate TLV stream]
-    Bye = 0x56,   // body = [sender's token]
-    Hsck = 0x57,  // handshake confirm; body = [sender's token][confirm MAC:16] — the dialer's proof after a verified PACK
-    Predict = 0x58, // sealed, negotiated, bounded prediction control; never a reflexive candidate
-    Cookie = 0x59, // mac2/cookie armor (R5 phase 2); body = [echo of the PUNC's token][epoch tag u8][cookieValue 16] — the under-load reply instead of PACK
+    Punc = 0x50,
+    Pack = 0x51,
+    Data = 0x52,
+    Ping = 0x53,
+    Pong = 0x54,
+    Announce = 0x55,
+    Bye = 0x56,
+    Hsck = 0x57,
+    Predict = 0x58,
+    Cookie = 0x59,
 }
-
-// Wire authentication model: every frame carries the sender's per-connection token at
-// offset HeaderSize. Punc teaches the receiver the dialer's token, Pack delivers the
-// responder's, and every later frame must echo the token the receiver learned. The token
-// is random per connection and never appears in the connection string, so holding the
-// string (public by design) lets a stranger dial, but not spoof, hijack, or kill an
-// established session.
 
 internal sealed class ConnState
 {
@@ -42,14 +35,14 @@ internal sealed class ConnState
     public volatile PinholeConnectionState State = PinholeConnectionState.Punching;
     public volatile PathKind Path = PathKind.None;
     public DateTimeOffset PathSince = DateTimeOffset.UtcNow;
-    public SocketAddress? DirectRemote;      // where direct frames go (last-wins by peer ID)
-    public IPEndPoint? DirectRemoteEp;       // display form of DirectRemote
-    public TcpLink? DirectTcp;               // null on UDP; authenticated stream on TCP
-    public IUdpSocket? DirectUdpSocket;      // null for the wildcard socket; actual source on a bound interface
-    public TcpLink? PendingTcp;              // incoming TCP stranger, not accepted before proof
+    public SocketAddress? DirectRemote;
+    public IPEndPoint? DirectRemoteEp;
+    public TcpLink? DirectTcp;
+    public IUdpSocket? DirectUdpSocket;
+    public TcpLink? PendingTcp;
     public bool IncomingQueued;
     public bool IsIncoming;
-    public bool DialAdoptedIncoming;         // Gate: an explicit dial armed an unfinished incoming handshake
+    public bool DialAdoptedIncoming;
     public bool PeerCandidatesReceived;
     public bool AwaitInitialCandidateExchange;
     public long LastCandidateAnnouncement;
@@ -58,77 +51,67 @@ internal sealed class ConnState
     public volatile PortPredictionState? Prediction;
     public int TcpDialing;
     public long LastTcpAttempt;
-    public long LastTcpLinkTicks;           // last batch that actually established a link
+    public long LastTcpLinkTicks;
     public TcpLink? ProbeTcp;
     public IUdpSocket? ProbeUdpSocket;
-    public IPEndPoint? RelayRemote;          // peer's relayed address
-    public volatile bool RelayReady;         // permission for RelayRemote exists on our allocation
-    public readonly List<PinholeCandidate> PeerCandidates = new(); // guarded by engine gate
-    public bool SymmetricHint;               // peer advertised a symmetric NAT: relay-first scheduling
-    public HandshakeState Handshake;         // Gate; token latch + reply selection — HandshakeMachine owns the decisions
-    public ConnectionCrypto? Crypto;         // handshake + sealers; null = plaintext session (guarded by Gate for the handshake fields)
-    public byte[]? PinnedStaticKey;          // the v2 connection string's static key (dial side, immutable)
-    public byte[]? PinnedEndpointKey;        // the v3 connection string's endpoint key (dial side, immutable)
-    public byte[]? PinnedKnock;              // the v4 connection string's knock (dial side; the string promised a knock-configured peer)
+    public IPEndPoint? RelayRemote;
+    public volatile bool RelayReady;
+    public readonly List<PinholeCandidate> PeerCandidates = new();
+    public bool SymmetricHint;
+    public HandshakeState Handshake;
+    public ConnectionCrypto? Crypto;
+    public byte[]? PinnedStaticKey;
+    public byte[]? PinnedEndpointKey;
+    public byte[]? PinnedKnock;
     public bool Announced;
-    public long LastKickTicks = Environment.TickCount64; // monotonic: suspend-proof punch budget
-    public volatile bool BlackholeDirect;    // test hook: drop this peer's direct frames
+    public long LastKickTicks = Environment.TickCount64;
+    public volatile bool BlackholeDirect;
     public int PunchGeneration;
-    public long DeadSinceTicks;            // Gate; when the punch budget condemned the connection
-    public int PermitInFlight;               // single-flight guard for TURN permission round trips
+    public long DeadSinceTicks;
+    public int PermitInFlight;
     public IKeyedRelay? PacketRelay;
     public byte[]? PacketRelayPeerKey;
     public bool PacketRelayConfirmed;
-    public byte[] PuncFrame = Array.Empty<byte>(); // built with the connection's token
-    public bool PuncFrameV4;         // PuncFrame carries the v4 mac1 extension
-    public bool PuncFrameDowngraded; // punch loop: the one-shot fallback to the v3 shape fired
-    public byte[]? Cookie;           // Gate, dial side; the responder's mac2 key after a COOKIE reply
-    public bool StrangerAdmitted;    // Gate; the PUNC that created this husk already passed the stranger cookie
-                                     // gate in Dispatch — OnPunc consumes it so that same frame is neither
-                                     // re-counted in the load windows nor re-verified against the jar
-    public long FirstPuncTicks;      // Volatile; first PUNC transmission — the fallback clock's zero
-    public DatagramBuffer? Buffer;      // non-null only with ReceiveBufferCapacity > 0
+    public byte[] PuncFrame = Array.Empty<byte>();
+    public bool PuncFrameV4;
+    public bool PuncFrameDowngraded;
+    public byte[]? Cookie;
+    public bool StrangerAdmitted;
+
+    public long FirstPuncTicks;
+    public DatagramBuffer? Buffer;
 
     public readonly TaskCompletionSource Connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly TaskCompletionSource Closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly CancellationTokenSource Dead = new();
 
-    // Silent-death path validation (monotonic Environment.TickCount64 everywhere). Only
-    // frames RECEIVED on the direct path count as activity — a successful UDP send proves
-    // nothing, or a dead path that never errors would look alive forever.
-    public long LastDirectRxTicks;       // Volatile; written under Gate
-    public long LastRelayRxTicks;        // Volatile; receive thread only — relay-leg liveness clock
-    public SocketAddress? ProbeTarget;   // Gate; the endpoint the outstanding probe went to
-    public long PathProbesSent;          // Interlocked; separate from caller ping stats
-    public long PathProbeReplies;        // Interlocked; only matched, direct-endpoint replies
+    public long LastDirectRxTicks;
+    public long LastRelayRxTicks;
+    public SocketAddress? ProbeTarget;
+    public long PathProbesSent;
+    public long PathProbeReplies;
 
-    // RFC 8899-style path MTU discovery. The 1200-byte API floor is presumed good; padded
-    // pings climb from there, and a confirmed size raises the app payload ceiling. All
-    // fields are guarded by Gate except the counters; the decisions live in PmtuMachine.
-    public PmtuState Pmtu;                   // Gate; wired from options at creation
-    public SocketAddress? PmtuProbeTarget;   // Gate; the endpoint the probe went to
+    public PmtuState Pmtu;
+    public SocketAddress? PmtuProbeTarget;
     public IUdpSocket? PmtuProbeUdpSocket;
-    public long PmtuProbesSent;            // Interlocked
-    public volatile int DropAboveBytes;    // test hook: direct frames larger than this are black-holed
-    public KeepaliveState Keepalive;       // Gate; ping cadence, probe ladder, RTT EWMA — KeepaliveMachine owns the decisions
-    public PunchState Punch;               // Gate; condemn/beacon/trickle scheduling — PunchSchedulerMachine owns the decisions
+    public long PmtuProbesSent;
+    public volatile int DropAboveBytes;
+    public KeepaliveState Keepalive;
+    public PunchState Punch;
 
     public PinholeConnection? Public;
     public PinholeDatagramHandler? Received;
     public Action<PinholeConnectionState>? StateChanged;
 
     public long Sent, ReceivedCount, SendFailed, BytesSent, BytesReceived, PingsSent, PongsReceived;
-    // Handshake-stage counters (Interlocked): a stuck dial's forensics can name the dead
-    // flight — "punches left but no answer" vs "answers left but never landed" — without
-    // tracing enabled on any platform.
+
     public long PuncsSent, PuncsReceived, PacksSent, PacksReceived, HscksReceived, HandshakeRejects;
-    // Last reject's branch and tokens (volatile): the counters say HOW MANY answers died;
-    // these say WHICH check killed them and what the peer actually echoed.
-    public uint LastRejectWanted, LastRejectGot; // accessed through Volatile.Read/Write
-    public long LastRejectKind; // 1=pack-echo, 2=pack-length, 3=punc-token, 4=keys, 5=pin, 6=mixed-mode, 7=pack-confirm, 8=pack-peer-token
-    public string? LastRejectFrom; // Volatile.Read/Write: source of the last token-rejected frame
-    public readonly long[] RejectsByKind = new long[9]; // indexed by the kinds above
-    public long LastRttTicks = long.MinValue; // Interlocked
+
+    public uint LastRejectWanted, LastRejectGot;
+    public long LastRejectKind;
+    public string? LastRejectFrom;
+    public readonly long[] RejectsByKind = new long[9];
+    public long LastRttTicks = long.MinValue;
     public int ConsecutiveSendFailures;
 }
 
@@ -138,11 +121,8 @@ internal sealed partial class NodeEngine : IDisposable
     private const int HeaderSize = CryptoWire.HeaderLength;
 
     internal const int MaxConnections = 1024;
-    private readonly int _maxConns; // production cap unless PinholeOptions.MaxConnectionsOverride says otherwise
+    private readonly int _maxConns;
 
-    // Must exceed the largest legit announce: HeaderSize + token + count + 32 fat relay
-    // candidates (~170 bytes each) lands near 5.5 KB; a smaller buffer would truncate and
-    // silently drop exactly the relay-heavy announces that matter most.
     private const int RecvBufferSize = 8192;
     private const uint StunCookie = 0x2112A442;
 
@@ -151,42 +131,31 @@ internal sealed partial class NodeEngine : IDisposable
     private static readonly TimeSpan RecoverDebounce = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(2);
 
-    // Path MTU discovery. The frame overhead every sealed payload pays, the presumed-good
-    // floor (the 1200-byte API guarantee), and the Ethernet plateaus probed up to. The
-    // nonce marker is positive — path probes took the sign bit — and cannot collide with
-    // caller pings, whose timestamps are TickCount64 readings.
     internal const int PmtuOverhead = HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead;
     internal const int PmtuBaseWire = MaxPayload + PmtuOverhead;
-    private const int PmtuCeilingV4 = 1472; // Ethernet IPv4: 1500 - 20 - 8
-    private const int PmtuCeilingV6 = 1452; // Ethernet IPv6: 1500 - 40 - 8
+    private const int PmtuCeilingV4 = 1472;
+    private const int PmtuCeilingV6 = 1452;
     private const int PmtuStepBytes = 128;
     private const int PmtuProbeAttempts = 3;
-    // RFC 8899 re-probe cadence comes from PmtuReprobeInterval (default 5 min): a settled
-    // path re-verifies its confirmed size, catching a mid-connection MTU shrink. The
-    // probe nonce marker (positive, bit 62) lives in PmtuMachine and cannot collide with
-    // path-probe nonces (sign bit, KeepaliveMachine) or caller ping timestamps.
 
     private readonly ulong _peerId;
     private readonly PinholeOptions _options;
-    private readonly NodeIdentity? _identity; // long-term X25519 identity; null = plaintext node
+    private readonly NodeIdentity? _identity;
     private readonly object _gate = new();
-    // Hot path: every frame routes through Lookup, on the receive thread for arrivals and
-    // the caller's thread for sends. A ConcurrentDictionary keeps those reads lock-free so
-    // the two hot threads never ping-pong the old global lock's cache line. Mutations
-    // (dial, incoming, close) are rare and individually atomic.
+
     private readonly ConcurrentDictionary<ulong, ConnState> _conns = new();
     private readonly Channel<ConnState>? _incoming;
     private readonly List<RelaySlot> _relays = new();
     private readonly Dictionary<Uri, IrohRelay> _irohRelays = new();
     private readonly Dictionary<Uri, DerpRelay> _derpRelays = new();
-    private readonly RelayIdentity? _endpointIdentity; // Ed25519 endpoint key; null = random per-bind peer id only
+    private readonly RelayIdentity? _endpointIdentity;
     private readonly Action<IrohPath, ReadOnlyMemory<byte>>? _rawReceive;
-    private readonly List<PinholeCandidate> _localCandidates = new(); // guarded by _gate
-    private HashSet<IPEndPoint> _lastRelayedAddresses = new();       // relay-change detector, guarded by _gate
-    private readonly List<IPEndPoint> _reflexive = new();             // guarded by _gate
-    private IPEndPoint? _mappedEndpoint;                              // router-granted mapping (UPnP/PMP/PCP), guarded by _gate
+    private readonly List<PinholeCandidate> _localCandidates = new();
+    private HashSet<IPEndPoint> _lastRelayedAddresses = new();
+    private readonly List<IPEndPoint> _reflexive = new();
+    private IPEndPoint? _mappedEndpoint;
     private IPEndPoint? _mappedTcpEndpoint;
-    private NatHint _observedNatHint;                                 // derived from multi-server STUN observations, guarded by _gate
+    private NatHint _observedNatHint;
     private PortMappingService? _portMap;
     private PortMappingService? _tcpPortMap;
     private IPv6FirewallService? _ipv6Firewall;
@@ -198,60 +167,43 @@ internal sealed partial class NodeEngine : IDisposable
     private sealed record StunAttempt(byte[] Transaction, IPEndPoint Server, IUdpSocket Socket, TaskCompletionSource<StunBindingReply> Reply);
     private readonly ConcurrentDictionary<ulong, StunAttempt> _stunPending = new();
     private readonly CancellationTokenSource _shutdown = new();
-    // Address-lookup providers (built-in rendezvous + application-supplied). Empty unless
-    // configured: rediscovery is opt-in infrastructure, never a default network behavior.
+
     private readonly List<IPinholeLookupProvider> _lookup = [];
-    // Replay/rollback guard for adopted records: highest sequence per peer. Bounded by
-    // MaxCachedSequences; a cache that fills simply stops protecting new peers (their
-    // records still verify by signature, expiry, and pin — the guard is hardening, not the
-    // authentication boundary).
+
     private readonly ConcurrentDictionary<ulong, ulong> _recordSequence = new();
     private const int MaxCachedSequences = 1024;
     private static readonly TimeSpan PublishInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PublishMaxBackoff = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RecordTtl = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan LookupBudget = TimeSpan.FromSeconds(3);
-    private Task? _publishLoop; // one publisher for the whole node, dies with shutdown
-    private int _publishing;          // single-flight guard for publish operations
-    private int _publishKick;         // single-flight guard for event-triggered publishes
-    private long _lastPublishTicks;   // rate limit for event-triggered publishes
+    private Task? _publishLoop;
+    private int _publishing;
+    private int _publishKick;
+    private long _lastPublishTicks;
 
-    // Volatile: sends and the receive loop read it per frame without taking _gate. A rebind
-    // swaps in a fresh socket; a sender briefly racing the swap gets the old socket and a
-    // caught ObjectDisposedException — the same send-failure handling a dead path already
-    // triggers, and rebinds are rare.
     private volatile IUdpSocket _udp = null!;
     private TcpTransport? _tcp;
-    private long _recovering; // single-flight guard for recovery
+    private long _recovering;
     private volatile bool _disposed;
     private int _networkWatchHooked;
-    private Task? _maintenance; // one scheduler for the whole node (path validation + STUN refresh)
-    private long _nextStunRefreshTicks; // maintenance deadline; 0 = refresh disabled
-    // Receive-path forensics (Interlocked/volatile): a dial whose peer answers everything
-    // yet completes nothing is only diagnosable by seeing whether the recv loop itself is
-    // alive and whether dispatch is dropping frames for absent connections.
+    private Task? _maintenance;
+    private long _nextStunRefreshTicks;
+
     private long _recvDatagrams;
     private long _recvLastTick;
     private long _noConnDrops;
-    // Last handshake line per peer from a removed connection: bounded by the connection
-    // table's own peer population, overwritten per close.
+
     private sealed record ClosedHandshake(string Summary, uint RemoteToken, byte[]? PeerEphemeral, long ClosedTicks);
     private readonly ConcurrentDictionary<ulong, ClosedHandshake> _lastClosedHandshake = new();
     private readonly object _closedHandshakeGate = new();
     private readonly Queue<ulong> _closedHandshakeOrder = new();
     internal long StaleHandshakeDrops;
-    // Handshake v4 armor counters (Interlocked). Mac1Refused counts extension frames the
-    // keyed-MAC gate dropped silently; HandshakeKeyAgreements brackets every key agreement
-    // an inbound PUNC/PACK triggers — the no-DH-before-mac1 proof pins that it stays at
-    // zero while a flood of forged extension frames is refused. CookieDemanded counts
-    // COOKIE replies a load gate sent instead of a PACK; CookieAccepted counts under-load
-    // PUNCs whose mac2 verified — the honest-dialer-completes-under-load proof.
+
     private long _mac1Refused;
     private long _handshakeKeyAgreements;
     private long _cookieDemanded;
     private long _cookieAccepted;
-    // Test seam mirroring the blob layer's LegacyV3Only: the node never emits or accepts
-    // the v4 handshake shapes, emulating a pre-v4 peer for fallback tests.
+
     internal bool LegacyHandshakeV3Only;
     internal long Mac1Refused => Volatile.Read(ref _mac1Refused);
     internal long HandshakeKeyAgreements => Volatile.Read(ref _handshakeKeyAgreements);
@@ -261,32 +213,24 @@ internal sealed partial class NodeEngine : IDisposable
     private readonly CookieArmor? _cookieArmor;
     internal int CookieLoadSources => _cookieArmor?.TrackedSources ?? 0;
     internal bool HandshakeV4Active => !LegacyHandshakeV3Only && _identity is not null;
-    // The configured knock and, precomputed, the own-static mac1 key under it. When set,
-    // ONLY string holders may connect: mac1 must verify under knock-keyed material and
-    // unversioned (v3) initiations are ignored outright — the operator closed the v3
-    // support window for this node unilaterally.
+
     internal byte[]? Knock => _knock;
     private readonly byte[]? _knock;
     private readonly byte[]? _knockMac1Key;
-    // The mac1 key own-side frames verify against: knock-keyed when configured, the raw
-    // static pub otherwise.
+
     private ReadOnlySpan<byte> OwnMac1Key => _knockMac1Key ?? _identity!.PublicKey;
-    // A v4 dialer that has sent PUNCs and heard nothing for this long assumes a v3-only
-    // responder (which ignores the unknown frame shape) and falls back to unversioned
-    // retries, exactly once — the blob layer's first-answer-timeout fallback discipline.
+
     internal const long HandshakeV4FallbackMs = 3000;
-    private long _nextRelayEnsureTicks;  // maintenance deadline for retrying dead TURN slots
-    private int _relayEnsuring;          // single-flight guard for that retry
-    private int _stunRefreshing; // single-flight guard for reflexive refreshes
-    private long _nextHuskReapTicks;     // maintenance deadline for reaping unestablished husks
+    private long _nextRelayEnsureTicks;
+    private int _relayEnsuring;
+    private int _stunRefreshing;
+    private long _nextHuskReapTicks;
     private const long HuskReapIntervalMs = 1000;
 
     public NodeEngine(PinholeOptions options, RelayIdentity? rawIdentity = null,
         Action<IrohPath, ReadOnlyMemory<byte>>? rawReceive = null)
     {
-        // The Ed25519 endpoint identity exists whenever the node has iroh relays (they
-        // authenticate with it) or a persisted seed (which derives it stably). A persisted
-        // seed therefore also stabilizes the peer ID — it is the hash of the endpoint key.
+
         byte[]? endpointSeed = EndpointIdentity.DeriveEndpointSeed(options.IdentityKeySeed);
         _rawReceive = rawReceive;
         if (rawIdentity is not null)
@@ -297,9 +241,7 @@ internal sealed partial class NodeEngine : IDisposable
         _options = options;
         _maxConns = options.MaxConnectionsOverride ?? MaxConnections;
         _identity = options.Encryption != PinholeEncryption.Disabled ? new NodeIdentity(options.IdentityKeySeed) : null;
-        // The knock is shell-side key material: the raw bytes never leave except inside
-        // the node's own connection string, and the own-static mac1 key under knock is
-        // derived once here instead of per frame.
+
         _knock = options.Knock?.ToArray();
         if (_knock is not null && _identity is not null)
         {
@@ -369,10 +311,8 @@ internal sealed partial class NodeEngine : IDisposable
     {
         public TurnClient? Client;
         public DateTimeOffset NextRetry = DateTimeOffset.MinValue;
-        public TimeSpan Backoff = RelayRetryBackoff; // doubles per failure; success resets
+        public TimeSpan Backoff = RelayRetryBackoff;
     }
-
-    // ------------------------------------------------------------------ bind
 
     public async Task BindAsync(CancellationToken ct)
     {
@@ -399,23 +339,17 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (TimeoutException)
         {
-            // Bind is best-effort: slow or dead infrastructure costs its candidates, not the node.
+
         }
 
         RefreshLocalCandidates();
         _ = PermitCatalogRelaysAsync(CancellationToken.None);
 
-        // Signed address records: the bind-time RefreshLocalCandidates kick above publishes
-        // once the first candidate set exists; this loop keeps it fresh on a jittered
-        // heartbeat with backoff. Publishing needs a listening node with an endpoint
-        // identity — a dial-only node has no address worth serving.
         if (_lookup.Count > 0 && _options.Listen && _endpointIdentity is not null)
         {
             _publishLoop = PublishLoopAsync(_shutdown.Token);
         }
 
-        // Router port mapping (UPnP/PMP/PCP): entirely background, entirely best-effort.
-        // A loopback bind can never be reached through a router, so it skips the chatter.
         bool bindIsLoopback = _options.Bind is { } bound
             && (bound.Address.Equals(IPAddress.Loopback) || bound.Address.Equals(IPAddress.IPv6Loopback));
         if (_options.EnablePortMapping && !bindIsLoopback)
@@ -461,7 +395,6 @@ internal sealed partial class NodeEngine : IDisposable
         Volatile.Write(ref _ipv6NetworkChanged, 1);
         Volatile.Write(ref _interfaceNetworkChanged, 1);
 
-        // Interface churn fires several events per roam; collapse them into one recovery pass.
         _ = Task.Run(async () =>
         {
             try
@@ -477,8 +410,6 @@ internal sealed partial class NodeEngine : IDisposable
 
     private IUdpSocket CreateSocket(IPEndPoint? bind) =>
         _options.UdpSocketFactory is { } build ? build(bind) : SystemUdpSocket.Create(bind);
-
-    // ------------------------------------------------------------------ local candidates
 
     public IReadOnlyList<PinholeCandidate> LocalCandidatesSnapshot()
     {
@@ -545,7 +476,7 @@ internal sealed partial class NodeEngine : IDisposable
     {
         if (_disposed) return;
         PublishAddressRecordSoon();
-        ReannounceAndRepunch(); // a new permission may make an already advertised host reachable
+        ReannounceAndRepunch();
     }
 
     public NatHint ObservedNatHint
@@ -567,9 +498,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (_disposed) return;
         lock (_gate)
         {
-            // Publication is serialized outside the lease lock. Re-read the desired
-            // state after taking the node lock so a delayed notification cannot restore
-            // an expired or invalidated endpoint.
+
             mapped = (tcp ? _tcpPortMap : _portMap)?.Current;
             if (tcp) _mappedTcpEndpoint = mapped; else _mappedEndpoint = mapped;
             RefreshLocalCandidatesNoLock();
@@ -580,7 +509,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             if (c.State != PinholeConnectionState.Closed)
             {
-                AnnounceTo(c); // withdrawal is just as important as an added candidate
+                AnnounceTo(c);
             }
         }
     }
@@ -594,9 +523,6 @@ internal sealed partial class NodeEngine : IDisposable
 
         RefreshIPv6Firewall();
 
-        // Every path that changes reachability funnels through here — bind, rebind, STUN
-        // mapping moves, router port-mapping changes — so this is the one hook that
-        // republishes the signed address record after a roam or restart.
         PublishAddressRecordSoon();
     }
 
@@ -626,16 +552,11 @@ internal sealed partial class NodeEngine : IDisposable
                     _localCandidates.Add(new(CandidateKind.Reflexive, external));
         }
 
-        // A router-granted mapping is advertised as a reflexive candidate: it is an address
-        // the world can use to reach this socket, exactly like a STUN observation, and the
-        // peer needs no new wire semantics to punch it.
         if (_mappedEndpoint is { } mapped && !_localCandidates.Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(mapped)))
         {
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, mapped));
         }
 
-        // Keep the existing candidate-origin schema. New peers negotiate a framed TCP
-        // sidecar at host/reflexive tuples; old peers can still try UDP and then fallback.
         if (_mappedTcpEndpoint is { } tcpMapped && !_localCandidates.Any(c => c.Kind == CandidateKind.Reflexive && c.Address.Equals(tcpMapped)))
             _localCandidates.Add(new PinholeCandidate(CandidateKind.Reflexive, tcpMapped));
 
@@ -676,12 +597,7 @@ internal sealed partial class NodeEngine : IDisposable
     {
         var seen = new HashSet<IPAddress>();
         var list = new List<IPEndPoint>();
-        // Link-locals are collected separately and appended last when enabled:
-        // they are a fallback for access networks that isolate IPv4 between wireless and
-        // wired clients but bridge IPv6. Only radio/ethernet links qualify (tunnels and
-        // bridges on macOS/Windows would flood the candidate list), at most two ride along,
-        // wireless first. Scope stays local — peers re-scope onto their own outgoing
-        // interface when sending, so the address rides the wire bare.
+
         var linkLocal = new List<(int Rank, IPEndPoint EndPoint)>();
         try
         {
@@ -740,8 +656,6 @@ internal sealed partial class NodeEngine : IDisposable
         return list;
     }
 
-    // ------------------------------------------------------------------ STUN
-
     public Task<IPEndPoint> ProbeStunAsync(IPEndPoint server, CancellationToken ct = default) => ProbeStunFromAsync(_udp, server, ct);
 
     internal async Task<IPEndPoint> ProbeStunFromAsync(IUdpSocket source, IPEndPoint server, CancellationToken ct) =>
@@ -762,16 +676,10 @@ internal sealed partial class NodeEngine : IDisposable
         try
         {
             TrackPredictionContact(source, server);
-            // Two expiry sources on one WaitAsync race each other: on a stalled runner both
-            // fire before either is observed and the timeout can mask the caller's token.
-            // The probe's own deadline is a linked source instead, translated back — so an
-            // externally canceled probe always surfaces as cancellation, never as timeout.
+
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
             deadline.CancelAfter(ProbeTimeout);
-            // UDP binding transactions retransmit the same bytes at doubling intervals
-            // inside the one deadline (RFC 8489 pacing): a datagram lost in either
-            // direction — or a reply stranded behind a stalled pump — costs one
-            // interval, not the entire classification attempt.
+
             TimeSpan interval = TimeSpan.FromMilliseconds(500);
             while (true)
             {
@@ -891,8 +799,6 @@ internal sealed partial class NodeEngine : IDisposable
             pending.Reply.TrySetResult(reply!);
     }
 
-    // ------------------------------------------------------------------ relays
-
     private IrohRelay? IrohRelayFor(Uri url)
     {
         if (_endpointIdentity is null || _disposed) return null;
@@ -991,7 +897,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             catch (Exception)
             {
-                // A throwing state-change handler must not stop the shared relay or its other peers.
+
             }
         }
     }
@@ -1003,7 +909,7 @@ internal sealed partial class NodeEngine : IDisposable
             if (!_disposed)
             {
                 try { _rawReceive(IrohPath.Relay(relay.Url, Convert.ToHexString(source).ToLowerInvariant()), frame); }
-                catch (FormatException) { } // invalid relay source keys cost only that datagram
+                catch (FormatException) { }
             }
             return;
         }
@@ -1016,9 +922,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         else
         {
-            // DERP authenticates the X25519 session identity, whereas iroh authenticates
-            // the Ed25519 endpoint ID. Bind every DERP source to the handshake's static
-            // key; an unrelated authenticated relay client cannot spoof a peer ID.
+
             ReadOnlySpan<byte> staticKey;
             if (frame[0] == (byte)FrameType.Punc
                 && (frame.Length == HeaderSize + CryptoWire.PuncCryptoBody
@@ -1040,7 +944,7 @@ internal sealed partial class NodeEngine : IDisposable
         try { Dispatch(frame, new Arrival(relay, source)); }
         catch (Exception)
         {
-            // Match the UDP receive loop: one malformed frame or throwing handler costs one datagram.
+
         }
     }
 
@@ -1053,9 +957,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    // Relay client access MUST go through materialized snapshots: an iterator holding
-    // _gate across a yield would keep the lock alive over the caller's awaits (permission
-    // round trips), deadlocking the TurnClient receive thread that needs _gate to dispatch.
     private List<TurnClient> AliveRelayClients()
     {
         lock (_gate)
@@ -1149,10 +1050,6 @@ internal sealed partial class NodeEngine : IDisposable
                 slot.Backoff = RelayRetryBackoff;
             }
 
-            // Receive-side bootstrap: TURN only delivers from permitted source IPs.
-            // Providers such as Cloudflare allocate a data address distinct from their
-            // anycast control address. Permit our allocation's data IP too, so a stranger
-            // on that shared data IP can introduce itself before announcing its candidates.
             IEnumerable<IPAddress> bootstrap = (_options.Relays ?? _options.ResolvedRelays)
                 .Select(r => r.Server.Address).Append(slot.Config.Server.Address);
             if (client.RelayedAddress is { } relayed) bootstrap = bootstrap.Append(relayed.Address);
@@ -1169,10 +1066,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception)
         {
-            // Servers see every client at once when an allocation expires or a relay restarts;
-            // jitter spreads that herd without meaningfully delaying anyone. Each further
-            // failure doubles the wait up to RelayMaxBackoff — a down or rate-limiting relay
-            // costs one datagram per ladder step, never a reconnect storm.
+
             lock (_gate)
             {
                 slot.NextRetry = DateTimeOffset.UtcNow + Jitter(slot.Backoff);
@@ -1181,9 +1075,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         finally
         {
-            // Ownership transfer: the client this slot no longer references — the dead one
-            // from a lost allocation, or a live one this re-allocation replaced — must not
-            // keep a refresh loop and a Received subscription alive (A-06).
+
             if (retired is not null)
             {
                 retired.Received -= HandleRelayData;
@@ -1193,7 +1085,7 @@ internal sealed partial class NodeEngine : IDisposable
     }
 
     private static TimeSpan Jitter(TimeSpan delay) =>
-        delay * (1 + (RandomNumberGenerator.GetInt32(0, 41) - 20) / 100.0); // ±20%
+        delay * (1 + (RandomNumberGenerator.GetInt32(0, 41) - 20) / 100.0);
 
     private async Task PermitCatalogRelaysAsync(CancellationToken ct)
     {
@@ -1242,8 +1134,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void HandleRelayData(IPEndPoint from, byte[] data)
     {
-        // Length gate only: TurnClient already guards its handlers, and Dispatch's own
-        // guarantees make a malformed frame cost nothing.
+
         if (data.Length < HeaderSize)
         {
             return;
@@ -1251,8 +1142,6 @@ internal sealed partial class NodeEngine : IDisposable
 
         Dispatch(data, new Arrival(from));
     }
-
-    // ------------------------------------------------------------------ connections
 
     public ConnState? Lookup(ulong peerId)
     {
@@ -1271,8 +1160,6 @@ internal sealed partial class NodeEngine : IDisposable
             return _conns.TryGetValue(peerId, out ConnState? c) ? c.PeerCandidates.ToArray() : [];
         }
     }
-
-    // ------------------------------------------------------------------ signed address records
 
     private async Task PublishLoopAsync(CancellationToken ct)
     {
@@ -1310,7 +1197,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (Interlocked.Exchange(ref _publishing, 1) != 0)
         {
-            return true; // a publish in flight counts as alive
+            return true;
         }
 
         try
@@ -1353,7 +1240,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             try
             {
-                await Task.Delay(250, _shutdown.Token).ConfigureAwait(false); // collapse event bursts
+                await Task.Delay(250, _shutdown.Token).ConfigureAwait(false);
                 await PublishAddressRecordAsync(_shutdown.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -1361,7 +1248,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException or TimeoutException)
             {
-                // Publishing is best-effort; the heartbeat loop retries with backoff.
+
             }
             finally
             {
@@ -1388,9 +1275,6 @@ internal sealed partial class NodeEngine : IDisposable
             }
         }
 
-        // Relayed addresses go in as bare endpoints — the address a peer's own allocation
-        // on the same server may send at. Credentials never do: a record is public, and a
-        // resolver only adopts relayed endpoints on servers it is itself configured to use.
         foreach (TurnClient client in AliveRelayClients())
         {
             if (client.RelayedAddress is { } address && seen.Add(address) && relayed.Count < AddressRecord.MaxRelayedEndpoints)
@@ -1424,7 +1308,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return false; // one dead provider never blocks the others or the caller
+            return false;
         }
     }
 
@@ -1463,7 +1347,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null; // providers are availability dependencies, never error paths
+            return null;
         }
     }
 
@@ -1510,9 +1394,6 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                 }
 
-                // Relayed endpoints are adopted only where we run an allocation ourselves
-                // (matched by server IP): our own credentials for that server apply, and
-                // sending at the peer's relayed address through it needs nothing else.
                 foreach (IPEndPoint relayed in record.RelayedEndpoints)
                 {
                     TurnServerConfig? config = (_options.Relays ?? _options.ResolvedRelays)
@@ -1547,10 +1428,7 @@ internal sealed partial class NodeEngine : IDisposable
             SymmetricHint = cs.NatHint == NatHint.Symmetric,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly
                 && cs.Candidates.Any(candidate => candidate.Kind is CandidateKind.Relay or CandidateKind.IrohRelay or CandidateKind.DerpRelay),
-            // Crypto is attempted exactly when the string vouches for a static key: a v2
-            // string's publisher speaks the handshake, a v1 string's does not, so nothing is
-            // negotiated on the wire — no downgrade window exists to strip. A v4 string's
-            // knock rides along as the dial-side PSK and the mac1 key derivation input.
+
             PinnedStaticKey = _identity is not null && cs.StaticKey is not null ? cs.StaticKey : null,
             PinnedEndpointKey = cs.EndpointKey,
             PinnedKnock = cs.Knock,
@@ -1565,13 +1443,11 @@ internal sealed partial class NodeEngine : IDisposable
         c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
         SetPuncFrame(c);
         c.Public = new PinholeConnection(this, c);
-        // Before publication: no other thread can see c through the table, so seeding the
-        // peer candidates needs no lock.
+
         c.PeerCandidates.AddRange(cs.Candidates);
 
         if (_disposed) throw new ObjectDisposedException(nameof(PinholeNode));
-        // Atomic check-and-insert: two concurrent dials at the same target must share one
-        // connection, not silently overwrite each other's entry.
+
         while (true)
         {
             if (_conns.TryGetValue(cs.PeerId, out ConnState? existing))
@@ -1582,14 +1458,12 @@ internal sealed partial class NodeEngine : IDisposable
                     lock (existing.Gate)
                     {
                         if (existing.State is PinholeConnectionState.Dead or PinholeConnectionState.Closed) continue;
-                        // Idempotence cannot bypass the key supplied by this caller. An
-                        // incoming connection may not yet have a ticket pin of its own.
+
                         byte[]? knownStatic = existing.Crypto?.PeerStaticPublic ?? existing.PinnedStaticKey;
                         if (cs.StaticKey is { } requestedStatic
                             && (existing.Crypto is null || knownStatic is not null && !knownStatic.AsSpan().SequenceEqual(requestedStatic)))
                         {
-                            // An unproved stranger cannot reserve the requested peer ID
-                            // and prevent the caller from making a pinned dial.
+
                             if (existing.IsIncoming && !existing.Handshake.RemoteTokenAuthenticated && !existing.Connected.Task.IsCompleted)
                             {
                                 if (_conns.TryRemove(new KeyValuePair<ulong, ConnState>(cs.PeerId, existing)))
@@ -1617,9 +1491,7 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                     if (armIncoming)
                     {
-                        // A late PUNC can create a candidate-less incoming husk just
-                        // before the dial. Reuse its handshake for simultaneous dials,
-                        // but give it the ticket's targets, pin, lookup and punch work.
+
                         lock (_gate)
                             foreach (PinholeCandidate candidate in cs.Candidates)
                                 if (existing.PeerCandidates.Count < ConnectionString.MaxCandidates
@@ -1630,11 +1502,9 @@ internal sealed partial class NodeEngine : IDisposable
                         if (_lookup.Count > 0 && cs.EndpointKey is { } endpoint) _ = ResolveViaLookupAsync(existing, endpoint, ct);
                         KickPunch(existing);
                     }
-                    return existing; // idempotent dials (and in-flight dials) return the live connection
+                    return existing;
                 }
 
-                // A dead husk from an earlier attempt: remove it (only if still that husk)
-                // and loop to install ours — losing a race simply retries.
                 if (!_conns.TryRemove(new KeyValuePair<ulong, ConnState>(cs.PeerId, existing)))
                 {
                     continue;
@@ -1652,14 +1522,10 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (cs.Candidates.Any(x => x.Kind == CandidateKind.Relay))
         {
-            // Relay candidates need our own allocation to send through, and the peer's
-            // allocation needs a permission for our relay server's IP before it delivers.
+
             _ = WarmRelayForDialAsync(cs, ct);
         }
 
-        // A v3 ticket pins the peer's endpoint key, so its candidates can be rediscovered:
-        // race the lookup providers alongside the punch for the peer's current record. v1/v2
-        // tickets pin nothing, so nothing a provider says about them is adoptable.
         if (_lookup.Count > 0 && cs.EndpointKey is { } pinnedKey)
         {
             _ = ResolveViaLookupAsync(c, pinnedKey, ct);
@@ -1689,15 +1555,13 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {
-            // Warming is best-effort: the dial proceeds on whatever paths it can reach.
+
         }
     }
 
     private ConnState? CreateIncoming(ulong peerId, uint token, in Arrival arrival, bool cryptoHandshake)
     {
-        // Check before allocating stranger state and again after insertion. Outgoing
-        // dials and TCP receive workers can race for the remaining slots; the insertion
-        // that loses that race gives way instead of leaving excess stranger state.
+
         if (_conns.Count >= _maxConns)
         {
             return null;
@@ -1709,20 +1573,19 @@ internal sealed partial class NodeEngine : IDisposable
             Token = BinaryPrimitives.ReadUInt32LittleEndian(RandomNumberGenerator.GetBytes(4)),
             IsIncoming = true,
             AwaitInitialCandidateExchange = _options.RelaySignalingOnly && arrival.ViaRelay,
-            // Answering under the engine's own knock: the dialer holds it from this
-            // node's string, so both sides of the session mix the same PSK.
+
             Crypto = cryptoHandshake && _identity is not null ? ConnectionCrypto.New(_identity, _peerId, peerId, _knock) : null,
         };
         c.Punch = PunchState.Create((long)_options.ConnectTimeout.TotalMilliseconds);
         c.Handshake = HandshakeState.Create(c.Token, c.Crypto is not null);
-        c.Handshake.RemoteToken = token; // born from this PUNC: its token is the known peer token
+        c.Handshake.RemoteToken = token;
         c.Handshake.RemoteTokenKnown = true;
         c.Buffer = CreateBuffer();
         c.Pmtu = NewPmtuState();
         c.Keepalive = NewKeepaliveState();
         SetPuncFrame(c);
         c.Public = new PinholeConnection(this, c);
-        // Two PUNCs raced: the first entry wins, the second becomes nothing.
+
         if (!_conns.TryAdd(peerId, c))
         {
             return _conns.TryGetValue(peerId, out ConnState? first) ? first : null;
@@ -1730,7 +1593,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (_conns.Count > _maxConns)
         {
-            // A concurrent dial won the race to the last slot; the stranger gives way.
+
             _conns.TryRemove(new KeyValuePair<ulong, ConnState>(peerId, c));
             return null;
         }
@@ -1746,9 +1609,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (arrival.Tcp is null && c.Crypto is null && !_options.RelaySignalingOnly)
         {
-            // DirectPathConfirmed/RelayPathConfirmed above usually queued this stranger
-            // already (setting Connected); queueing it again would hand AcceptAsync the
-            // same connection twice and spawn two serving workers on one connection.
+
             if (!c.IncomingQueued)
             {
                 c.IncomingQueued = true;
@@ -1761,8 +1622,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void RememberClosedHandshake(ConnState c)
     {
-        // Record before removal: a delayed retry must not recreate the just-closed
-        // session in the gap between table retirement and writing its tombstone.
+
         ClosedHandshake closed;
         lock (c.Gate)
             closed = new(LiveHandshakeSummary(c) + $" final={c.State}", c.Handshake.RemoteToken,
@@ -1779,8 +1639,7 @@ internal sealed partial class NodeEngine : IDisposable
     public async Task CloseAsync(ConnState c)
     {
         RememberClosedHandshake(c);
-        // Identity check: a concurrent re-dial may have replaced this entry, and the
-        // loser's close must not tear down the winner's live connection.
+
         _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
 
         Span<byte> bye = stackalloc byte[HeaderSize + CryptoWire.TokenLength + CryptoWire.SealedOverhead];
@@ -1831,15 +1690,12 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------ punch
-
     public void KickPunch(ConnState c)
     {
         lock (c.Gate)
         {
             c.LastKickTicks = Environment.TickCount64;
-            // A fresh generation is a fresh run: the scheduler's per-run counters
-            // (upgrade budget, trickle clock) restart with it.
+
             PunchInput kick = default;
             kick.Kind = PunchInputKind.Kick;
             PunchSchedulerMachine.Step(ref c.Punch, in kick, new Tick(c.LastKickTicks), Span<Effect>.Empty);
@@ -1852,8 +1708,7 @@ internal sealed partial class NodeEngine : IDisposable
     private async Task PunchLoop(ConnState c, int gen)
     {
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token, c.Dead.Token);
-        // One buffer per loop run: the machine's decisions are read out fully before
-        // every await, but a span cannot be declared across one.
+
         Effect[] effects = new Effect[8];
         try
         {
@@ -1863,13 +1718,6 @@ internal sealed partial class NodeEngine : IDisposable
                 MaybeStartPortPrediction(c);
                 PinholeConnectionState state = c.State;
 
-                // Handshake v4 fallback, the blob layer's discipline: a v4 dialer that has
-                // sent PUNCs and heard no handshake frame back for the fallback window
-                // assumes a v3-only responder silently dropping the unknown shape, and
-                // downgrades to the unversioned frame. Exactly once per connection — the
-                // latch persists, like BlobNegotiation's v4→v3 fallback. A knock string
-                // never downgrades: its responder is knock-configured by construction and
-                // ignores unversioned PUNCs, so v3 retries can only waste the window.
                 if (c.PuncFrameV4 && !c.PuncFrameDowngraded && c.PinnedKnock is null
                     && state == PinholeConnectionState.Punching)
                 {
@@ -1937,16 +1785,13 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (condemned)
                 {
-                    // Monotonic clock on purpose: after a suspend/wake the wall clock jumps
-                    // forward by the sleep, and a UtcNow comparison would condemn the
-                    // punch before a single post-wake probe could answer.
+
                     lock (c.Gate)
                     {
                         Transition(c, PinholeConnectionState.Dead);
                         c.DeadSinceTicks = now;
                     }
                 }
-
 
                 if (endLoop)
                 {
@@ -1959,20 +1804,14 @@ internal sealed partial class NodeEngine : IDisposable
                     candidates = c.PeerCandidates.ToArray();
                     if (lookup && c.PinnedEndpointKey is { } pinned && _lookup.Count > 0)
                     {
-                        // A stuck punch whose ticket pins an endpoint key asks the lookup
-                        // providers where the peer is NOW. The cadence must subdivide a
-                        // connection deadline: at one probe per deadline a single lost UDP
-                        // reply (or a slow provider under load) starves the dial — the retry
-                        // would land after ConnectTimeout has already condemned it. This is
-                        // also the only retry that keeps firing once the session has fallen to
-                        // Punching (NotifyPathSuspect no longer runs there).
+
                         _ = ResolveViaLookupAsync(c, pinned, stop.Token);
                     }
                 }
 
                 if (announce)
                 {
-                    AnnounceTo(c); // retry control exchange without resetting the initial dial budget
+                    AnnounceTo(c);
                 }
 
                 foreach (PinholeCandidate candidate in candidates)
@@ -1997,8 +1836,6 @@ internal sealed partial class NodeEngine : IDisposable
                             continue;
                         }
 
-                        // Give ordinary routes (especially same-machine loopback) time to win
-                        // before probing LAN-only fallbacks. Once Open, this loop stops.
                         if (candidate.Address.Address.IsIPv6LinkLocal && !punchLinkLocal)
                         {
                             continue;
@@ -2027,8 +1864,7 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                     {
-                        // One unroutable candidate (or a brief interface flap) must not kill
-                        // the punch; the pacing delay below bounds retries.
+
                     }
                 }
 
@@ -2037,9 +1873,6 @@ internal sealed partial class NodeEngine : IDisposable
                     _ = TryTcpPathsAsync(c, candidates, stop.Token);
                 }
 
-                // Pace, not catch-up: the delay is the full interval the machine armed,
-                // measured from this tick's start — an iteration that ran long must not
-                // collapse the next delay toward zero and turn pacing into a flood.
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, wakeAt - now)), stop.Token).ConfigureAwait(false);
             }
         }
@@ -2051,12 +1884,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
 
     }
-
-    // ------------------------------------------------------------------ path validation
-
-    // Probe timestamp markers (path probes the sign bit, PMTUD probes bit 62) live in the
-    // machines; caller pings keep their plain TickCount64 so RTT stats and monitoring
-    // counters never mix.
 
     private async Task MaintenanceLoopAsync(CancellationToken ct)
     {
@@ -2084,10 +1911,6 @@ internal sealed partial class NodeEngine : IDisposable
                 _ = RefreshReflexiveAsync(ct);
             }
 
-            // An idle node must still heal its own relay fleet: a dead or refused TURN slot
-            // retries on the slot's backoff ladder (via EnsureRelaysAsync's NextRetry check),
-            // checked here once per RelayRetryBackoff. Without this, a relay that died while
-            // nobody was dialing would stay dead until the next dial.
             if (Environment.TickCount64 >= Volatile.Read(ref _nextRelayEnsureTicks))
             {
                 Volatile.Write(ref _nextRelayEnsureTicks, Environment.TickCount64 + (long)RelayRetryBackoff.TotalMilliseconds);
@@ -2114,10 +1937,6 @@ internal sealed partial class NodeEngine : IDisposable
             _tcpPortMap?.Tick(Environment.TickCount64);
             _interfaceUdp?.Tick(Environment.TickCount64);
 
-            // Stranger-flood lockout (A-01): husks that never completed a handshake and
-            // have gone a full ConnectTimeout without progress must leave the table, or a
-            // junk-peer flood permanently fills the cap and every legitimate inbound
-            // stranger is refused until restart.
             if (Environment.TickCount64 >= Volatile.Read(ref _nextHuskReapTicks))
             {
                 Volatile.Write(ref _nextHuskReapTicks, Environment.TickCount64 + HuskReapIntervalMs);
@@ -2160,17 +1979,11 @@ internal sealed partial class NodeEngine : IDisposable
 
         try
         {
-            // Two servers can observe the same mapping (one NAT, same public port): dedupe
-            // before comparing or every refresh would look like a change.
+
             IPEndPoint[] perServer = await ProbeStunObservedAsync(ct).ConfigureAwait(false);
             if (perServer.Length == 0)
             {
-                // Every configured STUN server went silent while at least one used to
-                // answer: this is the bounded periodic revalidation for platforms whose
-                // network-change notifications are absent or delayed. The mapping-change
-                // logic below cannot fire from zero observations, so a network that went
-                // away entirely would otherwise stay unnoticed until a dial fails.
-                // RecoverAsync probes, rebinds only on confirmed silence, and debounces.
+
                 if (_reflexive.Count > 0)
                 {
                     _ = Task.Run(async () =>
@@ -2200,7 +2013,7 @@ internal sealed partial class NodeEngine : IDisposable
                 {
                     _reflexive.Clear();
                     _reflexive.AddRange(observed);
-                    RefreshLocalCandidatesNoLock(); // same critical section: no torn state between the two views
+                    RefreshLocalCandidatesNoLock();
                 }
             }
 
@@ -2213,7 +2026,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (c.State != PinholeConnectionState.Closed)
                 {
-                    AnnounceTo(c); // gentle: the peer keeps its working path and only learns our new candidates
+                    AnnounceTo(c);
                 }
             }
         }
@@ -2250,14 +2063,14 @@ internal sealed partial class NodeEngine : IDisposable
             long lastRx = Volatile.Read(ref c.LastDirectRxTicks);
             if (lastRx > 0 && now - lastRx < _options.PathValidationIdle.TotalMilliseconds)
             {
-                ResetPathProbesNoLock(c); // live traffic; any half-finished probe sequence is forgotten
+                ResetPathProbesNoLock(c);
                 return;
             }
 
             KeepaliveInput input = default;
             input.Kind = KeepaliveInputKind.ProbeTick;
-            input.PathEligible = true;  // state/path/remote eligibility is verified above
-            input.RecentActivity = false; // the idle window check above already ran
+            input.PathEligible = true;
+            input.RecentActivity = false;
             input.Path = EffectPath.Direct;
             int n = KeepaliveMachine.Step(ref c.Keepalive, in input, new Tick(now), effects);
             for (int i = 0; i < n; i++)
@@ -2279,7 +2092,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (suspect)
         {
-            NotifyPathSuspect(c); // outside the gate: it takes c.Gate itself
+            NotifyPathSuspect(c);
             return;
         }
 
@@ -2305,14 +2118,14 @@ internal sealed partial class NodeEngine : IDisposable
             long lastRx = Volatile.Read(ref c.LastRelayRxTicks);
             if (lastRx > 0 && now - lastRx < _options.PathValidationIdle.TotalMilliseconds)
             {
-                ResetPathProbesNoLock(c); // live relay traffic; any half-finished probe sequence is forgotten
+                ResetPathProbesNoLock(c);
                 return;
             }
 
             KeepaliveInput input = default;
             input.Kind = KeepaliveInputKind.ProbeTick;
-            input.PathEligible = true;  // degraded/relay/ready eligibility is verified above
-            input.RecentActivity = false; // the idle window check above already ran
+            input.PathEligible = true;
+            input.RecentActivity = false;
             input.Path = EffectPath.Relay;
             int n = KeepaliveMachine.Step(ref c.Keepalive, in input, new Tick(now), effects);
             for (int i = 0; i < n; i++)
@@ -2330,22 +2143,19 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (suspect)
         {
-            // The condemned relay leg loses its ready mark BEFORE NotifyPathSuspect: a
-            // stale RelayReady would keep the session Degraded forever, sending into a
-            // relay that no longer owns the peer's address. Unready, the next arrival
-            // from one of the peer's live legs re-adopts through RelayPathConfirmed.
+
             lock (c.Gate)
             {
                 c.RelayReady = false;
             }
 
-            NotifyPathSuspect(c); // outside the gate: it takes c.Gate itself
+            NotifyPathSuspect(c);
             return;
         }
 
         if (probe)
         {
-            PingUncounted(c); // RouteFrame sends degraded traffic via the relay leg
+            PingUncounted(c);
         }
     }
 
@@ -2372,8 +2182,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
-            // An unsendable probe simply goes unanswered; the timeout accounting above
-            // handles it. Real send failures are surfaced by Send with its own trigger.
+
         }
     }
 
@@ -2395,8 +2204,6 @@ internal sealed partial class NodeEngine : IDisposable
             Ping(c);
         }
     }
-
-    // ------------------------------------------------------------------ path MTU discovery
 
     private void DiscoverPathMtu(ConnState c)
     {
@@ -2440,7 +2247,7 @@ internal sealed partial class NodeEngine : IDisposable
     private void SendPmtuProbe(ConnState c, SocketAddress target, long nonce, int size)
     {
         Span<byte> body = stackalloc byte[size - PmtuOverhead];
-        BinaryPrimitives.WriteInt64LittleEndian(body, nonce); // the padding behind it stays zero
+        BinaryPrimitives.WriteInt64LittleEndian(body, nonce);
         Span<byte> frame = stackalloc byte[size];
         int len = BuildFrame(c, FrameType.Ping, body, frame);
         try
@@ -2450,7 +2257,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
-            // An unsendable probe just goes unanswered; the attempt accounting handles it.
+
         }
     }
 
@@ -2466,21 +2273,16 @@ internal sealed partial class NodeEngine : IDisposable
             return false;
         }
 
-        // Vectorized over the public buffer: a per-byte indexer loop here was the top
-        // managed cost on the receive thread once the allocation fix landed.
         return left.Buffer.Span[..left.Size].SequenceEqual(right.Buffer.Span[..right.Size]);
     }
 
-    // ------------------------------------------------------------------ sending
-
     public void Send(ConnState c, ReadOnlySpan<byte> payload)
     {
-        ArgumentOutOfRangeException.ThrowIfZero(payload.Length); // a zero-length Data frame is undeliverable by definition
+        ArgumentOutOfRangeException.ThrowIfZero(payload.Length);
         int ceiling;
         lock (c.Gate)
         {
-            // PMTUD may have proven the path can carry more than the API floor; it can never
-            // prove less — 1200 bytes are guaranteed from the moment the session opens.
+
             ceiling = c.Pmtu.Wire > 0 ? c.Pmtu.Wire - PmtuOverhead : MaxPayload;
         }
         ArgumentOutOfRangeException.ThrowIfGreaterThan(payload.Length, ceiling);
@@ -2546,7 +2348,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
-            return false; // a probe that cannot leave simply goes unanswered
+            return false;
         }
 
         return true;
@@ -2581,19 +2383,18 @@ internal sealed partial class NodeEngine : IDisposable
     private void SendToWire(IPEndPoint ep, ReadOnlySpan<byte> frame)
     {
         if (!_options.EnableDirectUdp) throw new SocketException((int)SocketError.NetworkUnreachable);
-        // Volatile read, no lock: this runs once per sent frame, and the rebind that swaps
-        // the socket is rare enough to pay for itself with a caught send error.
+
         if (ep.Address.IsIPv6LinkLocal && ep.Address.ScopeId == 0)
         {
             foreach (IPEndPoint scoped in ScopeLinkLocal(ep, LinkLocalSendScopes()))
             {
                 try { _udp.SendTo(frame, ToWire(scoped)); }
-                catch (SocketException) { } // one down link must not suppress the other LAN scopes
+                catch (SocketException) { }
             }
             return;
         }
         try { _udp.SendTo(frame, ToWire(ep)); }
-        finally { _interfaceUdp?.SendCandidates(frame, ep); } // a failed default route cannot suppress other interfaces
+        finally { _interfaceUdp?.SendCandidates(frame, ep); }
     }
 
     private void SendToWire(SocketAddress sa, ReadOnlySpan<byte> frame)
@@ -2620,8 +2421,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (Lookup(id) is { Crypto: null }) { tcp.Dispose(); return; }
         if (tcp.AuthenticatedPeer != id && (FrameType)frame.Span[0] is not
             (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Ping or FrameType.Pong)) return;
-        // The TCP sidecar offers only authenticated sessions, even when the UDP node
-        // permits legacy plaintext. Never create a TCP stranger from a legacy probe.
+
         if (frame.Span[0] == (byte)FrameType.Punc
             && frame.Length != HeaderSize + CryptoWire.PuncCryptoBody
             && !(HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4)) { tcp.Dispose(); return; }
@@ -2657,12 +2457,9 @@ internal sealed partial class NodeEngine : IDisposable
         long lastAttempt = Volatile.Read(ref c.LastTcpAttempt);
         long lastLink = Volatile.Read(ref c.LastTcpLinkTicks);
         if (_tcp is not { } transport || c.Crypto is null || c.Dead.IsCancellationRequested
-            // A wholly failed batch only backs off briefly: dial budgets are seconds
-            // long, and one refused connect or slow greeting must not eat the whole
-            // budget (batches serialize via TcpDialing and the punch pace paces them).
+
             || lastAttempt != 0 && now - lastAttempt < 1_000
-            // A batch that established a link is still carrying the handshake; re-dialing
-            // sooner would only churn live links.
+
             || lastLink != 0 && now - lastLink < 5_000
             || Interlocked.CompareExchange(ref c.TcpDialing, 1, 0) != 0) return;
         try
@@ -2713,8 +2510,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static SocketAddress ToWire(IPEndPoint ep)
     {
-        // The socket is dual-mode IPv6: IPv4 targets must be v4-mapped or Windows sendto
-        // rejects the address family outright.
+
         if (ep.Address.AddressFamily == AddressFamily.InterNetwork)
         {
             ep = new IPEndPoint(ep.Address.MapToIPv6(), ep.Port);
@@ -2733,8 +2529,7 @@ internal sealed partial class NodeEngine : IDisposable
     {
         try
         {
-            // A scope identifies OUR interface. Try each LAN link instead of choosing the
-            // first one; mobile, virtual, and tunnel interfaces cannot reach this LAN peer.
+
             return NetworkInterface.GetAllNetworkInterfaces()
                 .Where(nic => nic.OperationalStatus == OperationalStatus.Up
                     && nic.NetworkInterfaceType is NetworkInterfaceType.Wireless80211 or NetworkInterfaceType.Ethernet)
@@ -2750,8 +2545,6 @@ internal sealed partial class NodeEngine : IDisposable
         return [];
     }
 
-    // ------------------------------------------------------------------ receive
-
     private void StartRecvLoop()
     {
         new Thread(RecvLoop) { IsBackground = true, Name = "pinhole-node-recv" }.Start();
@@ -2760,9 +2553,7 @@ internal sealed partial class NodeEngine : IDisposable
     private void RecvLoop()
     {
         byte[] buf = new byte[_rawReceive is null ? RecvBufferSize : 65535];
-        // One scratch address, reused for every receive: the recvmsg writes into it, the
-        // frame handlers only read it, and the engine clones it exactly when a connection
-        // adopts the endpoint as its own (a per-datagram copy was 8% of the receive thread).
+
         var remote = new SocketAddress(AddressFamily.InterNetworkV6);
         int addressCapacity = remote.Size;
         while (!_shutdown.IsCancellationRequested)
@@ -2771,8 +2562,7 @@ internal sealed partial class NodeEngine : IDisposable
             IUdpSocket receiving = _udp;
             try
             {
-                // BSD may return a native IPv4 sockaddr on a dual-mode socket. ReceiveFrom
-                // shrinks Size to that address; restore capacity before the next receive.
+
                 remote.Size = addressCapacity;
                 n = receiving.ReceiveFrom(buf, remote);
             }
@@ -2801,9 +2591,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (_rawReceive is not null)
             {
-                // Raw iroh packets can have any first byte, including Pinhole's frame tags.
-                // Consume only this engine's outstanding STUN responses; everything else
-                // belongs to the protocol above the raw transport.
+
                 bool stun = MatchingStun(buf, n, receiving, remote) is not null;
                 if (stun)
                 {
@@ -2814,8 +2602,7 @@ internal sealed partial class NodeEngine : IDisposable
                     try { _rawReceive(IrohPath.Direct(ToEndpoint(remote)), buf.AsMemory(0, n)); }
                     catch (Exception)
                     {
-                        // Match the session dispatcher: a bad address or throwing handler
-                        // must cost one datagram, never the shared receive thread.
+
                     }
                 }
             }
@@ -2828,7 +2615,7 @@ internal sealed partial class NodeEngine : IDisposable
                 }
                 catch (Exception)
                 {
-                    // A malformed frame or a throwing user handler must not deafen the socket.
+
                 }
             }
             else if (n >= 20 && BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)) == StunCookie)
@@ -2839,7 +2626,7 @@ internal sealed partial class NodeEngine : IDisposable
                 }
                 catch (Exception)
                 {
-                    // A malformed STUN response must cost its probe, never the receive loop.
+
                 }
             }
         }
@@ -2902,22 +2689,18 @@ internal sealed partial class NodeEngine : IDisposable
         if (c is not null && arrival.ViaRelay
             && c.RelayRemote?.Address.Equals(arrival.Relay?.Address) == true)
         {
-            // Relay-leg liveness clock — and only traffic from the leg we SEND on may wind
-            // it. With several relays, the peer keeps probing our other relayed addresses
-            // too; those cross-leg arrivals proved nothing about our current leg, and
-            // counting them kept dead legs looking alive (the liveness honest path below
-            // then never fired, and data kept black-holing into the dead server).
+
             Volatile.Write(ref c.LastRelayRxTicks, Environment.TickCount64);
         }
 
         if (c is { BlackholeDirect: true } && !arrival.ViaRelay)
         {
-            return; // test hook: the direct path to this peer is a black hole; relayed frames still pass
+            return;
         }
 
         if (c is { DropAboveBytes: > 0 } && frame.Length > c.DropAboveBytes)
         {
-            return; // test hook: a size-selective black hole — an over-MTU network, exactly
+            return;
         }
 
         if (TraceEnabled && (type is FrameType.Data or FrameType.Punc or FrameType.Pack))
@@ -2933,12 +2716,6 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // Exact-length stranger gate: the punch probe is either legacy (13 B) or carries
-            // the crypto handshake (77 B, or 94 B with the v4 mac1 extension, or 111 B
-            // with mac2 appended) — anything else is malformed. The encryption policy
-            // decides which kinds of strangers may materialize a connection at all, so a
-            // Required node never creates state for a plaintext scan, and no negotiation
-            // happens after creation — there is no downgrade window to strip.
             bool legacy = frame.Length == HeaderSize + CryptoWire.PuncLegacyBody;
             bool v4 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4;
             bool v4Mac2 = HandshakeV4Active && frame.Length == HeaderSize + CryptoWire.PuncCryptoBodyV4Mac2;
@@ -2948,12 +2725,6 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // Knock policy: a knock-configured responder answers string holders only.
-            // Unversioned PUNCs — legacy and crypto shapes alike — carry no mac1 to prove
-            // the knock, and the responder cannot tell an honest v3 dialer from a
-            // scanner, so both shapes are ignored before the encryption policy, the
-            // cookie gate, or any state. Not counted, not answered: the operator closed
-            // this node's v3 support window.
             if (_knock is not null && !v4 && !v4Mac2)
             {
                 return;
@@ -2965,10 +2736,6 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // The armor gate for strangers: an extension frame must prove mac1 (keyed with
-            // our own static public key — knock-keyed when a knock is configured — no
-            // lookup, no state) BEFORE any connection is created and before any key
-            // agreement could run. Failure is silence.
             if ((v4 || v4Mac2) && !CryptoWire.VerifyMac1(CryptoWire.Mac1View(frame), OwnMac1Key))
             {
                 Interlocked.Increment(ref _mac1Refused);
@@ -2976,11 +2743,6 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // The mac2/cookie gate for strangers, in the same pre-state position: when the
-            // source is under initiation load, a PUNC that cannot prove the cookie earns
-            // only a COOKIE reply — no husk, no PACK, no key agreement. The machine owns
-            // the identical decision wherever connection state exists (OnPunc); here
-            // there is no state yet, mirroring the stranger mac1 gate above.
             Span<byte> strangerSourceKey = stackalloc byte[MaxSocketAddressBytes];
             (bool strangerCookieRequired, bool strangerCookieOk) = CookieVerdict(
                 frame, v4Mac2, mac1Eligible: true, sessionCompleted: false, arrival,
@@ -3004,7 +2766,7 @@ internal sealed partial class NodeEngine : IDisposable
                 && frame.Slice(HeaderSize + CryptoWire.TokenLength, CryptoWire.EphemeralLength).SequenceEqual(ephemeral))
             {
                 Interlocked.Increment(ref StaleHandshakeDrops);
-                return; // retry of a key-confirmed handshake we closed; fresh keys still dial normally
+                return;
             }
 
             if (TraceEnabled)
@@ -3019,24 +2781,19 @@ internal sealed partial class NodeEngine : IDisposable
                 crypto);
             if (c is null)
             {
-                return; // connection table full: a stranger flood gets no more objects
+                return;
             }
 
-            c.StrangerAdmitted = true; // this frame already passed the cookie verdict above; OnPunc must not re-run it
+            c.StrangerAdmitted = true;
         }
 
-        // Cookie rides plaintext like the handshake frames it answers: the sealed-frame
-        // decrypt below must not claim it (its 21-byte body is not counter+tag+ciphertext).
         bool sealedFrame = type is not (FrameType.Punc or FrameType.Pack or FrameType.Hsck or FrameType.Cookie)
             && c.Crypto is not null;
         if (type is not (FrameType.Punc or FrameType.Pack or FrameType.Cookie) && !sealedFrame && !TokenOk(c, frame))
         {
-            return; // post-handshake frame without the connection token: spoofed, drop it
+            return;
         }
 
-        // Everything except the handshake frames is sealed once a session exists. The frame
-        // decrypts into thread-local scratch prefixed with the untouched header and token, so
-        // every handler below parses one layout regardless of the session's existence.
         int wireLength = frame.Length;
         if (sealedFrame && c.Crypto is { } cryptoState)
         {
@@ -3044,10 +2801,7 @@ internal sealed partial class NodeEngine : IDisposable
             int plainLen;
             lock (c.Gate)
             {
-                // Key confirmation and token confirmation are different facts: a PACK
-                // MAC covers the key transcript, while only a sealed frame binds its token.
-                // Open and confirmation share the handshake lock so a stale sealer cannot
-                // authenticate a frame and then confirm newly superseded keys.
+
                 if (!cryptoState.Established || frame.Length < HeaderSize + CryptoWire.TokenLength
                     || c.Handshake.RemoteTokenAuthenticated && !TokenOk(c, frame))
                 {
@@ -3058,7 +2812,7 @@ internal sealed partial class NodeEngine : IDisposable
                 frame[..(HeaderSize + CryptoWire.TokenLength)].CopyTo(scratch);
                 if (!cryptoState.Recv!.Open(frame, scratch.AsSpan(HeaderSize + CryptoWire.TokenLength), out plainLen))
                 {
-                    cryptoState.CountRejected(); // a failed tag changes no token or key state
+                    cryptoState.CountRejected();
                     return;
                 }
 
@@ -3103,8 +2857,7 @@ internal sealed partial class NodeEngine : IDisposable
                 break;
             case FrameType.Bye:
                 RememberClosedHandshake(c);
-                // Remove only this connection's entry: a Bye from a replaced husk must not
-                // tear down the re-dial winner registered under the same peer ID.
+
                 _conns.TryRemove(new KeyValuePair<ulong, ConnState>(c.PeerId, c));
                 Transition(c, PinholeConnectionState.Closed);
                 _tcp?.ClosePeer(c.PeerId, c.DirectTcp);
@@ -3122,19 +2875,6 @@ internal sealed partial class NodeEngine : IDisposable
             && frame.Length >= HeaderSize + 4
             && BinaryPrimitives.ReadUInt32LittleEndian(frame[HeaderSize..]) == c.Handshake.RemoteToken;
 
-    // The mac1 key is the answering node's static public key. When we dialed, that is the
-    // pinned key from the connection string; when we answer, it is our own. The own-key
-    // fallback also admits the crossed shape a simultaneous dial produces (each side's
-    // outgoing connection keying with its peer's pin) — both keys are public material, so
-    // widening to "either endpoint's key" still filters everything random. A mac2-carrying
-    // frame is read through its mac1 view, so the verdict never depends on mac2's presence.
-    //
-    // Under a knock, both keys become knock-keyed derivations: a string that carries a
-    // knock accepts ONLY its knock-keyed pin (the raw-pin form is a knock-less impostor),
-    // and the own-key fallback verifies under the own knock exactly when this engine is
-    // knock-configured — the crossed-dial peer dials us with our string, knock included.
-    // A knock-less engine dialing a knock-configured peer keeps the raw pin, and its own
-    // fallback stays raw: each side keys with the responder-of-the-string's material.
     private bool Mac1OkForConn(ConnState c, ReadOnlySpan<byte> frame)
     {
         ReadOnlySpan<byte> mac1Frame = CryptoWire.Mac1View(frame);
@@ -3156,10 +2896,6 @@ internal sealed partial class NodeEngine : IDisposable
         return CryptoWire.VerifyMac1(mac1Frame, OwnMac1Key);
     }
 
-    // The mac1 key this connection's outbound frames are keyed with (BuildPunc's half of
-    // Mac1OkForConn's verdict): the string's pin — knock-keyed when the string carried a
-    // knock — when we dialed, and our own static knock-keyed exactly when the engine is
-    // knock-configured, for the answer side and the adopted-incoming dial alike.
     private byte[] Mac1KeyFor(ConnState c)
     {
         if (c.PinnedStaticKey is { } pin)
@@ -3177,10 +2913,8 @@ internal sealed partial class NodeEngine : IDisposable
         return OwnMac1Key.ToArray();
     }
 
-    private const int MaxSocketAddressBytes = 32; // the IPv6 SocketAddress wire form tops out at 28
+    private const int MaxSocketAddressBytes = 32;
 
-    // The cookie binds to the source address exactly as the responder saw it — the
-    // SocketAddress wire bytes (family, port, address), no normalization.
     private static int WriteSourceKey(SocketAddress source, Span<byte> destination)
     {
         int size = Math.Min(source.Size, destination.Length);
@@ -3192,19 +2926,6 @@ internal sealed partial class NodeEngine : IDisposable
         return size;
     }
 
-    // The under-load verdict for one inbound PUNC. Counts it toward the source's and the
-    // global load windows — unless it already failed mac1 (those are refused for free and
-    // must not be able to arm the gate) or the session completed (a confirmed peer's
-    // retransmissions are not load: "completed" is the peer's confirm, HSCK or a sealed
-    // frame — key agreement alone happens at the FIRST PUNC and would stop the count far
-    // too early). Then reports (Required, Ok): Required = the source is under load,
-    // Ok = the frame's mac2 proved the cookie (vacuously true when not under load). The
-    // REPLY decision stays in HandshakeMachine (ReplyCookie) wherever connection state
-    // exists; the stranger gate in Dispatch acts on the same verdict before any state is
-    // created. Relay and TCP arrivals never count and never demand: their sources are
-    // authenticated by the transport (a relay datagram is bound to the sender's static
-    // key, a TCP peer completed a three-way handshake), and the cookie exists to price an
-    // address only the direct UDP path can spoof.
     private (bool Required, bool Ok) CookieVerdict(ReadOnlySpan<byte> frame, bool mac2Capable, bool mac1Eligible,
         bool sessionCompleted, in Arrival arrival, Span<byte> sourceKeyBuf, out int sourceKeyLength)
     {
@@ -3220,7 +2941,7 @@ internal sealed partial class NodeEngine : IDisposable
         ReadOnlySpan<byte> sourceKey = sourceKeyBuf[..sourceKeyLength];
         if (!armor.NotePuncAndCheckLoad(sourceKey, Environment.TickCount64))
         {
-            return (false, true); // the window is cold: mac2 is ignored, present or absent
+            return (false, true);
         }
 
         if (mac2Capable && armor.VerifyMac2(frame, sourceKey))
@@ -3232,8 +2953,6 @@ internal sealed partial class NodeEngine : IDisposable
         return (true, false);
     }
 
-    // The under-load answer instead of PACK: echo token, epoch tag, cookie value. No DH,
-    // no state, no path confirmation — the cheapest frame the engine can emit.
     private void SendCookieReply(uint echoToken, ReadOnlySpan<byte> sourceKey, in Arrival arrival)
     {
         Span<byte> cookie = stackalloc byte[CryptoWire.CookieFrameLength];
@@ -3244,9 +2963,6 @@ internal sealed partial class NodeEngine : IDisposable
         SendOnArrival(arrival, cookie);
     }
 
-    // One HandshakeMachine step, flattened: kind = the reject/progress Notify (0 when
-    // none), reply = the Transmit selection (-1 when none); returns the Close kind (0
-    // when the handshake did not fail).
     private static long StepHandshake(ref HandshakeState state, in HandshakeInput input, out long kind, out long reply)
     {
         Span<Effect> effects = stackalloc Effect[2];
@@ -3283,9 +2999,6 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
-        // Knock policy, conn'd form of the stranger gate: under a knock, unversioned
-        // PUNCs are ignored on an existing connection exactly as for strangers — an
-        // honest knock holder never sends them, and nobody else may connect at all.
         if (_knock is not null && !v4Punc && !v4PuncMac2)
         {
             return;
@@ -3300,18 +3013,9 @@ internal sealed partial class NodeEngine : IDisposable
         int puncSourceKeyLength = 0;
         lock (c.Gate)
         {
-            // The mac1 verdict is a pure keyed hash over the frame (the answering node's
-            // static key — the pin when we dialed, our own when we answer, with our own as
-            // the fallback so simultaneous-dial cross-conn frames still verify); the
-            // machine turns it into the silent gate before anything else runs.
+
             bool mac1Ok = !v4Punc && !v4PuncMac2 || Mac1OkForConn(c, frame);
 
-            // The shell's half of the mac2 gate: the load windows and the cookie verdict
-            // (sockets, clocks and the rotating secret live here, not in the machine).
-            // The husk-creating PUNC is the exception: Dispatch's stranger gate already
-            // counted and verified that very frame, so OnPunc admits it without re-running
-            // the verdict (windows count each PUNC once; CookieAccepted ticks once per
-            // accepted mac2, not twice).
             bool strangerAdmitted = c.StrangerAdmitted;
             c.StrangerAdmitted = false;
             (bool cookieRequired, bool cookieOk) = strangerAdmitted ? (false, true)
@@ -3320,8 +3024,6 @@ internal sealed partial class NodeEngine : IDisposable
                     sessionCompleted: c.Crypto is { PeerConfirmed: true }, arrival,
                     puncSourceKey, out puncSourceKeyLength);
 
-            // The pin verdict is a pure compare; key agreement is the one side effect
-            // the machine sequences around, so it runs between the two input kinds.
             bool pinMatches = true;
             if (cryptoPunc && c.PinnedStaticKey is { } pinned)
             {
@@ -3340,9 +3042,7 @@ internal sealed partial class NodeEngine : IDisposable
             StepHandshake(ref c.Handshake, in input, out long kind, out reply);
             if (kind == HandshakeMachine.RejectMac1)
             {
-                // Silence: no PACK, no announce, no state change, no key agreement — and
-                // not even a PuncsReceived tick, so forged frames cannot look like answers
-                // to the dialer-side fallback clock.
+
                 Interlocked.Increment(ref _mac1Refused);
                 Telemetry.FrameRejected("handshake", "mac1");
                 return;
@@ -3350,12 +3050,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (reply == HandshakeMachine.ReplyCookie)
             {
-                // Under load for this source with no valid mac2: a COOKIE frame and
-                // nothing else — no PACK, no state change, no key agreement, and no
-                // PuncsReceived tick (a COOKIE is not a handshake answer). With this
-                // reply the machine emits only the Transmit effect (kind stays 0), so
-                // no later branch inside this lock runs; the frame goes out below,
-                // outside the lock, like every other reply.
+
                 Interlocked.Increment(ref _cookieDemanded);
                 if (TraceEnabled)
                 {
@@ -3370,12 +3065,12 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 Reject(c, 5);
                 c.Crypto?.CountRejected();
-                return; // explicit-dial adoption can install a pin while frames arrive
+                return;
             }
             if (kind == HandshakeMachine.RejectPuncToken)
             {
                 Reject(c, 3, c.Handshake.RemoteToken, token, arrival);
-                return; // stale frames from an older connection to the same peer ID
+                return;
             }
             if (kind == HandshakeMachine.RejectMixedMode)
             {
@@ -3386,10 +3081,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (kind == HandshakeMachine.NeedKeys)
             {
-                // First-seen keys derive the session; a retried PUNC must repeat them exactly —
-                // different keys for the same token is a stale or substituted handshake.
-                // The counter brackets the agreement below: it can only move after the
-                // mac1 gate above, which is what the armor tests pin against floods.
+
                 Interlocked.Increment(ref _handshakeKeyAgreements);
                 ReadOnlySpan<byte> body = frame[(HeaderSize + CryptoWire.TokenLength)..];
                 bool accepted = c.Crypto!.TryPeerKeys(
@@ -3411,11 +3103,6 @@ internal sealed partial class NodeEngine : IDisposable
             crypto = c.Crypto;
         }
 
-        // The PACK doubles as the handshake's second flight. Crypto bodies answer crypto
-        // PUNCs deterministically — same keys, same confirm MAC, on every retransmission.
-        // The reply mirrors the inbound shape: a v4 PUNC (with or without mac2) earns a
-        // v4 PACK (mac1 keyed with our own static key), a v3 PUNC the v3 shape it can
-        // parse — the support window.
         if (reply == HandshakeMachine.ReplyCookie)
         {
             SendCookieReply(token, puncSourceKey[..puncSourceKeyLength], arrival);
@@ -3428,8 +3115,8 @@ internal sealed partial class NodeEngine : IDisposable
             int packLength = HeaderSize + CryptoWire.PackCryptoBody + (v4Reply ? CryptoWire.Mac1ExtLength : 0);
             Span<byte> pack = stackalloc byte[packLength];
             WriteHeader(pack, FrameType.Pack);
-            BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);         // echo: proof we saw the PUNC
-            BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token); // ours: so the dialer can authenticate us
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[HeaderSize..], token);
+            BinaryPrimitives.WriteUInt32LittleEndian(pack[(HeaderSize + 4)..], c.Token);
             crypto!.MyEphPublic.CopyTo(pack[(HeaderSize + 8)..]);
             crypto.MyStaticPublic.CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength)..]);
             crypto.MyConfirm().CopyTo(pack[(HeaderSize + 8 + CryptoWire.EphemeralLength + CryptoWire.StaticKeyLength)..]);
@@ -3478,7 +3165,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private void OnPack(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
-        // body = [echo of our PUNC token][the responder's own token] (+ keys and confirm in v2)
+
         if (frame.Length < HeaderSize + CryptoWire.PackLegacyBody)
         {
             Reject(c, 2);
@@ -3493,19 +3180,14 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (cryptoPack && c.Crypto is null)
         {
-            return; // we never offered crypto; a crypto PACK is bogus
+            return;
         }
 
         bool sendHsck = false;
         bool legacyLatched = false;
         lock (c.Gate)
         {
-            // Same gate as OnPunc, same position: the shell computes the keyed-MAC
-            // verdict, the machine refuses silently before the echo is even examined.
-            // A dial whose string carried a knock was promised a knock-configured v4
-            // peer, so a crypto PACK without the mac1 extension is priced as a failed
-            // mac1 (a knock-less impostor, or a truncation stripping the tail) — the
-            // verdict rides the machine's existing RejectMac1 silence.
+
             bool promisedKnockMac1 = c.PinnedKnock is not null && cryptoPack;
             bool mac1Ok = !v4Pack && !promisedKnockMac1 || Mac1OkForConn(c, frame);
 
@@ -3519,7 +3201,7 @@ internal sealed partial class NodeEngine : IDisposable
             input.Kind = HandshakeInputKind.PackBegin;
             input.CryptoBody = cryptoPack;
             input.PinMatches = pinMatches;
-            input.BodyPlausible = true; // the length floor check above already returned
+            input.BodyPlausible = true;
             input.LengthClassOk = lengthOk;
             input.Mac1Present = v4Pack || promisedKnockMac1;
             input.Mac1Ok = mac1Ok;
@@ -3528,7 +3210,7 @@ internal sealed partial class NodeEngine : IDisposable
             StepHandshake(ref c.Handshake, in input, out long kind, out _);
             if (kind == HandshakeMachine.RejectMac1)
             {
-                // Silence: no HSCK, no path confirmation, no key agreement.
+
                 Interlocked.Increment(ref _mac1Refused);
                 Telemetry.FrameRejected("handshake", "mac1");
                 return;
@@ -3541,12 +3223,11 @@ internal sealed partial class NodeEngine : IDisposable
                 {
                     TraceLine($"pack token mismatch from {BinaryPrimitives.ReadUInt64LittleEndian(frame[1..]):x16} via {(arrival.ViaRelay ? "relay" : "direct")} (wanted {c.Token:x8}, got {echo:x8})");
                 }
-                return; // not an echo of our handshake token
+                return;
             }
             if (kind == HandshakeMachine.RejectMixedMode)
             {
-                // We dialed with a key the string vouches for; a plaintext PACK means someone
-                // stripped the handshake. Fail the connection — never fall back to plaintext.
+
                 Reject(c, 6);
                 c.Crypto!.CountRejected();
                 HandshakeFailed(c, "encryption was refused by the answering peer: the connection string promised a static key");
@@ -3568,8 +3249,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (cryptoPack)
             {
-                // Every verdict past the echo counts as an answered crypto PACK, the
-                // same flights the original counted before its pin/keys/confirm checks.
+
                 Interlocked.Increment(ref c.PacksReceived);
                 if (TraceEnabled)
                 {
@@ -3582,12 +3262,12 @@ internal sealed partial class NodeEngine : IDisposable
             }
             else if (kind == 0)
             {
-                return; // neither a legacy nor a v2 PACK body
+                return;
             }
 
             if (kind == HandshakeMachine.NeedKeys)
             {
-                // Bracketed like OnPunc's agreement: reachable only past the mac1 gate.
+
                 Interlocked.Increment(ref _handshakeKeyAgreements);
                 ReadOnlySpan<byte> body = frame[(HeaderSize + 2 * CryptoWire.TokenLength)..];
                 ReadOnlySpan<byte> eph = body[..CryptoWire.EphemeralLength];
@@ -3626,8 +3306,6 @@ internal sealed partial class NodeEngine : IDisposable
                     return;
                 }
 
-                // Third flight: our confirm back, which also asks the responder to re-announce
-                // (its first sealed announce may have arrived before we could open it).
                 sendHsck = reply == HandshakeMachine.ReplyHsck;
                 crypto.MarkPeerConfirmed();
             }
@@ -3658,8 +3336,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         else
         {
-            // A confirm MAC can be replayed from another address. The sealed introduction
-            // probe above establishes the UDP route; a plaintext handshake cannot move it.
+
             DirectPathConfirmed(c, arrival);
         }
 
@@ -3699,8 +3376,6 @@ internal sealed partial class NodeEngine : IDisposable
         if (arrival.ViaRelay) RelayPathConfirmed(c, arrival);
         else if (arrival.Tcp is null) SendUdpIntroductionProbe(c, arrival);
 
-        // The dialer heard our PACK — re-announce, in case the first sealed announce lost
-        // the race against the PACK that delivered our half of the keys.
         AnnounceTo(c, target: arrival);
     }
 
@@ -3708,8 +3383,7 @@ internal sealed partial class NodeEngine : IDisposable
     {
         lock (c.Gate)
         {
-            // Plaintext handshake retries carry public/replayable information. Invalid
-            // retries may fail an initial dial, but cannot kill a confirmed session.
+
             if (c.State is PinholeConnectionState.Closed || c.Crypto is { PeerConfirmed: true }) return;
             c.Connected.TrySetException(new InvalidOperationException(reason));
             Telemetry.ConnectionRefused(reason);
@@ -3718,12 +3392,6 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    // The COOKIE reply (R5 phase 2): the responder is under load and wants the next PUNC
-    // to carry mac2 keyed with this cookie. The echo of our own token binds it to this
-    // dial attempt (our token is random per connection and never on the wire except in
-    // our own PUNCs, so a cookie minted for someone else cannot latch here). Receiving
-    // it is also proof the responder speaks v4, so the v3 fallback clock restarts — the
-    // cookie round trip must never bounce an honest dialer into the unversioned fallback.
     private void OnCookie(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
     {
         if (frame.Length != CryptoWire.CookieFrameLength || c.Crypto is null)
@@ -3736,11 +3404,11 @@ internal sealed partial class NodeEngine : IDisposable
         {
             if (echo != c.Token || c.State != PinholeConnectionState.Punching || !c.PuncFrameV4)
             {
-                return; // not this attempt's cookie, or too late for the PUNC to matter
+                return;
             }
 
             c.Cookie = frame.Slice(HeaderSize + CryptoWire.TokenLength + 1, CryptoWire.CookieLength).ToArray();
-            SetPuncFrame(c); // rebuilds PuncFrame with mac2; FirstPuncTicks re-arms on the next send
+            SetPuncFrame(c);
         }
 
         if (TraceEnabled)
@@ -3748,7 +3416,7 @@ internal sealed partial class NodeEngine : IDisposable
             TraceLine($"cookie received from {c.PeerId:x16}; retrying punc with mac2");
         }
 
-        KickPunch(c); // answer the demand immediately — the retry must not wait out a pace tick
+        KickPunch(c);
     }
 
     private void OnData(ConnState c, ReadOnlySpan<byte> frame, in Arrival arrival)
@@ -3761,11 +3429,9 @@ internal sealed partial class NodeEngine : IDisposable
         if (_options.RelaySignalingOnly && arrival.ViaRelay)
         {
             Interlocked.Increment(ref c.RelayedDatagramsBlocked);
-            return; // authenticated application data on a forbidden transport is still forbidden
+            return;
         }
 
-        // Any valid frame from the peer is proof of a live path, and its source address is
-        // the newest truth about where the peer lives (last-wins by peer ID — roaming).
         if (arrival.ViaRelay)
         {
             RelayPathConfirmed(c, arrival);
@@ -3777,8 +3443,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         Interlocked.Increment(ref c.ReceivedCount);
         Interlocked.Add(ref c.BytesReceived, frame.Length - HeaderSize - 4);
-        // Buffered mode queues first (the queue exists from handshake time), then the
-        // zero-copy event path fires for anyone still subscribed.
+
         c.Buffer?.Enqueue(frame[(HeaderSize + 4)..]);
         c.Received?.Invoke(frame[(HeaderSize + 4)..]);
     }
@@ -3801,11 +3466,7 @@ internal sealed partial class NodeEngine : IDisposable
                 SendTcpProof(c, tcp);
             }
             DirectPathConfirmed(c, arrival, sealedEvidence: true);
-            // Inbound evidence cuts both ways: a datagram this size arrived, so the path
-            // carries it. Cap at the probe ceiling — this only ever replaces a probe, and
-            // keeps buffer sizing honest on loopback's 64k MTU.
-            // The decrypted handler view excludes the AES-GCM counter/tag. MTU evidence
-            // must use the received wire size and never lower the guaranteed payload floor.
+
             if (arrival.Tcp is null && _options.EnablePmtud && wireLength >= PmtuBaseWire)
             {
                 lock (c.Gate)
@@ -3840,19 +3501,15 @@ internal sealed partial class NodeEngine : IDisposable
                 if (ReferenceEquals(c.DirectTcp, stream))
                 {
                     AnnounceTo(c);
-                    KickPunch(c); // bounded UDP upgrade attempts while TCP carries the data
+                    KickPunch(c);
                 }
                 else stream.CloseGracefully();
             }
-            return; // transport challenges are not application pings or RTT samples
+            return;
         }
         if (echoed < 0)
         {
-            // Maintenance probe reply: it certifies the direct path only when it matches
-            // the outstanding probe's nonce AND arrives from the endpoint that probe was
-            // sent to (ProbeTarget, snapshotted at send time — DirectRemote may since have
-            // been re-pointed by the peer's own frames). A caller ping's pong, relayed
-            // traffic, or a reply from anywhere else counts for nothing.
+
             lock (c.Gate)
             {
                 if (!arrival.ViaRelay && ReferenceEquals(arrival.Tcp, c.ProbeTcp)
@@ -3881,9 +3538,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if ((echoed & PmtuMachine.ProbeMarker) != 0)
         {
-            // A PMTUD probe's pong: confirm the probe size only when the nonce matches the
-            // outstanding probe AND the reply came from the endpoint it was sent to — the
-            // same discipline path probes apply, for the same reason.
+
             lock (c.Gate)
             {
                 if (!arrival.ViaRelay && arrival.Tcp is null && ReferenceEquals(arrival.UdpSocket, c.PmtuProbeUdpSocket)
@@ -3898,7 +3553,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (!arrival.ViaRelay && arrival.Direct is { } pmtuDirect)
             {
-                DirectPathConfirmed(c, arrival, sealedEvidence: true); // a confirmed probe is path liveness too
+                DirectPathConfirmed(c, arrival, sealedEvidence: true);
             }
 
             return;
@@ -3906,7 +3561,7 @@ internal sealed partial class NodeEngine : IDisposable
 
         if (!arrival.ViaRelay && arrival.Direct is { } callerDirect)
         {
-            DirectPathConfirmed(c, arrival, sealedEvidence: true); // an answered caller ping is direct-path activity too
+            DirectPathConfirmed(c, arrival, sealedEvidence: true);
         }
 
         long nowMs = Environment.TickCount64;
@@ -3964,11 +3619,6 @@ internal sealed partial class NodeEngine : IDisposable
             return;
         }
 
-        // A peer advertising a TURN candidate is telling us which server it relays through.
-        // Permitting that server's IP on our own allocations is what lets its frames reach
-        // us on strict TURN servers — the receive-side permission this peer cannot create
-        // for us any other way. Best-effort and fire-and-forget: the permit costs one
-        // datagram per server and races nothing.
         foreach (PinholeCandidate relay in fresh.Where(x => x.Kind == CandidateKind.Relay))
         {
             _ = PermitPeerRelayServerAsync(relay);
@@ -3983,7 +3633,7 @@ internal sealed partial class NodeEngine : IDisposable
             && (!_options.RelaySignalingOnly || firstCandidates || hasNewDirect)
             || (c.State == PinholeConnectionState.Degraded || c.State == PinholeConnectionState.Open && c.DirectTcp is not null) && hasNewDirect)
         {
-            KickPunch(c); // the peer just told us where it now lives
+            KickPunch(c);
         }
     }
 
@@ -4011,7 +3661,7 @@ internal sealed partial class NodeEngine : IDisposable
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
         {
-            // The reply path was momentary; its loss costs one frame, nothing more.
+
         }
     }
 
@@ -4021,8 +3671,7 @@ internal sealed partial class NodeEngine : IDisposable
         if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)) return;
         Span<byte> payload = stackalloc byte[8];
         RandomNumberGenerator.Fill(payload);
-        // A transport-control nonce uses the maintenance marker, so its pong is
-        // authenticated evidence without manufacturing an application RTT sample.
+
         BinaryPrimitives.WriteInt64LittleEndian(payload, BinaryPrimitives.ReadInt64LittleEndian(payload) | KeepaliveMachine.ProbeMarker);
         Span<byte> frame = stackalloc byte[PmtuBaseWire];
         int length = BuildFloorPing(c, payload, frame);
@@ -4052,7 +3701,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             catch (InvalidOperationException)
             {
-                payload.SetLength(0); // a malformed candidate list must not kill the announce
+                payload.SetLength(0);
                 payload.WriteByte(0);
                 break;
             }
@@ -4061,8 +3710,6 @@ internal sealed partial class NodeEngine : IDisposable
         byte[] body = payload.GetBuffer();
         int bodyLen = (int)payload.Length;
 
-        // Announce frames are sealed like everything else post-handshake; the biggest legal
-        // one (32 fat relay candidates) needs the rented path rather than the stack.
         int cap = HeaderSize + CryptoWire.TokenLength + bodyLen + CryptoWire.SealedOverhead;
         if (cap <= 1024)
         {
@@ -4088,9 +3735,7 @@ internal sealed partial class NodeEngine : IDisposable
     {
         if (blast)
         {
-            // Right after a rebind no path is confirmed live, but the PEER's own addresses
-            // are still valid targets: the announce carries our new candidates to wherever
-            // the peer currently is, and its reply frames teach us the newest path back.
+
             SendOnArrival(CurrentArrival(c), frame);
             PinholeCandidate[] targets;
             lock (_gate)
@@ -4112,8 +3757,7 @@ internal sealed partial class NodeEngine : IDisposable
                     }
                     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
                     {
-                        // Right after a rebind the relay slots are cold; the announce must
-                        // still reach the direct candidates rather than abort the recovery.
+
                     }
                 }
                 else
@@ -4147,11 +3791,6 @@ internal sealed partial class NodeEngine : IDisposable
         return c.RelayRemote is { } ep ? new Arrival(ep) : default;
     }
 
-    // ------------------------------------------------------------------ paths & state
-
-    // PINHOLE_TRACE=1 logs every direct-path adoption change — debugging aid for NAT
-    // hairpin mysteries; compiled out of the hot path when unset. PINHOLE_TRACE_FILE=<path>
-    // mirrors the lines to a file (xunit swallows console output from engine threads).
     private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1"
         || Environment.GetEnvironmentVariable("PINHOLE_TRACE_FILE") is { Length: > 0 };
 
@@ -4164,9 +3803,7 @@ internal sealed partial class NodeEngine : IDisposable
 
     private static void TraceLine(string line)
     {
-        // Console only for the explicit flag: a file-scoped trace (interop forensics) can be
-        // attached to a live transfer, and one console write per streamed frame would
-        // throttle the very wire under observation.
+
         if (Environment.GetEnvironmentVariable("PINHOLE_TRACE") == "1")
         {
             Console.WriteLine("[pinhole] " + line);
@@ -4204,7 +3841,7 @@ internal sealed partial class NodeEngine : IDisposable
         {
             if (c.State == PinholeConnectionState.Closed || c.BlackholeDirect)
             {
-                return; // test hook: this direct path is dead; nothing can confirm it
+                return;
             }
 
             if (c.Crypto is not null && (!c.Crypto.PeerConfirmed || arrival.Tcp is null && !sealedEvidence)) return;
@@ -4224,18 +3861,11 @@ internal sealed partial class NodeEngine : IDisposable
                 && ReferenceEquals(c.DirectTcp, arrival.Tcp) && SameEndPoint(c.DirectRemote, source)
                 && ReferenceEquals(c.DirectUdpSocket, arrival.UdpSocket))
             {
-                // Fast path, taken for every ordinary datagram: the endpoint is already the
-                // connection's truth, so the frame only refreshes direct-path activity.
+
                 Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
                 return;
             }
 
-            // A restored UDP path can have exactly the same address as before its
-            // outage. It must still promote a relay-carried or pending session to Open.
-
-            // The receive loop reuses its scratch SocketAddress; an adopted endpoint must be
-            // private to the connection. Cloning only on change keeps the per-datagram
-            // receive path allocation-free while endpoint churn still pays one copy.
             SocketAddress adopted = Clone(source);
             TracePath(c, adopted);
             c.DirectRemote = adopted;
@@ -4251,9 +3881,7 @@ internal sealed partial class NodeEngine : IDisposable
                 _incoming?.Writer.TryWrite(c);
             }
             Volatile.Write(ref c.LastDirectRxTicks, Environment.TickCount64);
-            // Migration: the endpoint changed (roam, family switch), so the confirmed MTU
-            // belongs to the OLD path. Forget it and re-climb — a v6 path's plateau and a
-            // freshly-engaged VPN's overhead say so independently.
+
             if (c.Pmtu.Wire != 0 || c.Pmtu.Outstanding)
             {
                 PmtuInput migrated = default;
@@ -4263,7 +3891,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (c.Connected.Task.IsFaulted)
             {
-                return; // the dial faulted (pin mismatch, refused handshake): this husk is not revivable
+                return;
             }
 
             if (c.State != PinholeConnectionState.Open)
@@ -4278,7 +3906,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
             else if (c.Path != PathKind.Direct)
             {
-                // A direct frame while relayed: newest-path-wins migration.
+
                 PathSelectorInput direct = DirectVerdict(c);
                 StepPathSelector(c, in direct);
                 c.PathSince = DateTimeOffset.UtcNow;
@@ -4306,9 +3934,7 @@ internal sealed partial class NodeEngine : IDisposable
         lock (c.Gate)
         {
             if (c.State == PinholeConnectionState.Closed || c.Connected.Task.IsFaulted) return;
-            // Keep the first responsive authenticated leg while it is healthy. Probes
-            // over the other providers still run, but cannot make every packet switch
-            // relay. A disconnected leg can be replaced by either provider immediately.
+
             if (c.PacketRelay is not { IsAlive: true } || !c.PacketRelayConfirmed)
             {
                 c.PacketRelay = relay;
@@ -4338,19 +3964,9 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // Leg hysteresis: a confirmed relay leg is never demoted by the peer's OTHER
-            // legs. With two relays configured, both sides punch both of the peer's relayed
-            // addresses, and every cross-leg arrival used to flip RelayReady off and force a
-            // permission round trip — a livelock in which data sends never found the leg
-            // ready. Arrivals still count as relay traffic (the dispatch stamp) whatever leg
-            // they rode; the leg only changes when it actually fails and path validation
-            // suspects it.
             if (c.RelayReady)
             {
-                // The permit already exists (dial-time warm-up counts), but promotion needs
-                // PeerConfirmed — which may only have arrived NOW, with this relayed frame.
-                // Re-run the promotion check; a pre-warmed leg must not wedge a Punching
-                // connection that completed its handshake after the permit landed.
+
                 PromoteRelayLegNoLock(c);
                 return;
             }
@@ -4361,8 +3977,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             c.RelayRemote = peerRelayed;
-            // Single-flight: a relayed frame burst must not spawn one permission round
-            // trip per frame or replace its target while the first is still in the air.
+
         }
 
         _ = PermitRelayAsync(c, peerRelayed);
@@ -4378,7 +3993,7 @@ internal sealed partial class NodeEngine : IDisposable
             { c.IncomingQueued = true; _incoming?.Writer.TryWrite(c); }
             c.Connected.TrySetResult();
             c.StateChanged?.Invoke(c.State);
-            KickPunch(c); // relay is confirmed usable; direct upgrade probing continues
+            KickPunch(c);
         }
     }
 
@@ -4395,7 +4010,7 @@ internal sealed partial class NodeEngine : IDisposable
                     {
                         TraceLine($"permit failed for {c.PeerId:x16} toward {peer} (clients {AliveRelayClients().Count})");
                     }
-                    return; // the slot was retired; the reconnect's fresh permit finishes this
+                    return;
                 }
             }
 
@@ -4403,20 +4018,20 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (c.RelayRemote is { } current && !current.Address.Equals(peer.Address))
                 {
-                    return; // a newer relay address superseded this permit mid-flight
+                    return;
                 }
 
                 c.RelayReady = true;
                 Telemetry.Recovery("relay-heal");
                 if (c.State == PinholeConnectionState.Closed) return;
-                PromoteRelayLegNoLock(c); // no-op unless the handshake has confirmed the peer
+                PromoteRelayLegNoLock(c);
             }
 
             if (_options.RelaySignalingOnly) AnnounceTo(c);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or InvalidOperationException or TimeoutException or ObjectDisposedException)
         {
-            // The permission round trip failed; the next relayed frame will retry.
+
         }
         finally
         {
@@ -4457,7 +4072,7 @@ internal sealed partial class NodeEngine : IDisposable
             {
                 if (ReferenceEquals(slot.Client, client))
                 {
-                    slot.Client = null; // NextRetry stays: a live server reconnects immediately
+                    slot.Client = null;
                 }
             }
         }
@@ -4475,9 +4090,6 @@ internal sealed partial class NodeEngine : IDisposable
                 return;
             }
 
-            // The Open fallback additionally honors RelaySignalingOnly (a signaling
-            // relay may not carry the session); a Degraded session already beat that
-            // gate when it was promoted, so only the legs themselves are re-checked.
             bool legAlive = c.PacketRelay is { IsAlive: true } && c.PacketRelayConfirmed;
             bool permitted = c.RelayRemote is not null && c.RelayReady;
             PathSelectorInput verdict = default;
@@ -4494,27 +4106,17 @@ internal sealed partial class NodeEngine : IDisposable
         KickPunch(c);
         Telemetry.Recovery("path-suspect");
 
-        // A suspect relay path re-validates its allocation: the permit round trip either
-        // confirms the relay leg or (TryPermitAsync) retires a ghost client — a restarted
-        // relay's stale allocation — and reallocates, instead of waiting out the
-        // minutes-long refresh cadence while every relayed frame black-holes.
         if (c.RelayRemote is { } relayPeer && Interlocked.CompareExchange(ref c.PermitInFlight, 1, 0) == 0)
         {
             _ = PermitRelayAsync(c, relayPeer);
         }
 
-        // And when the ticket pinned the peer's endpoint key, the lookup providers may know
-        // where the peer moved to (both allocations changed, both old addresses dead): fetch
-        // its current signed record and fold any verified endpoint into this dial's punch.
         if (c.PinnedEndpointKey is { } pinned && _lookup.Count > 0)
         {
             _ = ResolveViaLookupAsync(c, pinned, CancellationToken.None);
         }
     }
 
-    // The path-selection transition table lives in PathSelectorMachine; this helper
-    // keeps ConnState's public fields the visible truth: copy in, step, copy back,
-    // and report whether the verdict changed so the site can fire its own reactions.
     private static bool StepPathSelector(ConnState c, in PathSelectorInput input)
     {
         PathSelectorState selector = PathSelectorState.Create((ConnPhase)c.State, (PathSel)c.Path);
@@ -4525,7 +4127,7 @@ internal sealed partial class NodeEngine : IDisposable
         return n > 0;
     }
 
-    private static PathSelectorInput DirectVerdict(ConnState c) // c unused: eligibility is settled by the caller
+    private static PathSelectorInput DirectVerdict(ConnState c)
     {
         PathSelectorInput input = default;
         input.Kind = PathSelectorInputKind.DirectConfirmed;
@@ -4557,14 +4159,12 @@ internal sealed partial class NodeEngine : IDisposable
             if (state == PinholeConnectionState.Closed)
             {
                 c.Closed.TrySetResult();
-                c.Buffer?.Complete(); // readers drain what is buffered, then see EOF
+                c.Buffer?.Complete();
             }
 
             c.StateChanged?.Invoke(state);
         }
     }
-
-    // ------------------------------------------------------------------ roaming
 
     public async Task RecoverAsync(bool forceRebind, CancellationToken ct)
     {
@@ -4576,7 +4176,7 @@ internal sealed partial class NodeEngine : IDisposable
         try
         {
             RefreshInterfaceCandidates();
-            RefreshIPv6Firewall(); // interface changes matter even if the STUN mapping stayed the same
+            RefreshIPv6Firewall();
             IReadOnlyList<IPEndPoint> stunServers = ResolvedStun();
             bool needRebind = forceRebind;
 
@@ -4594,36 +4194,31 @@ internal sealed partial class NodeEngine : IDisposable
 
                 if (probe is not null)
                 {
-                    // The network answered, so this is a moved mapping, not a dead one —
-                    // and a moved mapping is the refresh case, whose contract is gentle:
-                    // re-advertise without disturbing paths that already work. (A stale
-                    // direct path is still caught by path validation's probe misses; the
-                    // demote-and-repunch below belongs to a real rebind, where the old
-                    // direct path is genuinely gone.)
+
                     lock (_gate)
                     {
                         if (_reflexive.Contains(probe))
                         {
-                            return; // the mapping did not move; nothing to do
+                            return;
                         }
 
                         _reflexive.Clear();
                         _reflexive.Add(probe);
-                        RefreshLocalCandidatesNoLock(); // same critical section: no torn state between the two views
+                        RefreshLocalCandidatesNoLock();
                     }
 
                     foreach (ConnState c in ConnectionsSnapshot())
                     {
                         if (c.State != PinholeConnectionState.Closed)
                         {
-                            AnnounceTo(c); // gentle: the peer keeps its working path and only learns our new candidates
+                            AnnounceTo(c);
                         }
                     }
 
                     return;
                 }
 
-                needRebind = true; // every STUN server silent: the socket's network is gone
+                needRebind = true;
             }
 
             if (needRebind)
@@ -4664,7 +4259,7 @@ internal sealed partial class NodeEngine : IDisposable
             }
 
             _reflexive.Clear();
-            _mappedEndpoint = null; // the mapping points at the old port; rediscovery targets the new one
+            _mappedEndpoint = null;
             _mappedTcpEndpoint = null;
         }
 
@@ -4674,7 +4269,7 @@ internal sealed partial class NodeEngine : IDisposable
             _ = client.DisposeAsync();
         }
 
-        _portMap?.Rebind(_udp.LocalEndPoint.Port); // LocalPort takes _gate; we hold none here
+        _portMap?.Rebind(_udp.LocalEndPoint.Port);
         _tcpPortMap?.Rebind(_tcp?.ListeningPort ?? 0);
         RefreshInterfaceCandidates(invalidate: true);
         RefreshIPv6Firewall(invalidate: true);
@@ -4694,7 +4289,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             lock (c.Gate)
             {
-                c.DirectRemote = null; // the old direct path is invalid after a rebind
+                c.DirectRemote = null;
                 c.DirectRemoteEp = null;
                 if (c.State == PinholeConnectionState.Open)
                 {
@@ -4710,7 +4305,7 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (c.RelayRemote is not null)
             {
-                // The peer's relayed address survives the rebind; re-prove it usable.
+
                 c.RelayReady = false;
                 _ = PermitRelayAsync(c, c.RelayRemote);
             }
@@ -4719,8 +4314,6 @@ internal sealed partial class NodeEngine : IDisposable
             KickPunch(c);
         }
     }
-
-    // ------------------------------------------------------------------ test hooks
 
     internal Task SimulateInterfaceLossAsync() => RecoverAsync(forceRebind: true, CancellationToken.None);
 
@@ -4828,7 +4421,7 @@ internal sealed partial class NodeEngine : IDisposable
         Volatile.Write(ref c.LastRejectKind, 4);
         if (Volatile.Read(ref c.RejectsByKind[4]) == 1)
         {
-            c.Crypto?.NoteKeyReject(arrivingEph); // capture arrival bytes once
+            c.Crypto?.NoteKeyReject(arrivingEph);
         }
     }
 
@@ -4872,8 +4465,6 @@ internal sealed partial class NodeEngine : IDisposable
     internal string RecvDiagnostics() =>
         $"rx={Volatile.Read(ref _recvDatagrams)} last-rx-ago={(_recvLastTick == 0 ? -1 : Environment.TickCount64 - Volatile.Read(ref _recvLastTick))}ms no-conn-drops={Volatile.Read(ref _noConnDrops)}";
 
-    // ------------------------------------------------------------------ dispose
-
     public void Dispose()
     {
         if (_disposed)
@@ -4887,7 +4478,7 @@ internal sealed partial class NodeEngine : IDisposable
             NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
         }
 
-        _portMap?.Shutdown(); // releases the router mapping in the background, bounded
+        _portMap?.Shutdown();
         _tcpPortMap?.Shutdown();
         _interfaceUdp?.Dispose();
         _ipv6Firewall?.Dispose();
@@ -4900,7 +4491,7 @@ internal sealed partial class NodeEngine : IDisposable
         _incoming?.Writer.TryComplete();
         lock (_gate)
         {
-            // Bind failure can reach cleanup before CreateSocket returns.
+
             _udp?.Dispose();
             _tcp?.Dispose();
             foreach (IrohRelay relay in _irohRelays.Values) relay.Dispose();
@@ -4916,16 +4507,9 @@ internal sealed partial class NodeEngine : IDisposable
         }
     }
 
-    // ------------------------------------------------------------------ helpers
-
     private byte[] BuildPunc(ConnState c, bool v4)
     {
-        // The punch probe doubles as the crypto handshake's first flight: a crypto dial
-        // carries this connection's ephemeral and static public keys, deterministically, in
-        // every retransmission — key agreement must not depend on which probe lands.
-        // With a stored cookie (the responder's COOKIE reply under load) every
-        // retransmission also carries mac2, so the retry cannot depend on which probe
-        // lands either.
+
         byte[]? mac2Key = v4 ? c.Cookie : null;
         byte[] frame = new byte[HeaderSize + (c.Crypto is null ? CryptoWire.PuncLegacyBody
             : CryptoWire.PuncCryptoBody + (v4 ? CryptoWire.Mac1ExtLength + (mac2Key is null ? 0 : CryptoWire.Mac2ExtLength) : 0))];
@@ -4938,12 +4522,7 @@ internal sealed partial class NodeEngine : IDisposable
             crypto.MyStaticPublic.CopyTo(frame.AsSpan(HeaderSize + CryptoWire.TokenLength + CryptoWire.EphemeralLength));
             if (v4)
             {
-                // The answering node's static key keys mac1: the pin when we dialed, our
-                // own when we answer (this connection was born from the peer's PUNC).
-                // Knock-aware on both sides — the string's knock keys the pin, our own
-                // config keys our static — so a knock-configured responder's PUNCs are
-                // indistinguishable on the wire from a knock-less node's. With mac2
-                // appended, mac1 is written over its own view of the frame.
+
                 byte[] mac1Key = Mac1KeyFor(c);
                 if (mac2Key is { } cookie)
                 {
@@ -4967,8 +4546,6 @@ internal sealed partial class NodeEngine : IDisposable
         Volatile.Write(ref c.FirstPuncTicks, 0);
     }
 
-    // The v4 fallback clock starts at the first PUNC actually handed to a transport —
-    // an unanswered window with no sends is routelessness, not a version refusal.
     private static void NotePuncSent(ConnState c)
     {
         if (Volatile.Read(ref c.FirstPuncTicks) == 0)

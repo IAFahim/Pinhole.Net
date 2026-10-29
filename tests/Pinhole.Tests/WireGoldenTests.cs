@@ -20,10 +20,10 @@ public sealed class WireGoldenTests
 
         byte[] expected =
         [
-            0x03, 0x00, (byte)'p', (byte)'k', (byte)'g',                      // nameLen u16 LE + UTF-8
-            0x02, 0x00, 0x00, 0x00,                                         // entryCount u32 LE
-            0x05, 0x00, (byte)'a', (byte)'.', (byte)'b', (byte)'i', (byte)'n', // pathLen u16 LE + UTF-8
-            0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00,                 // size i64 LE
+            0x03, 0x00, (byte)'p', (byte)'k', (byte)'g',
+            0x02, 0x00, 0x00, 0x00,
+            0x05, 0x00, (byte)'a', (byte)'.', (byte)'b', (byte)'i', (byte)'n',
+            0x44, 0x33, 0x22, 0x11, 0x00, 0x00, 0x00, 0x00,
             .. Root(0),
             0x05, 0x00, (byte)'e', (byte)'m', (byte)'p', (byte)'t', (byte)'y',
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -39,9 +39,6 @@ public sealed class WireGoldenTests
             [new PinholeCandidate(CandidateKind.Direct, new IPEndPoint(IPAddress.Parse("192.168.1.4"), 42123))],
             NatHint.Symmetric);
 
-        // Golden captured from a little-endian host; the payload decodes to
-        // 01 02 88 77 66 55 44 33 22 11 ... — the peer id 0x1122334455667788 travels
-        // little-endian, and any endianness or layout drift changes this exact string.
         Assert.Equal("pinhole1:AQCId2ZVRDMiEQIBBMCoAQSkiwE", cs.ToString());
     }
 
@@ -78,8 +75,6 @@ public sealed class WireGoldenTests
             Endpoints = [new IPEndPoint(IPAddress.Parse("203.0.113.7"), 3478)],
         };
 
-        // Deterministic Ed25519: the signed wire (including signature) is a pure function
-        // of the fields above, so the golden pins sequence and expiry as little-endian too.
         Assert.Equal(
             "0108070605040302016106F86AA1C86018EB49133492B1E3B99FCCCF8CE782210631D35ED00462EDD8112233445566778800D2496B000000000104CB0071070D9658AF45AAF9905A1B79F91D6BFDF458F0D242195B253DA1122BE250F7FB720F03AC7A00A5B7E40B8073FBD2F049FB95764A5CCEFDEC23A053C2F679D512FB2A0D",
             Convert.ToHexString(record.EncodeSigned(identity)));

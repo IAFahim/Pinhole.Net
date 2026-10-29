@@ -1,7 +1,5 @@
 namespace Pinhole.Moq;
 
-// Draft16 section9.5: MAX_REQUEST_ID is the first excluded ID, not inclusive credit.
-// Sender allocation is serialized by the client's control-stream gate.
 internal sealed class MoqRequestIds(ulong maximum)
 {
     private ulong _maximum = maximum;
@@ -19,13 +17,9 @@ internal sealed class MoqRequestIds(ulong maximum)
     }
 }
 
-// Relay-originated request IDs: the relay numbers its requests 1, 3, 5… inside the
-// credit we granted at setup. Our grant must grow as the relay consumes it — a session
-// otherwise dies at the 128th relay-originated request (C-14c), because the client
-// never sent MAX_REQUEST_ID for the direction it receives on.
 internal sealed class MoqPeerRequestIds(ulong maximum)
 {
-    private const ulong Margin = 32;       // extend while this many ids remain unspent
+    private const ulong Margin = 32;
     private const ulong Step = 256;
     private ulong _maximum = maximum;
 

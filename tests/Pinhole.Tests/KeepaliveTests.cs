@@ -36,7 +36,6 @@ public sealed class KeepaliveTests
         _ = a.AcceptAsync();
         PinholeConnection atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
 
-        // Three heartbeats at 300 ms — generous CI margins — each answered, each RTT fresh.
         await TestPoll.UntilAsync(Timeout, () => atB.Stats.PingsSent >= 3 && atB.LastRtt is not null);
         await TestPoll.UntilAsync(Timeout, () => atB.Stats.PongsReceived >= 3);
         Assert.Equal(PinholeConnectionState.Open, atB.State);
@@ -50,11 +49,10 @@ public sealed class KeepaliveTests
         _ = a.AcceptAsync();
         PinholeConnection atB = await b.ConnectAsync(LoopbackString(a)).WaitAsync(Timeout);
 
-        await Task.Delay(800); // far past one 300 ms-style cadence; validation and PMTUD are off too
+        await Task.Delay(800);
         Assert.Equal(0, atB.Stats.PingsSent);
         Assert.Equal(0, atB.Stats.PongsReceived);
 
-        // The floor still rejects absurd cadences — at resolve time, before any socket opens.
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => PinholeNode.BindAsync(Opts(TimeSpan.FromMilliseconds(10))));
     }

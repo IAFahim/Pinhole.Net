@@ -145,7 +145,7 @@ public sealed class BlobsTests
             await File.WriteAllBytesAsync(Path.Combine(tree, "first.bin"), shared);
             await File.WriteAllBytesAsync(Path.Combine(tree, "pkg", "second.bin"), shared);
             await File.WriteAllBytesAsync(Path.Combine(tree, "pkg", "third.bin"), shared);
-            // Empty files all share one content root too.
+
             await File.WriteAllBytesAsync(Path.Combine(tree, "keep1"), Array.Empty<byte>());
             await File.WriteAllBytesAsync(Path.Combine(tree, "keep2"), Array.Empty<byte>());
 
@@ -189,8 +189,6 @@ public sealed class BlobsTests
             await File.WriteAllBytesAsync(Path.Combine(tree, "I.txt"), "cap"u8.ToArray());
             await File.WriteAllBytesAsync(Path.Combine(tree, "i.txt"), "low"u8.ToArray());
 
-            // da-DK sorts Å after Z and tr-TR swaps I/i; any culture-aware order makes the
-            // same tree hash to a different manifest, hence a different announced root.
             string danishRoot, turkishRoot, invariantRoot;
             CultureInfo.CurrentCulture = new CultureInfo("da-DK");
             await using (var server = await BlobServer.ServeAsync(tree, new BlobServeOptions { NodeOptions = Offline() }))
@@ -231,18 +229,14 @@ public sealed class BlobsTests
             var nodeOptions = Offline() with { ConnectTimeout = TimeSpan.FromSeconds(2) };
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = nodeOptions });
 
-            // A crypto-shaped junk PUNC materializes a stranger that is queued for
-            // AcceptAsync but never completes its handshake, so AcceptAsync throws
-            // TimeoutException inside the loop (A-03). The provider must keep accepting
-            // afterwards — one dead dialer cannot end serving for everyone.
             using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             byte[] punc = new byte[CryptoWire.HeaderLength + CryptoWire.PuncCryptoBody];
             punc[0] = 0x50;
-            RandomNumberGenerator.Fill(punc.AsSpan(1)); // junk peer id, junk "ephemeral key"
+            RandomNumberGenerator.Fill(punc.AsSpan(1));
             attacker.SendTo(punc, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, server.Node.LocalPort));
 
-            await Task.Delay(TimeSpan.FromSeconds(3)); // the handshake deadline fires inside the loop
+            await Task.Delay(TimeSpan.FromSeconds(3));
 
             string outDir = Path.Combine(dir, "out");
             await BlobClient.DownloadAsync(server.Ticket, outDir,
@@ -271,8 +265,6 @@ public sealed class BlobsTests
             var nodeOptions = Offline() with { Encryption = PinholeEncryption.Optional };
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = nodeOptions });
 
-            // One junk plaintext PUNC under Optional policy: exactly one accept, not two —
-            // a double-queue would hand the same connection to two serving workers.
             using var attacker = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             attacker.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             byte[] punc = new byte[13];
@@ -301,9 +293,7 @@ public sealed class BlobsTests
 
             var serveOpts = new BlobServeOptions { NodeOptions = Offline() };
             await using var server = await BlobServer.ServeAsync(src, serveOpts);
-            // Lose a deterministic scattered set of chunk TRANSMISSIONS (each exactly once,
-            // like datagrams that hit a lossy path): the downloader's sweep must notice the
-            // holes and re-request until every chunk lands on its second attempt.
+
             var lostOnce = new HashSet<long>();
             server.DropChunk = idx => idx is 3 or 17 or 40 or 41 or 42 && lostOnce.Add(idx);
 
@@ -328,7 +318,7 @@ public sealed class BlobsTests
             await File.WriteAllBytesAsync(src, RandomBytes(50_000));
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            // A lying provider: chunk 5's bytes get flipped after the honest CV was built.
+
             server.CorruptChunk = (idx, data) =>
             {
                 if (idx == 5)
@@ -349,10 +339,7 @@ public sealed class BlobsTests
     [Fact]
     public async Task FailedDownload_DoesNotPoisonTheServer_OrTheNextAttempt()
     {
-        // The iroh-net-bindings "process stays healthy" pattern: a failed transfer must
-        // leave both sides fully usable — the server serves the next stranger, and a
-        // retry from the same downloader resumes past the checkpoint instead of starting
-        // over poisoned by the aborted attempt's part state.
+
         string dir = TempDir();
         try
         {
@@ -362,14 +349,12 @@ public sealed class BlobsTests
 
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
             var droppedOnce = new HashSet<long>();
-            // The lie lands in run 1 (chunk 100), past run 0's 64-chunk boundary: under
-            // v4 only whole verified runs checkpoint, so a retry has state to resume
-            // from exactly when at least one run committed before the abort.
+
             server.CorruptChunk = (idx, bytes) =>
             {
                 if (idx == 100 && droppedOnce.Add(idx))
                 {
-                    bytes[0] ^= 0xFF; // lie exactly once, then serve honestly
+                    bytes[0] ^= 0xFF;
                 }
             };
 
@@ -378,14 +363,10 @@ public sealed class BlobsTests
                 options: new BlobDownloadOptions { NodeOptions = Offline() })).WaitAsync(Timeout);
             Assert.True(server.ConnectionsAccepted >= 1, "the failed attempt did reach the server");
 
-            // A fresh downloader (new connection, new node) completes over the same server.
             BlobDownloadResult fresh = await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "fresh"),
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
             Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(dir, "fresh", "poison.bin")));
 
-            // And the ORIGINAL destination finishes too: its part state is honest (the
-            // corrupt chunk never passed CV verification, so it was never applied) and
-            // the second pass re-requests chunk 10 from a now-honest provider.
             BlobDownloadResult retried = await BlobClient.DownloadAsync(server.Ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
             Assert.True(retried.Resumed, "the retry continued from the aborted attempt's checkpoint");
@@ -415,8 +396,7 @@ public sealed class BlobsTests
             server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
             server.CorruptChunk = (_, _) =>
             {
-                // ReadChunk has opened the file. Hold that worker at a real chunk
-                // boundary so shutdown cannot win a race with resource cleanup.
+
                 readerEntered.TrySetResult();
                 if (!releaseReader.Wait(TestBudget.Teardown))
                     throw new TimeoutException("the test did not release the file reader");
@@ -432,8 +412,6 @@ public sealed class BlobsTests
             stopDownload.Cancel();
             await disposing.WaitAsync(TestBudget.Teardown);
 
-            // In particular, Windows must allow immediate exclusive access after
-            // DisposeAsync returns, without sleeps or deletion retries.
             using FileStream reopened = File.Open(src, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         }
         finally
@@ -453,10 +431,7 @@ public sealed class BlobsTests
     [Fact]
     public async Task ProviderDisposedMidTransfer_FailsFastAndHonestly()
     {
-        // The sendme Ctrl-C contract: when the provider goes away, the downloader must
-        // surface a real error quickly — not spin its re-request machinery for the full
-        // stall budget. The pump notices the closed connection and the run loop
-        // converts quiet into an exception.
+
         string dir = TempDir();
         try
         {
@@ -464,7 +439,7 @@ public sealed class BlobsTests
             await File.WriteAllBytesAsync(src, TestDispose.Pattern(2_000_000, 0xC3));
 
             var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
-            server.DropChunk = idx => idx >= 4; // head flows, tail never arrives: the transfer cannot finish
+            server.DropChunk = idx => idx >= 4;
 
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var failed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -475,11 +450,9 @@ public sealed class BlobsTests
                     await BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),
                         options: new BlobDownloadOptions
                         {
-                            // The provider is dead when the recovery loop re-dials: a short
-                            // connect budget per attempt keeps worst-case surfacing at
-                            // RecoveryTimeout + one attempt (~14 s), not + the 15 s default.
+
                             NodeOptions = Offline() with { ConnectTimeout = TimeSpan.FromSeconds(2) },
-                            RecoveryTimeout = TimeSpan.FromSeconds(12), // route loss is ridden out — but not forever
+                            RecoveryTimeout = TimeSpan.FromSeconds(12),
                         });
                     failed.TrySetResult(null!);
                 }
@@ -489,15 +462,11 @@ public sealed class BlobsTests
                 }
             });
 
-            // Wait until the transfer is actually in flight, then pull the provider's plug.
             await TestPoll.UntilAsync(Timeout, () => server.ConnectionsAccepted >= 1 && server.ChunksServed >= 4);
             await TestDispose.BoundedAsync(server, "blob server mid-transfer");
             Exception? ex = await failed.Task.WaitAsync(TestBudget.Scenario);
             watch.Stop();
 
-            // An unreachable provider is ROUTE LOSS, not rejection: the recovery loop
-            // re-dials until its (here short) budget dies, then surfaces a failure that
-            // says exactly that — never the bare 30s stall, never a hang.
             Assert.NotNull(ex);
             Assert.True(ex is TimeoutException && ex.Message.Contains("re-established", StringComparison.Ordinal),
                 $"wrong failure surfaced: {ex.GetType().Name}: {ex.Message}");
@@ -532,24 +501,17 @@ public sealed class BlobsTests
                 }
             });
 
-            // Drop the tail so the first attempt provably cannot finish — on loopback the
-            // transfer outruns any progress-callback cancellation otherwise. The v4
-            // transfer checkpoints whole verified runs (64 chunks), so the boundary sits
-            // past run 0's end.
             server.DropChunk = idx => idx >= 130;
             Task firstRun = Task.Run(() => BlobClient.DownloadAsync(server.Ticket, outDir, progress,
                 new BlobDownloadOptions { NodeOptions = Offline() }, cancelFirst.Token));
             await firstProgress.Task.WaitAsync(Timeout);
-            // Verified chunks can arrive ahead of a missing leading chunk. Resume
-            // starts at the committed runs, so wait for that evidence before
-            // interrupting instead of equating aggregate progress with it.
+
             await TestPoll.UntilAsync(Timeout, () =>
             {
                 try
                 {
                     byte[] state = File.ReadAllBytes(Path.Combine(target + ".pinhole-part", "state"));
-                    // PBPART02: magic(8) root(32) totalBytes(8) runCount(8) bitmapLen(4)
-                    // bitmap — run 0 committed means bit 0 of the first bitmap byte.
+
                     return state.Length > 61 && state.AsSpan(0, 8).SequenceEqual("PBPART02"u8)
                         && (state[60] & 1) == 1;
                 }
@@ -559,7 +521,6 @@ public sealed class BlobsTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstRun).WaitAsync(Timeout);
             Assert.True(Directory.Exists(target + ".pinhole-part"), "interrupted download left its part directory");
 
-            // Second run continues from the checkpoint and finishes the job.
             server.DropChunk = null;
             BlobDownloadResult result = await BlobClient.DownloadAsync(server.Ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
@@ -577,9 +538,7 @@ public sealed class BlobsTests
     [Fact]
     public void Cipher_SessionIdBindsTheKey_TwoConnectionsNeverShareOne()
     {
-        // Two connections on one ticket used to restart the same per-ticket key with the
-        // same counters — ChaCha20-Poly1305 (key, nonce) reuse across connections. The
-        // downloader and provider each contribute a 256-bit nonce to the connection key.
+
         byte[] psk = RandomNumberGenerator.GetBytes(32);
         byte[] root = RandomNumberGenerator.GetBytes(32);
         byte[] binding = BlobWire.Cipher.FreshSessionId();
@@ -587,24 +546,21 @@ public sealed class BlobsTests
         byte[] sidB = BlobWire.Cipher.FreshSessionId();
 
         BlobWire.Cipher? providerA = BlobWire.Cipher.For(psk, root, sidA, binding);
-        BlobWire.Cipher? downloaderA = BlobWire.Cipher.For(psk, root, sidA, binding); // same connection, both ends
+        BlobWire.Cipher? downloaderA = BlobWire.Cipher.For(psk, root, sidA, binding);
         BlobWire.Cipher? connectionB = BlobWire.Cipher.For(psk, root, sidB, binding);
         Assert.NotNull(providerA);
         Assert.NotNull(downloaderA);
         Assert.NotNull(connectionB);
 
-        // Connection A's first provider frame (counter 1): its own far end opens it...
         ulong seen = 0;
         byte[] wireA = providerA!.Seal(asProvider: true, 1, "chunk-of-A"u8.ToArray());
         Assert.True(downloaderA!.TryOpen(fromProvider: true, wireA, ref seen, out byte[] plain));
         Assert.Equal("chunk-of-A"u8.ToArray(), plain);
 
-        // ...connection B must not — same ticket, same role, same counter, different key.
         ulong seenB = 0;
         Assert.False(connectionB!.TryOpen(fromProvider: true, wireA, ref seenB, out _),
             "a second connection on the same ticket must not read the first one's frames");
 
-        // And B sealing at its own counter 1 is a distinct (key, nonce) pair, not a collision.
         byte[] wireB = connectionB.Seal(asProvider: true, 1, "chunk-of-B"u8.ToArray());
         Assert.False(providerA.TryOpen(fromProvider: true, wireB, ref seen, out _));
     }
@@ -612,9 +568,7 @@ public sealed class BlobsTests
     [Fact]
     public void Cipher_RepeatedSessionId_ProviderNonceStillForksTheKey()
     {
-        // Session uniqueness must not rest on the downloader alone: a buggy or hostile
-        // client that repeats an earlier session id gets the same id-derived input — but
-        // the provider contributes an independent 256-bit nonce on each connection.
+
         byte[] psk = RandomNumberGenerator.GetBytes(32);
         byte[] root = RandomNumberGenerator.GetBytes(32);
         byte[] repeated = BlobWire.Cipher.FreshSessionId();
@@ -623,7 +577,7 @@ public sealed class BlobsTests
 
         var conn1 = BlobWire.Cipher.For(psk, root, repeated, first)!;
         var conn2 = BlobWire.Cipher.For(psk, root, repeated, second)!;
-        var conn1Again = BlobWire.Cipher.For(psk, root, repeated, first)!; // both ends of one connection agree
+        var conn1Again = BlobWire.Cipher.For(psk, root, repeated, first)!;
 
         byte[] wire = conn1.Seal(asProvider: true, 1, "connection one"u8.ToArray());
         ulong seen = 0;
@@ -653,7 +607,7 @@ public sealed class BlobsTests
             await using var node2 = await PinholeNode.BindAsync(options);
             await using var conn1 = await node1.ConnectAsync(server.Ticket.ConnectionString);
             await using var conn2 = await node2.ConnectAsync(server.Ticket.ConnectionString);
-            byte[] repeated = new byte[32]; // even a downloader repeating a constant id is safe for the provider
+            byte[] repeated = new byte[32];
             ulong stream = BlobWire.StreamId(server.Ticket.Root);
 
             async Task<BlobWire.Frame> Welcome(PinholeConnection conn)
@@ -691,26 +645,23 @@ public sealed class BlobsTests
     [Fact]
     public void Cipher_ForgedAndReplayedCounters_NeverMoveTheWatermark()
     {
-        // The blob layer's replay watermark obeys the same rule the session layer learned
-        // the hard way: it moves only on authenticated frames. A forged far-future
-        // counter must not starve the frames behind it, and a replayed old counter must
-        // not re-admit the frames before it.
+
         var c = BlobWire.Cipher.For(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32),
             BlobWire.Cipher.FreshSessionId(), BlobWire.Cipher.FreshSessionId())!;
         ulong watermark = 5;
         byte[] genuine5 = c.Seal(asProvider: true, 5, "real"u8.ToArray());
 
-        byte[] forged = new byte[8 + 4 + 16]; // counter 100, garbage everything else
+        byte[] forged = new byte[8 + 4 + 16];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(forged, 100);
         Assert.False(c.TryOpen(fromProvider: true, forged, ref watermark, out _));
-        Assert.Equal(5UL, watermark); // the forgery moved nothing
+        Assert.Equal(5UL, watermark);
 
         byte[] genuine6 = c.Seal(asProvider: true, 6, "next"u8.ToArray());
         Assert.True(c.TryOpen(fromProvider: true, genuine6, ref watermark, out _));
-        Assert.Equal(6UL, watermark); // genuine frames still land after the forgery
+        Assert.Equal(6UL, watermark);
 
         Assert.False(c.TryOpen(fromProvider: true, genuine5, ref watermark, out _));
-        Assert.Equal(6UL, watermark); // the replay of an authenticated old frame moved nothing
+        Assert.Equal(6UL, watermark);
 
         byte[] genuine7 = c.Seal(asProvider: true, 7, "more"u8.ToArray());
         Assert.True(c.TryOpen(fromProvider: true, genuine7, ref watermark, out _));
@@ -726,7 +677,6 @@ public sealed class BlobsTests
         byte[] head = provider.Seal(asProvider: true, 1, BlobWire.Head(stream, 500, 1));
         byte[] welcome = BlobWire.Welcome(stream, clientNonce, providerNonce, head);
 
-        // A forged first response must not bind the wrong nonce, cipher, or counter.
         foreach (int offset in new[] { 1, 9, 10, 42, welcome.Length - 1 })
         {
             byte[] tampered = welcome.ToArray();
@@ -824,9 +774,6 @@ public sealed class BlobsTests
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
             BlobTicket ticket = server.Ticket;
 
-            // A pre-2.0 downloader emulated from the raw v1 cipher (production code only
-            // ever gets the open-only detector): it seals under the fixed per-ticket key
-            // and sends a Hello with an empty body.
             await using var node = await PinholeNode.BindAsync(Offline() with { Listen = false, ReceiveBufferCapacity = 64 });
             await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString);
 
@@ -837,11 +784,9 @@ public sealed class BlobsTests
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(legacyHello.AsSpan(1), stream);
 
             conn.Send(version == 1 ? legacy.Seal(asProvider: false, 1, legacyHello) : legacyHello);
-            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed); // fast, not the 20 s first-contact timeout
-            Assert.Equal(0, server.ChunksServed); // nothing was served under the legacy key
+            await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed);
+            Assert.Equal(0, server.ChunksServed);
 
-            // Failure isolation: the refusal poisoned nothing — the next (current) downloader
-            // of the same ticket completes against the same server.
             string outDir = Path.Combine(dir, "out");
             BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
@@ -869,8 +814,6 @@ public sealed class BlobsTests
                 new BlobServeOptions { Encrypt = false, NodeOptions = Offline() });
             BlobTicket ticket = server.Ticket;
 
-            // No PSK means no legacy key to seal under; the version posture is uniform
-            // regardless — the bare v1/v2 Hello shapes are refused, never answered.
             await using var node = await PinholeNode.BindAsync(Offline() with { Listen = false, ReceiveBufferCapacity = 64 });
             await using PinholeConnection conn = await node.ConnectAsync(ticket.ConnectionString);
 
@@ -882,7 +825,6 @@ public sealed class BlobsTests
             await TestPoll.UntilAsync(TimeSpan.FromSeconds(5), () => conn.State == PinholeConnectionState.Closed);
             Assert.Equal(0, server.ChunksServed);
 
-            // Failure isolation: the next (current) downloader of the same ticket completes.
             string outDir = Path.Combine(dir, "out");
             BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir,
                 options: new BlobDownloadOptions { NodeOptions = Offline() }).WaitAsync(Timeout);
@@ -984,7 +926,7 @@ public sealed class BlobsTests
             byte[] data = RandomBytes(120_000);
             string src = Path.Combine(dir, "secret.bin");
             await File.WriteAllBytesAsync(src, data);
-            byte[] marker = data[50_000..50_032]; // a needle from mid-file
+            byte[] marker = data[50_000..50_032];
 
             await using var relay = new FakeIrohRelay();
             var relayOptions = new PinholeOptions
@@ -999,9 +941,6 @@ public sealed class BlobsTests
             };
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = relayOptions });
 
-            // A ticket whose only candidate is the relay: the downloader has no direct
-            // address to punch at, so the handshake — and everything until the engine
-            // negotiates an upgrade — rides the relay.
             var full = Pinhole.ConnectionString.Parse(server.Ticket.ConnectionString);
             string relayOnly = new Pinhole.ConnectionString(full.PeerId,
                 full.Candidates.Where(c => c.Kind == Pinhole.CandidateKind.IrohRelay).ToArray(),
@@ -1033,8 +972,6 @@ public sealed class BlobsTests
         }
     }
 
-    // ---------------------------------------------------------------- wire-oracle adversarial provider
-
     private sealed class BlobsOracle : IDisposable
     {
         public readonly Socket Sock = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -1059,8 +996,6 @@ public sealed class BlobsTests
             ulong stream = BlobWire.StreamId(root);
             long totalChunks = (content.Length + Blake3.ChunkSize - 1) / Blake3.ChunkSize;
 
-            // Phase 1: engine handshake. The crypto PUNC names the dialer; answer PACK
-            // from the address it arrived on.
             EndPoint client = new IPEndPoint(IPAddress.Loopback, 0);
             uint clientToken = 0;
             while (!ct.IsCancellationRequested)
@@ -1088,8 +1023,8 @@ public sealed class BlobsTests
                     byte[] pack = new byte[9 + CryptoWire.PackCryptoBody];
                     pack[0] = 0x51;
                     BinaryPrimitives.WriteUInt64LittleEndian(pack.AsSpan(1), PeerId);
-                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(9), clientToken); // echo: we saw the PUNC
-                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), EngineToken); // our token for the client to pin
+                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(9), clientToken);
+                    BinaryPrimitives.WriteUInt32LittleEndian(pack.AsSpan(13), EngineToken);
                     _crypto.MyEphPublic.CopyTo(pack.AsSpan(17));
                     _crypto.MyStaticPublic.CopyTo(pack.AsSpan(49));
                     _crypto.MyConfirm().CopyTo(pack.AsSpan(81));
@@ -1099,8 +1034,6 @@ public sealed class BlobsTests
                 }
             }
 
-            // Phase 2: serve. Only the Hello (plaintext inside the engine-sealed Data
-            // frame) is answered; everything else the client sends is ignored.
             while (!ct.IsCancellationRequested)
             {
                 int received;
@@ -1111,12 +1044,12 @@ public sealed class BlobsTests
                     received = r.ReceivedBytes;
                     if (received < 13 || buf[0] is 0x50 or 0x51 or 0x57)
                     {
-                        continue; // handshake frames are plaintext by design
+                        continue;
                     }
 
                     if (!_crypto!.Recv!.Open(buf.AsSpan(0, received), plain, out len))
                     {
-                        continue; // not sealed under the session keys: not the downloader
+                        continue;
                     }
                 }
                 catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
@@ -1131,23 +1064,19 @@ public sealed class BlobsTests
                     continue;
                 }
 
-                // Retries keep the same cipher and counter space, like a real provider.
                 _cipher ??= BlobWire.Cipher.For(psk, root, sid, _providerNonce)!;
                 byte[] head = _cipher.Seal(asProvider: true, ++_blobCounter, BlobWire.Head(stream, content.Length, totalChunks));
                 byte[] welcome = BlobWire.Welcome(stream, sid, _providerNonce, head);
                 byte[] forgedWelcome = welcome.ToArray();
-                forgedWelcome[42] ^= 1; // changed provider nonce, same sealed Head: must not bind the client
+                forgedWelcome[42] ^= 1;
                 await SendSealedAsync(client, forgedWelcome, ct).ConfigureAwait(false);
                 await SendSealedAsync(client, welcome, ct).ConfigureAwait(false);
 
-                // The forgery: a chunk frame claiming counter 10_000 with a corrupted
-                // tag. It must be refused and consume nothing.
                 byte[] first = ChunkFrame(stream, content, 0);
                 byte[] forged = _cipher.Seal(asProvider: true, 10_000, first);
                 forged[^1] ^= 0xFF;
                 await SendSealedAsync(client, forged, ct).ConfigureAwait(false);
 
-                // Every genuine chunk after it, small counters: all must land.
                 for (long i = 0; i < totalChunks; i++)
                 {
                     await SendBlobAsync(client, ChunkFrame(stream, content, i), ct).ConfigureAwait(false);
@@ -1195,7 +1124,7 @@ public sealed class BlobsTests
         string dir = TempDir();
         try
         {
-            byte[] data = RandomBytes(5000); // 5 chunks
+            byte[] data = RandomBytes(5000);
             var tree = new Blake3.Tree();
             tree.Update(data);
             byte[] root = tree.RootHash();
@@ -1253,12 +1182,7 @@ public sealed class BlobsTests
             using var deadline = new CancellationTokenSource(Timeout);
             if (existingTarget)
             {
-                // R3/P5 idempotent resume: a destination already holding the ticket's
-                // root-verified content is the completed transfer. The lying provider
-                // is never consulted — the call succeeds with zero wire traffic and
-                // the verified file stays byte-identical (the adversary publishes
-                // nothing either way; the no-existing-target branch below is the
-                // pure adversarial gate).
+
                 await File.WriteAllBytesAsync(target, trusted);
                 BlobDownloadResult done = await BlobClient.DownloadAsync(
                     ticket, outDir, options: new BlobDownloadOptions { NodeOptions = Offline() with { EnablePathValidation = false } },
@@ -1305,7 +1229,7 @@ public sealed class BlobsTests
             BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(40), data.Length);
             BinaryPrimitives.WriteInt64LittleEndian(state.AsSpan(48), 3);
             await File.WriteAllBytesAsync(Path.Combine(part, "state"), state);
-            await File.WriteAllBytesAsync(Path.Combine(part, "data"), data[..2048]); // the third claimed chunk is absent
+            await File.WriteAllBytesAsync(Path.Combine(part, "data"), data[..2048]);
             using var deadline = new CancellationTokenSource(Timeout);
             Task serve = oracle.ServeAdversariallyAsync(psk, root, data, deadline.Token);
             BlobDownloadResult result = await BlobClient.DownloadAsync(ticket, outDir, options: new BlobDownloadOptions
@@ -1320,9 +1244,7 @@ public sealed class BlobsTests
     [Fact]
     public void FileCheckpoint_IsDirtyChecked_NoWriteStormWhileStalled()
     {
-        // A-10: the control loop ticks Checkpoint every 50 ms even while the download
-        // is stalled; each write is two fsyncs and a rename, so an unmoved Applied
-        // cursor must not produce another one.
+
         string dir = TempDir();
         var sink = new BlobClient.FileSink(Path.Combine(dir, "file.bin"), RandomNumberGenerator.GetBytes(32));
         try
@@ -1334,8 +1256,6 @@ public sealed class BlobsTests
             sink.Checkpoint();
             Assert.Equal(1, sink.CheckpointWrites);
 
-            // Stalled: Applied has not moved; a full second of checkpoint ticks (20 at
-            // the 50 ms pace) must not touch the disk again.
             for (int i = 0; i < 20; i++)
             {
                 sink.Checkpoint();
@@ -1357,10 +1277,7 @@ public sealed class BlobsTests
     [Fact]
     public async Task Provider_FailsFastWhenTheFileChangesAfterHashing()
     {
-        // A-12: hash-then-serve is a TOCTOU window. A file mutated in between used to
-        // stream bytes that cannot verify, with no diagnostic on the provider. Now the
-        // provider refuses to serve a tree whose source moved, and the downloader's
-        // recovery budget — not a corrupt-chunk abort — is what runs out.
+
         string dir = TempDir();
         try
         {
@@ -1368,7 +1285,7 @@ public sealed class BlobsTests
             await File.WriteAllBytesAsync(src, RandomBytes(4096));
             await using var server = await BlobServer.ServeAsync(src, new BlobServeOptions { NodeOptions = Offline() });
 
-            await File.WriteAllBytesAsync(src, RandomBytes(8192)); // the hashed tree no longer exists
+            await File.WriteAllBytesAsync(src, RandomBytes(8192));
 
             await Assert.ThrowsAsync<TimeoutException>(() =>
                 BlobClient.DownloadAsync(server.Ticket, Path.Combine(dir, "out"),

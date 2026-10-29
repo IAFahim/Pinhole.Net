@@ -187,7 +187,7 @@ public sealed class IrohTransport : IAsyncDisposable, IDisposable
         List<Task> attempts = address.RelayUrls.Select(x => _engine.PrepareRawRelayAsync(x, deadline.Token)).ToList();
         if (address.DirectAddresses.Count > 0)
         {
-            deadline.Cancel(); // relay loops keep running; candidate-preparation waiters do not
+            deadline.Cancel();
             foreach (Task attempt in attempts) _ = ObserveRelayAsync(attempt);
         }
         else

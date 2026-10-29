@@ -2,9 +2,6 @@ using Pinhole.Crypto;
 
 namespace Pinhole.Core;
 
-// Machine-local mirrors of the shell's public enums (PinholeConnectionState, PathKind),
-// same numeric values so the shell's casts are value-preserving both ways and the
-// machine never references the assembly that references it.
 public enum ConnPhase : byte
 {
     Punching = 0,
@@ -23,26 +20,21 @@ public enum PathSel : byte
 
 public enum PathSelectorInputKind : byte
 {
-    DirectConfirmed = 0, // an authenticated direct frame arrived (the shell vetted eligibility first)
-    RelayConfirmed = 1,  // an authenticated relay frame arrived
-    DirectLost = 2,      // path validation condemned the carrying path
-    Forced = 3,          // a lifecycle verdict from outside (dead condemn, close, rebind)
+    DirectConfirmed = 0,
+    RelayConfirmed = 1,
+    DirectLost = 2,
+    Forced = 3,
 }
 
 public struct PathSelectorInput
 {
     public PathSelectorInputKind Kind;
-    public bool PeerConfirmed;      // RelayConfirmed: the handshake finished (null crypto counts as confirmed)
-    public bool RelaySignalingOnly; // RelayConfirmed: the option forbids relay-carried sessions
-    public bool RelayUsable;        // DirectLost: a relay leg is alive and confirmed, or permitted and ready
-    public byte ForcedPhase;        // Forced: the ConnPhase to apply
+    public bool PeerConfirmed;
+    public bool RelaySignalingOnly;
+    public bool RelayUsable;
+    public byte ForcedPhase;
 }
 
-// Which of the two routed paths carries the connection, and the connection's phase.
-// Decision state only: the shell owns endpoint adoption, the since-stamps, the
-// connected/incoming tasks and everything socket-shaped. One Notify effect is emitted
-// when (Phase, Path) actually changed — the shell's per-site reactions differ and stay
-// in the shell.
 public struct PathSelectorState
 {
     public ConnPhase Phase;
@@ -59,7 +51,7 @@ public struct PathSelectorState
 
 public static class PathSelectorMachine
 {
-    // A Notify's Value packs the verdict: (new phase << 8) | new path.
+
     public const long VerdictShift = 8;
 
     public static int Step(ref PathSelectorState state, in PathSelectorInput input, Tick now, Span<Effect> effects)
@@ -69,10 +61,7 @@ public static class PathSelectorMachine
         switch (input.Kind)
         {
             case PathSelectorInputKind.DirectConfirmed:
-                // Newest direct evidence wins whatever the connection was doing: a
-                // restored path can have exactly its old address and must still promote
-                // a relayed or pending session. Only Closed is absorbing — a closed
-                // connection is never revived by stray frames.
+
                 if (state.Phase != ConnPhase.Closed)
                 {
                     state.Phase = ConnPhase.Open;
@@ -81,10 +70,7 @@ public static class PathSelectorMachine
                 break;
 
             case PathSelectorInputKind.RelayConfirmed:
-                // The relay proves reachability, not the peer: only a confirmed
-                // handshake may open a session, and never when the relay is reserved
-                // for signaling. Relay evidence never upgrades an Open connection —
-                // direct stays newest-wins.
+
                 if (state.Phase is ConnPhase.Punching or ConnPhase.Dead
                     && input.PeerConfirmed && !input.RelaySignalingOnly)
                 {
@@ -94,10 +80,7 @@ public static class PathSelectorMachine
                 break;
 
             case PathSelectorInputKind.DirectLost:
-                // The carrying path was condemned. With a usable relay leg the session
-                // falls back to it; without one there is nothing to send on and the
-                // connection returns to punching. A degraded session whose relay also
-                // died falls the same way; a degraded session with a live relay keeps it.
+
                 if (state.Phase == ConnPhase.Open)
                 {
                     if (input.RelayUsable)
@@ -119,12 +102,11 @@ public static class PathSelectorMachine
                 break;
 
             case PathSelectorInputKind.Forced:
-                // Dead survives with its path (Dead is revivable; the path remembers
-                // what a revival would restore). Closed clears it.
+
                 ConnPhase forced = (ConnPhase)input.ForcedPhase;
                 if (forced is < (ConnPhase)0 or > ConnPhase.Closed)
                 {
-                    break; // unknown phases are a no-op, never a corruption
+                    break;
                 }
 
                 state.Phase = forced;
@@ -135,7 +117,7 @@ public static class PathSelectorMachine
                 break;
 
             default:
-                return 0; // unknown input values are a no-op, never an exception
+                return 0;
         }
 
         if (state.Phase == beforePhase && state.Path == beforePath)

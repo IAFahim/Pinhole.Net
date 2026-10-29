@@ -9,12 +9,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Wire;
 
-// Differential oracles for the STUN/TURN codecs. Pinhole grants internals to
-// this assembly, so StunBindingMessage is called directly. TurnClient's wire
-// helpers are private static (not internal), so they are reached through
-// delegates compiled from reflection — CreateDelegate rather than Invoke,
-// because span parameters cannot be boxed. Everything here is seeded and
-// socket-free: no network, no timing, no filesystem.
 public sealed class StunTurnCodecTests
 {
     private const uint Cookie = 0x2112A442;
@@ -59,8 +53,6 @@ public sealed class StunTurnCodecTests
         accepted = (byte[]?)args[2];
         return result;
     }
-
-    // ---- STUN ----
 
     [Fact]
     public void Stun_BindingRequest_GoldenBytes_MirrorStunBindingMessageRequest()
@@ -109,14 +101,12 @@ public sealed class StunTurnCodecTests
         Assert.Equal(20, n);
         Assert.Equal(v6Xor, buffer[..n]);
 
-        // the pinned bytes are exactly what the existing encoders produce
         Assert.Equal(v4Xor, TurnXorAddress(v4.Address, v4.Port, Txid));
         Assert.Equal(v6Xor, TurnXorAddress(v6.Address, v6.Port, Txid));
         Assert.True(StunTryAddress(v4Xor, Txid, true, out IPEndPoint? viaStun));
         Assert.Equal(v4, viaStun);
         Assert.Equal(v6, TurnDecodeAddress(v6Xor, Txid, true));
 
-        // full binding-response golden: one XOR-MAPPED-ADDRESS, the FakeStunServer shape
         byte[] responseGolden = Convert.FromHexString("0101000C2112A442000102030405060708090A0B002000080001112BE112A643");
         byte[] responseBuffer = new byte[64];
         int m = StunCodec.WriteBindingResponse(responseBuffer, Txid, v4);
@@ -155,7 +145,6 @@ public sealed class StunTurnCodecTests
             Assert.Equal(oracle.Other, mine.Other);
         }
 
-        // XOR-MAPPED wins over MAPPED, identically in both parsers
         IPEndPoint mappedPlain = new(IPAddress.Parse("203.0.113.20"), 1111);
         IPEndPoint mappedXor = new(IPAddress.Parse("203.0.113.21"), 2222);
         byte[] both = Build(StunCodec.BindingSuccessResponse, Txid, Concat(
@@ -166,7 +155,6 @@ public sealed class StunTurnCodecTests
         Assert.True(StunCodec.TryReadBindingResponse(both, v4Origin, out StunBindingResult? bothMine));
         Assert.Equal(mappedXor, bothMine!.Mapped);
 
-        // a repeated attribute of one type must decode identically (SetOnce semantics)
         byte[] identicalDuplicate = Build(StunCodec.BindingSuccessResponse, Txid, Concat(
             AttrBytes(StunCodec.AttrXorMappedAddress, AddressBytes(mappedXor, xor: true)),
             AttrBytes(StunCodec.AttrXorMappedAddress, AddressBytes(mappedXor, xor: true))));
@@ -216,7 +204,6 @@ public sealed class StunTurnCodecTests
         Assert.True(StunCodec.TryReadBindingResponse(good, origin, out StunBindingResult? ok));
         Assert.Equal(mapped, ok!.Mapped);
 
-        // header-level rejections
         Assert.False(StunCodec.TryReadMessage([], out _));
         Assert.False(StunCodec.TryReadMessage(good[..19], out _));
         byte[] badCookie = (byte[])good.Clone();
@@ -227,11 +214,9 @@ public sealed class StunTurnCodecTests
         Assert.False(StunCodec.TryReadMessage(Build(0x0101, Txid, [0, 0]), out _));
         Assert.False(StunCodec.TryReadMessage(Build(0xC101, Txid, []), out _));
 
-        // attribute-level rejections: declared length beyond the body, stray tail bytes
         Assert.False(StunCodec.TryReadMessage(Build(0x0101, Txid, Concat(AttrBytes(0x7FFF, new byte[8]), [0x00, 0x19, 0x00, 0x28])), out _));
         Assert.False(StunCodec.TryReadMessage(Build(0x0101, Txid, Concat(AttrBytes(0x7FFF, new byte[4]), [1, 2, 3])), out _));
 
-        // non-zero padding is rejected here while the existing parser accepts it (pinned divergence)
         byte[] dirtyPadding = Build(0x0101, Txid, Concat(
             AttrBytes(StunCodec.AttrXorMappedAddress, AddressBytes(mapped, xor: true)),
             AttrBytes(0x7FFF, [1, 2, 3, 4, 5], paddingByte: 0xEE)));
@@ -239,13 +224,11 @@ public sealed class StunTurnCodecTests
         Assert.True(StunBindingMessage.TryRead(dirtyPadding, origin, out StunBindingReply? lax));
         Assert.Equal(mapped, lax!.Mapped);
 
-        // address-value rejections
         Assert.False(StunCodec.TryReadAddress([0, 1, 0x30, 0x39, 192, 0, 2, 1, 0], Txid, false, out _));
         Assert.False(StunCodec.TryReadAddress([1, 1, 0x30, 0x39, 192, 0, 2, 1], Txid, false, out _));
         Assert.False(StunCodec.TryReadAddress([0, 3, 0x30, 0x39, 192, 0, 2, 1], Txid, false, out _));
         Assert.False(StunCodec.TryReadAddress(AddressBytes(mapped, xor: true), Txid[..11], true, out _));
 
-        // binding-response semantic rejections, all mirrored from StunBindingMessage
         Assert.False(StunCodec.TryReadBindingResponse(Response(Txid, alternate, otherOnly: true), origin, out _));
         Assert.False(StunCodec.TryReadBindingResponse(Response(Txid, new IPEndPoint(IPAddress.Parse("203.0.113.9"), 0)), origin, out _));
         Assert.False(StunCodec.TryReadBindingResponse(Response(Txid, new IPEndPoint(IPAddress.Any, 40000)), origin, out _));
@@ -259,7 +242,6 @@ public sealed class StunTurnCodecTests
             AttrBytes(StunCodec.AttrXorMappedAddress, AddressBytes(alternate, xor: true))));
         Assert.False(StunCodec.TryReadBindingResponse(conflictingDuplicate, origin, out _));
 
-        // binding-request shape rejections: only {}, {change=2}, {change=6} exist
         Assert.False(StunCodec.TryReadBindingRequest(Build(0x0001, Txid, AttrBytes(StunCodec.AttrChangeRequest, U32Bytes(0))), out _, out _));
         Assert.False(StunCodec.TryReadBindingRequest(Build(0x0001, Txid, AttrBytes(StunCodec.AttrChangeRequest, U32Bytes(4))), out _, out _));
         Assert.False(StunCodec.TryReadBindingRequest(Build(0x0001, Txid, AttrBytes(StunCodec.AttrChangeRequest, [0, 0])), out _, out _));
@@ -374,8 +356,6 @@ public sealed class StunTurnCodecTests
         return StunCodec.WriteMessage(buffer, type, txid, attributes);
     }
 
-    // ---- TURN ----
-
     [Fact]
     public void Turn_AllocateRequest_GoldenBytes_MatchTurnClientShapes()
     {
@@ -414,13 +394,11 @@ public sealed class StunTurnCodecTests
         Assert.Equal(40, TurnCodec.WriteDataIndication(buffer, Txid, peer, "hi"u8));
         Assert.Equal(dataGolden, buffer);
 
-        // byte-exact against the production composer: Message + Attr + XorAddress
         byte[] oracle = TurnBuildMessage(TurnCodec.MethodSendIndication, Txid, Concat(
             TurnAttr(TurnCodec.AttrXorPeerAddress, TurnXorAddress(peer.Address, peer.Port, Txid)),
             TurnAttr(TurnCodec.AttrData, "hi"u8)));
         Assert.Equal(oracle, sendGolden);
 
-        // parse back through my codec, and the peer address through both decoders
         Assert.True(TurnCodec.TryReadDataIndication(dataGolden, out IPEndPoint? from, out byte[]? payload));
         Assert.Equal(peer, from);
         Assert.Equal("hi"u8.ToArray(), payload);
@@ -476,7 +454,7 @@ public sealed class StunTurnCodecTests
                 byte[] value = RandomBytes(rng, rng.Next(0, 21));
                 if (attrType == TurnCodec.AttrMessageIntegrity && value.Length != 20)
                 {
-                    attrType = 0x7FFF; // the canonical writer pins MESSAGE-INTEGRITY to 20 bytes
+                    attrType = 0x7FFF;
                 }
 
                 oracleParts[a] = TurnAttr(attrType, value);
@@ -551,13 +529,11 @@ public sealed class StunTurnCodecTests
         int n = TurnCodec.WriteAuthenticatedRequest(buffer, TurnCodec.MethodAllocate, Txid, attributes, hmac);
         byte[] signed = buffer[..n].ToArray();
 
-        // framing mirrors TurnClient.Request: integrity last, header length covers it
         Assert.Equal(TurnCodec.AttrMessageIntegrity, BinaryPrimitives.ReadUInt16BigEndian(signed.AsSpan(integrityOffset)));
         Assert.Equal(20, BinaryPrimitives.ReadUInt16BigEndian(signed.AsSpan(integrityOffset + 2)));
         Assert.Equal(signed.Length - 20, BinaryPrimitives.ReadUInt16BigEndian(signed.AsSpan(2)));
         Assert.Equal(0, signed.Length % 4);
 
-        // the production authenticator accepts my bytes and rejects a wrong key
         object pending = NewPendingRequest(TurnCodec.MethodAllocate, key);
         Assert.True(TurnTryAuthenticate(signed, pending, out byte[]? accepted));
         Assert.Equal(signed, accepted);
@@ -589,7 +565,6 @@ public sealed class StunTurnCodecTests
         TurnRejectException reject = Assert.IsType<TurnRejectException>(wrapped.InnerException);
         Assert.Equal(437, reject.Code);
 
-        // unsigned 401 challenge flows through the challenge path, identically
         byte[] challenge = Build((ushort)(TurnCodec.MethodAllocate | TurnCodec.ClassError), Txid, Concat(
             AttrBytes(TurnCodec.AttrErrorCode, ErrorCodeValue(401, "Unauthorized"u8)),
             AttrBytes(TurnCodec.AttrRealm, "pinhole-test"u8),
@@ -599,7 +574,6 @@ public sealed class StunTurnCodecTests
         InvalidOperationException challengeException = Assert.IsType<InvalidOperationException>(challengeThrow.InnerException);
         Assert.Contains("401", challengeException.Message);
 
-        // odd-length reason phrases exercise attribute padding
         byte[] paddedError = Build((ushort)(TurnCodec.MethodRefresh | TurnCodec.ClassError), Txid,
             AttrBytes(TurnCodec.AttrErrorCode, ErrorCodeValue(401, "denied"u8)));
         Assert.True(TurnCodec.TryReadMessage(paddedError, out TurnMessage? padded));
@@ -617,7 +591,6 @@ public sealed class StunTurnCodecTests
         byte[] allocateRequest = buffer[..n].ToArray();
         Assert.True(TurnCodec.TryReadMessage(allocateRequest, out _));
 
-        // header-level rejections
         Assert.False(TurnCodec.TryReadMessage([], out _));
         Assert.False(TurnCodec.TryReadMessage(allocateRequest[..19], out _));
         byte[] badCookie = (byte[])allocateRequest.Clone();
@@ -630,22 +603,18 @@ public sealed class StunTurnCodecTests
         Assert.False(TurnCodec.TryReadMessage(Build(0x0003, Txid, Concat(AttrBytes(0x7FFF, new byte[4]), [1, 2, 3])), out _));
         Assert.False(TurnCodec.TryReadMessage(Build(0x0003, Txid, AttrBytes(TurnCodec.AttrMessageIntegrity, new byte[18])), out _));
 
-        // non-zero padding is rejected here; TurnClient's walker ignores it (pinned divergence)
         byte[] dirtyPadding = Build(0x0003, Txid, AttrBytes(TurnCodec.AttrRealm, [1, 2, 3, 4, 5], paddingByte: 0xFF));
         Assert.False(TurnCodec.TryReadMessage(dirtyPadding, out _));
         List<(ushort Type, byte[] Value)> dirtyWalked = TurnAttributes(dirtyPadding);
         Assert.Single(dirtyWalked);
         Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, dirtyWalked[0].Value);
 
-        // an attribute claiming more bytes than the body carries is rejected here;
-        // TurnClient's walker clamps to whatever is available (pinned divergence)
         byte[] clamped = Build(0x0003, Txid, [0x00, 0x19, 0x00, 0x06, 17, 0, 0, 0]);
         Assert.False(TurnCodec.TryReadMessage(clamped, out _));
         List<(ushort Type, byte[] Value)> clampedWalked = TurnAttributes(clamped);
         Assert.Single(clampedWalked);
         Assert.Equal(new byte[] { 17, 0, 0, 0 }, clampedWalked[0].Value);
 
-        // typed-attribute rejections
         Assert.False(TurnCodec.TryReadRequestedTransport([17, 0, 0, 0, 0], out _));
         Assert.False(TurnCodec.TryReadRequestedTransport([17, 1, 0, 0], out _));
         Assert.True(TurnCodec.TryReadRequestedTransport([17, 0, 0, 0], out byte protocol));
@@ -659,28 +628,23 @@ public sealed class StunTurnCodecTests
         Assert.True(TurnCodec.TryReadLifetime([0, 0, 0x02, 0x58], out uint lifetime));
         Assert.Equal(600u, lifetime);
 
-        // address rejections: trailing bytes, unknown family, reserved byte;
-        // TurnClient.DecodeAddress tolerates the trailing bytes (pinned divergence)
         byte[] longAddress = [0, 1, 0x30, 0x39, 198, 51, 100, 7, 0];
         Assert.False(TurnCodec.TryReadAddress(longAddress, Txid, true, out _));
         Assert.NotNull(TurnDecodeAddress(longAddress, Txid, true));
         Assert.False(TurnCodec.TryReadAddress([0, 7, 0, 0, 1, 2, 3, 4], Txid, true, out _));
         Assert.False(TurnCodec.TryReadAddress([1, 1, 0x30, 0x39, 198, 51, 100, 7], Txid, true, out _));
 
-        // data-indication shape rejections
         IPEndPoint peer = new(IPAddress.Parse("198.51.100.7"), 5000);
         Assert.False(TurnCodec.TryReadDataIndication(Build(TurnCodec.MethodDataIndication, Txid, AttrBytes(TurnCodec.AttrXorPeerAddress, TurnPeerAddressBytes(peer))), out _, out _));
         Assert.False(TurnCodec.TryReadDataIndication(Build(TurnCodec.MethodDataIndication, Txid, AttrBytes(TurnCodec.AttrData, "x"u8)), out _, out _));
         Assert.False(TurnCodec.TryReadDataIndication(Build(TurnCodec.MethodDataIndication, Txid, AttrBytes(TurnCodec.AttrXorPeerAddress, [0, 7, 0, 0, 1, 2, 3, 4])), out _, out _));
         Assert.False(TurnCodec.TryReadDataIndication(Build(TurnCodec.MethodSendIndication, Txid, Concat(AttrBytes(TurnCodec.AttrXorPeerAddress, TurnPeerAddressBytes(peer)), AttrBytes(TurnCodec.AttrData, "x"u8))), out _, out _));
 
-        // an empty DATA attribute is present, not absent — mirrors the receive loop
         byte[] emptyData = Build(TurnCodec.MethodDataIndication, Txid, Concat(AttrBytes(TurnCodec.AttrXorPeerAddress, TurnPeerAddressBytes(peer)), AttrBytes(TurnCodec.AttrData, [])));
         Assert.True(TurnCodec.TryReadDataIndication(emptyData, out IPEndPoint? from, out byte[]? payload));
         Assert.Equal(peer, from);
         Assert.Empty(payload!);
 
-        // the last XOR-PEER-ADDRESS wins, mirroring the receive loop's foreach
         IPEndPoint lastPeer = new(IPAddress.Parse("198.51.100.8"), 5001);
         byte[] duplicated = Build(TurnCodec.MethodDataIndication, Txid, Concat(
             AttrBytes(TurnCodec.AttrXorPeerAddress, TurnPeerAddressBytes(peer)),
@@ -790,7 +754,7 @@ public sealed class StunTurnCodecTests
                     byte[] randomValue = RandomBytes(rng, rng.Next(0, 17));
                     if (randomType == TurnCodec.AttrMessageIntegrity && randomValue.Length != 20)
                     {
-                        randomType = 0x7FFF; // the canonical writer pins MESSAGE-INTEGRITY to 20 bytes
+                        randomType = 0x7FFF;
                     }
 
                     attributes[i] = new TurnAttribute(randomType, randomValue);
@@ -801,8 +765,6 @@ public sealed class StunTurnCodecTests
 
         return TurnCodec.WriteMessage(buffer, type, txid, attributes);
     }
-
-    // ---- shared fixtures ----
 
     private static byte[] Build(ushort type, ReadOnlySpan<byte> txid, ReadOnlySpan<byte> body)
     {
@@ -876,12 +838,12 @@ public sealed class StunTurnCodecTests
         {
             byte[] raw = new byte[16];
             rng.NextBytes(raw);
-            raw[0] = (byte)rng.Next(1, 255); // never the unspecified address, never multicast
+            raw[0] = (byte)rng.Next(1, 255);
             return new IPEndPoint(new IPAddress(raw), rng.Next(1, 65536));
         }
 
         byte[] v4 = new byte[4];
-        v4[0] = (byte)rng.Next(1, 224); // unicast IPv4 first octet, matching StunBindingMessage.Usable
+        v4[0] = (byte)rng.Next(1, 224);
         rng.NextBytes(v4.AsSpan(1));
         return new IPEndPoint(new IPAddress(v4), rng.Next(1, 65536));
     }

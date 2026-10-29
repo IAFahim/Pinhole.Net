@@ -2,20 +2,12 @@ using System.Buffers.Binary;
 
 namespace Pinhole.Blobs;
 
-// R2 verified runs. A run is an aligned 64-chunk subtree of the file's canonical
-// left-complete BLAKE3 tree; the ragged tail is one run. Chunk frames carry leaf CVs;
-// the Proof frame carries the sibling CVs from the run's node up to the file root.
-// VerifyRun folds the leaf CVs, folds the sibling chain with the ROOT flag on the fold
-// that completes the file, and compares the digest to the ticket root. Nothing may
-// reach the disk before that comparison passes.
 internal static class RunVerify
 {
     internal const int RunChunks = 64;
-    internal const int MaxSiblings = 64; // also bounds the fold-stack depth below
+    internal const int MaxSiblings = 64;
     internal const int CvSize = 32;
 
-    // Supports chunk counts to 2^32 (files to 2^42 bytes); beyond that the sibling
-    // path outgrows MaxSiblings and every entry point returns false / -1.
     internal static long RunCount(long totalChunks) =>
         totalChunks <= 0 ? 0 : (totalChunks + RunChunks - 1) / RunChunks;
 
@@ -27,8 +19,6 @@ internal static class RunVerify
         return (int)Math.Min(RunChunks, Math.Max(0, len));
     }
 
-    // A single-chunk file has no folds; its root is the chunk hashed with the ROOT
-    // flag, so the receiver needs the bytes (not a CV) to check it.
     internal static bool VerifySingleChunk(ReadOnlySpan<byte> chunkData, ReadOnlySpan<byte> expectedRoot)
     {
         if (chunkData.Length is < 0 or > Blake3.ChunkSize || expectedRoot.Length != CvSize)
@@ -43,11 +33,6 @@ internal static class RunVerify
         return digest.SequenceEqual(expectedRoot);
     }
 
-    // Folds every run CV (run order) into the file root: the same stack discipline
-    // the streaming hasher uses, with ROOT on the final spine fold. This is the
-    // receiver's Complete()-time root check when runs were verified on arrival —
-    // the second hashing pass over the data disappears. Single-run files verify
-    // through VerifyRun's empty-proof branch (or VerifySingleChunk) instead.
     internal static bool FoldRunsToRoot(ReadOnlySpan<byte> runCvs, long totalChunks, Span<byte> root32)
     {
         long runs = RunCount(totalChunks);
@@ -56,10 +41,6 @@ internal static class RunVerify
             return false;
         }
 
-        // Push every run but the last, then fold the last run's CV up the spine
-        // smallest-first with ROOT on the final fold — the exact shape of the
-        // streaming hasher's finish, so a power-of-two run count never merges its
-        // top pair without the ROOT flag.
         Span<uint> stack = stackalloc uint[8 * MaxSiblings];
         Span<long> stackCounts = stackalloc long[MaxSiblings];
         int depth = 0;
@@ -98,11 +79,6 @@ internal static class RunVerify
         public bool NodeIsLeft { get; }
     }
 
-    // The sibling chain from the run's node to the file root, bottom-up. Every aligned
-    // run is a node of the canonical tree, so the chain is a function of (runIndex,
-    // totalChunks) alone; the proof only supplies CV bytes. Each sibling is either a
-    // power-of-two range (>= 64 chunks, 64-aligned) or a fold-chain suffix [o, n), so
-    // the run-level tree can answer every lookup. Returns the step count, or -1.
     internal static int SiblingPath(long runIndex, long totalChunks, Span<Step> path)
     {
         if (totalChunks < 2 || runIndex < 0 || runIndex >= RunCount(totalChunks))
@@ -128,10 +104,6 @@ internal static class RunVerify
         return count;
     }
 
-    // Verifies one run. leafCvs holds the run's leaf CVs (RunLength * 32 bytes), in
-    // chunk order; siblings holds the Proof frame's CVs bottom-up (count * 32). The
-    // final fold carries ROOT; the digest must equal expectedRoot. Total: false on any
-    // shape mismatch. totalChunks == 1 has no run — use VerifySingleChunk.
     internal static bool VerifyRun(
         ReadOnlySpan<byte> leafCvs,
         ReadOnlySpan<byte> siblings,
@@ -157,8 +129,6 @@ internal static class RunVerify
             return false;
         }
 
-        // A single-run file folds its own top pair with ROOT; otherwise ROOT lands on
-        // the chain fold that completes the file (always the last step).
         if (steps == 0)
         {
             Span<byte> digest = stackalloc byte[CvSize];
@@ -181,7 +151,7 @@ internal static class RunVerify
         for (int i = 0; i < steps; i++)
         {
             LoadCv(siblings.Slice(i * CvSize, CvSize), sib);
-            // The walker exits at [0, n), so ROOT belongs to the last fold.
+
             bool isLast = i == steps - 1;
             Crypto.Blake3.ParentWords(
                 path[i].NodeIsLeft ? cur : sib,
@@ -195,10 +165,6 @@ internal static class RunVerify
         return digest2.SequenceEqual(expectedRoot);
     }
 
-    // Folds a run's leaf CVs into the run node CV: the canonical left-complete subtree
-    // for the run's length, exactly the shape the streaming hasher produces. rootOnFinal
-    // places ROOT on the final fold (single-run files); run CVs for larger files use
-    // false, since the chain above them supplies ROOT.
     internal static bool FoldRun(ReadOnlySpan<byte> leafCvs, int leafCount, bool rootOnFinal, Span<byte> cv32)
     {
         if (cv32.Length < CvSize || leafCount < 1 || leafCvs.Length != leafCount * CvSize)
@@ -208,7 +174,7 @@ internal static class RunVerify
 
         if (leafCount == 1)
         {
-            // No fold exists to carry ROOT; callers handle single-chunk files directly.
+
             if (rootOnFinal)
             {
                 return false;
@@ -252,10 +218,6 @@ internal static class RunVerify
         return true;
     }
 
-    // Classifies the node [s, s+m) inside the tree over n chunks: which sibling sits
-    // beside it, on which side, and the parent's range. A node is one of: a top-level
-    // part of n's binary decomposition, a fold-chain suffix [o_i, n), or an aligned
-    // power-of-two strictly inside a part's perfect subtree.
     private static bool TryClassify(long s, long m, long n, out Step step, out long parentStart, out long parentLen)
     {
         step = default;
@@ -279,8 +241,7 @@ internal static class RunVerify
             {
                 if (s + m == n && prevOffset >= 0)
                 {
-                    // Fold-chain suffix: the accumulated right side; the previous part
-                    // is its sibling and the parent is the suffix above it.
+
                     step = new Step(prevOffset, prevSize, nodeIsLeft: false);
                     parentStart = prevOffset;
                     parentLen = n - prevOffset;
@@ -289,7 +250,7 @@ internal static class RunVerify
 
                 if (m == size && s + m < n)
                 {
-                    // A part folds against everything after it.
+
                     step = new Step(o + size, n - o - size, nodeIsLeft: true);
                     parentStart = o;
                     parentLen = n - o;
@@ -378,9 +339,6 @@ internal static class RunVerify
     }
 }
 
-// The provider side: the left-complete tree over run CVs with every internal node
-// retained, so a proof costs O(depth) lookups instead of re-folding sibling ranges.
-// Build once per served file from its per-chunk leaf CVs.
 internal sealed class RunTree
 {
     private readonly byte[][] _runCvs;
@@ -416,8 +374,6 @@ internal sealed class RunTree
 
     public byte[] RunCv(long runIndex) => _runCvs[runIndex];
 
-    // Writes the proof for runIndex (sibling CVs, bottom-up) into siblingsOut and
-    // returns the sibling count, or -1 on invalid input.
     public int Proof(long runIndex, long totalChunks, Span<byte> siblingsOut)
     {
         if (siblingsOut.Length < RunVerify.MaxSiblings * RunVerify.CvSize)
@@ -470,9 +426,7 @@ internal sealed class RunTree
 
     private byte[]? Lookup(long chunkStart, long chunkLen)
     {
-        // Every sibling of a run node is 64-aligned with a length that is either a
-        // power of two >= 64 or the ragged suffix ending at the file root; both map
-        // onto run ranges by dividing and rounding up.
+
         long start = chunkStart / RunVerify.RunChunks;
         long count = (chunkStart + chunkLen + RunVerify.RunChunks - 1) / RunVerify.RunChunks - start;
         return count == 1 ? _runCvs[start] : _nodes.GetValueOrDefault((start << 32) | count);
@@ -486,8 +440,6 @@ internal sealed class RunTree
             p *= 2;
         }
 
-        // A perfect count splits in half; a ragged one keeps the left side the largest
-        // power of two below it, matching the streaming hasher's stack discipline.
         return p == count ? count / 2 : p;
     }
 }

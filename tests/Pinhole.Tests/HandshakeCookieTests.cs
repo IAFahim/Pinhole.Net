@@ -9,22 +9,10 @@ using Xunit;
 
 namespace Pinhole.Tests;
 
-// R5 phase 2 armor: the mac2/cookie exchange. Under initiation load a responder stops
-// answering PUNCs with PACK and demands a cookie bound to the PUNC's source address
-// instead; a spoofed-source flood never sees the cookie it would have to echo, so it can
-// extract neither PACK output nor key agreements nor connection state. These pin the wire
-// shapes (111-byte PUNC, 30-byte COOKIE frame, marker 0x05, the MAC inputs), the
-// two-epoch rotation window, the per-source and global load arms with their bounded
-// table, the spoofed-flood behavior under load, the honest dialer completing the extra
-// round trip on the SAME attempt, and the documented cost to a v3 dialer under load.
 public sealed class HandshakeCookieTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
-    // TCP is disabled in these tests on purpose: a TCP arrival cannot spoof its source
-    // (a three-way handshake completed), so the cookie gate exempts TCP by design — and
-    // an exempt path must not rescue a dial that the UDP armor is busy proving something
-    // about. The mac2 exchange itself is UDP-direct-only armor.
     private static PinholeOptions Opts(TimeSpan? connectTimeout = null) => new()
     {
         StunServers = [],
@@ -60,7 +48,7 @@ public sealed class HandshakeCookieTests
 
         if (!goodMac1)
         {
-            // The last mac1 byte: just before the mac1 ext tail, or just before mac2's.
+
             frame[frame.Length - (mac2 ? CryptoWire.Mac2ExtLength + CryptoWire.Mac1Length : CryptoWire.Mac1Length)] ^= 0xFF;
         }
 
@@ -77,8 +65,6 @@ public sealed class HandshakeCookieTests
             RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), mac2Key: cookie.ToArray());
     }
 
-    // ------------------------------------------------------------------ the mac2/cookie codec
-
     [Fact]
     public void Mac2_IsKeyedBlake3OverTheWholeFrameMinusTheMac2_Mac1Untouched()
     {
@@ -87,11 +73,9 @@ public sealed class HandshakeCookieTests
         byte[] frame = V4Punc(0xA11CE_0002, 0x0BAD_C0DE, RandomNumberGenerator.GetBytes(32),
             RandomNumberGenerator.GetBytes(32), mac1Key, mac2Key: cookie);
 
-        Assert.Equal(111, frame.Length); // 9 + PuncCryptoBodyV4Mac2, outside every v3/v4-mac1 length class
+        Assert.Equal(111, frame.Length);
         Assert.Equal(CryptoWire.Mac2Marker, frame[^CryptoWire.Mac2ExtLength]);
-        // Independent recomputation: keyed BLAKE3 (the 16-byte cookie zero-extended to
-        // the 32-byte key size) over everything but the 16 mac2 bytes — which includes
-        // mac1 and both markers.
+
         byte[] key32 = new byte[CryptoWire.CookieKeyLength];
         cookie.CopyTo(key32, 0);
         byte[] expected = Blake3.HashKeyed(key32, frame.AsSpan(0, frame.Length - CryptoWire.Mac2Length));
@@ -103,9 +87,6 @@ public sealed class HandshakeCookieTests
         Assert.False(CryptoWire.VerifyMac2(frame, cookie), "edited body");
         frame[20] ^= 0x01;
 
-        // mac1 still covers exactly the bytes it always did: the frame through the mac1
-        // extension, with mac2 sliced off the view — and mac2's marker is what makes the
-        // view; destroy it and mac2 stops parsing (a foreign marker is not a mac2).
         Assert.True(CryptoWire.HasMac2(frame));
         Assert.False(CryptoWire.HasMac2(V4Punc(1, 2, new byte[32], new byte[32], mac1Key)));
         Assert.False(CryptoWire.VerifyMac2(V4Punc(1, 2, new byte[32], new byte[32], mac1Key), cookie));
@@ -122,13 +103,10 @@ public sealed class HandshakeCookieTests
         HandshakeState s = HandshakeState.Create(0x1111_1111, offeredCrypto: true);
         Effect[] effects = new Effect[2];
 
-        // Under load with no valid mac2: the ONLY effect is the COOKIE reply — the pin
-        // mismatch, stale token, and mixed-mode checks never run, so nothing about the
-        // responder's state leaks into the demand.
         HandshakeInput input = default;
         input.Kind = HandshakeInputKind.PuncBegin;
         input.CryptoBody = true;
-        input.PinMatches = false;      // would be RejectPin without the load gate
+        input.PinMatches = false;
         input.Mac1Present = true;
         input.Mac1Ok = true;
         input.CookieRequired = true;
@@ -140,22 +118,18 @@ public sealed class HandshakeCookieTests
         Assert.Equal(HandshakeMachine.ReplyCookie, effects[0].Value);
         Assert.False(s.RemoteTokenKnown, "the cookie demand latched no token");
 
-        // mac2 verified (or not demanded): the normal path resumes — pin and keys sequenced.
         HandshakeState honest = HandshakeState.Create(0x1111_1111, offeredCrypto: true);
         input.PinMatches = true;
         input.CookieOk = true;
         n = HandshakeMachine.Step(ref honest, in input, new Tick(0), effects);
         Assert.Equal(HandshakeMachine.NeedKeys, effects[0].Value);
 
-        // Not under load: a frame that carries mac2 without proving it is NOT punished —
-        // mac2 is ignored entirely when the responder is not demanding it.
         HandshakeState calm = HandshakeState.Create(0x1111_1111, offeredCrypto: true);
         input.CookieRequired = false;
         input.CookieOk = false;
         n = HandshakeMachine.Step(ref calm, in input, new Tick(0), effects);
         Assert.Equal(HandshakeMachine.NeedKeys, effects[0].Value);
 
-        // And the mac1 gate still comes first: a failed mac1 is silence even under load.
         HandshakeState forged = HandshakeState.Create(0x1111_1111, offeredCrypto: true);
         input.Mac1Ok = false;
         n = HandshakeMachine.Step(ref forged, in input, new Tick(0), effects);
@@ -163,17 +137,13 @@ public sealed class HandshakeCookieTests
         Assert.Equal(HandshakeMachine.RejectMac1, effects[0].Value);
     }
 
-    // ------------------------------------------------------------------ the jar and the load table
-
     [Fact]
     public void CookieJar_KeepsThePreviousEpoch_RefusesTwoAgo_AndBindsToTheSource()
     {
-        long now = 5 * CookieArmor.EpochMs + 1_000; // mid epoch 5
+        long now = 5 * CookieArmor.EpochMs + 1_000;
         var armor = new CookieArmor(() => now);
         byte[] source = SourceKey(1);
 
-        // Minted in epoch 5; valid in epoch 5 and epoch 6 (the previous secret), refused
-        // in epoch 7 — pure epoch arithmetic, no clock sleeps.
         byte[] frame = Mac2Frame(armor, source);
         Assert.True(armor.VerifyMac2(frame, source));
         now += CookieArmor.EpochMs;
@@ -181,8 +151,6 @@ public sealed class HandshakeCookieTests
         now += CookieArmor.EpochMs;
         Assert.False(armor.VerifyMac2(frame, source), "epoch N-2 cookie must be refused");
 
-        // The binding is the source address: a cookie minted for source A never
-        // validates a frame from source B, in either live epoch.
         long later = 20 * CookieArmor.EpochMs;
         var fresh = new CookieArmor(() => later);
         byte[] forA = Mac2Frame(fresh, SourceKey(1));
@@ -205,9 +173,6 @@ public sealed class HandshakeCookieTests
         Assert.True(armor.NotePuncAndCheckLoad(source, now), "the threshold-crossing PUNC trips for itself");
         Assert.Equal(1, armor.TrackedSources);
 
-        // A spoofed-source flood: every PUNC from a fresh address, so no per-source count
-        // can ever trip — the GLOBAL arm must. Memory stays at the fixed bound while
-        // thousands of unique sources cycle through the table.
         for (int i = 0; i < CookieArmor.GlobalThreshold; i++)
         {
             armor.NotePuncAndCheckLoad(SourceKey(0x1000 + i), now);
@@ -217,21 +182,12 @@ public sealed class HandshakeCookieTests
         Assert.True(armor.NotePuncAndCheckLoad(SourceKey(0x9999), now), "the global arm catches a fresh spoofed source");
         Assert.Equal(CookieArmor.MaxSources, armor.TrackedSources);
 
-        // The window cools by arithmetic, not by sleeps: one window past the last counted
-        // PUNC and the same source is admitted again (the honest-dialer escape).
         now += CookieArmor.LoadWindowMs + 1;
         Assert.False(armor.NotePuncAndCheckLoad(SourceKey(0x9999), now), "the load window expired");
     }
 
-    // ------------------------------------------------------------------ the spoofed flood under load
-
     private const ulong FakePeer = 0xDEAD_BEEF_DEAD_BEEF;
 
-    // Enough mac1-valid forgeries from one horde socket (one fake peer id, so at most
-    // one pre-load stranger husk exists) to trip BOTH the per-source window (64) and the
-    // global window (512), then waits until the global arm is provably hot: cookie
-    // demands only pass GlobalThreshold once the horde is essentially fully processed,
-    // well past the 512th counted PUNC. Ordering, not wall-clock, is the sync point.
     private static async Task ArmGlobalLoadAsync(PinholeNode listener, IPEndPoint listenerWire, byte[] listenerKey)
     {
         using var horde = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -248,8 +204,6 @@ public sealed class HandshakeCookieTests
             () => listener.Engine.CookieDemanded >= CookieArmor.GlobalThreshold + 8);
     }
 
-    // Reads from sock until it goes quiet (first timeout) or the budget ends; classify
-    // sees each datagram, the count of matching datagrams comes back.
     private static int Drain(Socket sock, Func<byte[], int, bool> classify, TimeSpan budget)
     {
         byte[] buf = new byte[2048];
@@ -290,10 +244,6 @@ public sealed class HandshakeCookieTests
         byte[] eph = RandomNumberGenerator.GetBytes(32);
         byte[] stat = RandomNumberGenerator.GetBytes(32);
 
-        // mac1-VALID forgeries under the listener's real public key, one source: the
-        // first threshold-many PUNCs are admitted by design (the gate arms ON the
-        // threshold — PUNC #1's stranger husk and the retransmission PACKs are the
-        // pre-load behavior), everything after earns only cookies.
         for (int i = 0; i < CookieArmor.PerSourceThreshold + 16; i++)
         {
             attacker.SendTo(V4Punc(FakePeer, 0x1234_5678, eph, stat, listenerKey), SocketFlags.None, listenerWire);
@@ -301,8 +251,6 @@ public sealed class HandshakeCookieTests
 
         await TestPoll.UntilAsync(TimeSpan.FromSeconds(3), () => listener.Engine.CookieDemanded >= 8);
 
-        // Flush the admission window's leftovers (PACKs to the first 63) so the burst
-        // below starts from an empty receive buffer.
         Drain(attacker, static (_, _) => false, TimeSpan.FromMilliseconds(400));
 
         long agreements = listener.Engine.HandshakeKeyAgreements;
@@ -313,27 +261,18 @@ public sealed class HandshakeCookieTests
             attacker.SendTo(V4Punc(FakePeer, 0x1234_5678, eph, stat, listenerKey), SocketFlags.None, listenerWire);
         }
 
-        // From the trip instant on, every reply is a 30-byte COOKIE frame — never a
-        // PACK, never an HSCK, nothing sealed.
         int others = Drain(attacker, (buf, n) => !(n == CryptoWire.CookieFrameLength && buf[0] == 0x59),
             TimeSpan.FromMilliseconds(800));
         Assert.Equal(0, others);
 
-        // Zero key agreements, zero refusals, zero new connection state during the burst.
         Assert.Equal(agreements, listener.Engine.HandshakeKeyAgreements);
         Assert.Equal(refused, listener.Engine.Mac1Refused);
         Assert.Equal(conns, listener.Connections.Count);
 
-        // The global arm and the bounded table: a fresh-source horde (a spoofed-source
-        // flood, where per-source counting structurally cannot trip) arms the global
-        // window — its own admission window (the first PerSourceThreshold PUNCs,
-        // admitted by design) may still agree keys, exactly like the first flood's did.
         await ArmGlobalLoadAsync(listener, listenerWire, listenerKey);
         Assert.True(listener.Engine.CookieLoadSources <= CookieArmor.MaxSources);
         Assert.Equal(conns, listener.Connections.Count);
 
-        // From the armed instant on: a spoofed-source burst earns cookies only — zero
-        // key agreements, zero stranger state, table still at its bound.
         long armed = listener.Engine.HandshakeKeyAgreements;
         long demanded = listener.Engine.CookieDemanded;
         using var spoofed = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -349,8 +288,6 @@ public sealed class HandshakeCookieTests
         Assert.True(listener.Engine.CookieLoadSources <= CookieArmor.MaxSources);
     }
 
-    // ------------------------------------------------------------------ the honest dialer under load
-
     [Fact]
     public async Task HonestDialerUnderLoad_CompletesOnTheSameAttempt_WithTheMac2RoundTrip()
     {
@@ -360,9 +297,6 @@ public sealed class HandshakeCookieTests
         await ArmGlobalLoadAsync(listener, listenerWire, listenerKey);
         long agreementsBeforeDial = listener.Engine.HandshakeKeyAgreements;
 
-        // The honest dial: PUNC -> COOKIE -> PUNC+mac2 -> PACK -> HSCK, all inside ONE
-        // ConnectAsync — no re-dial, no v3 fallback (a COOKIE reply proves the responder
-        // speaks v4; the fallback clock restarts at the cookie).
         await using PinholeNode dialer = await PinholeNode.BindAsync(Opts());
         PinholeConnection conn = await dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout);
         Assert.True(conn.IsEncrypted);
@@ -371,21 +305,16 @@ public sealed class HandshakeCookieTests
             () => listener.Connections.Any(l => l.PeerId == dialer.PeerId && l.IsEncrypted));
         PinholeConnection atListener = listener.Connections.First(l => l.PeerId == dialer.PeerId);
 
-        // The dialer really did the mac2 round trip on this attempt.
         ConnState dialerState = dialer.Engine.Lookup(listener.PeerId)!;
         Assert.True(dialerState.PuncFrameV4);
         Assert.False(dialerState.PuncFrameDowngraded, "the cookie exchange must not bounce the dial into the v3 fallback");
         Assert.Equal(9 + CryptoWire.PuncCryptoBodyV4Mac2, dialerState.PuncFrame.Length);
         Assert.NotNull(dialerState.Cookie);
 
-        // The responder demanded a cookie, accepted the echoed mac2, and agreed keys for
-        // the honest dial only (the horde's post-trip PUNCs earned zero; retries may
-        // legitimately re-answer while the handshake is in flight).
         Assert.True(listener.Engine.CookieAccepted >= 1, "the honest dialer's mac2 was accepted");
         Assert.True(listener.Engine.HandshakeKeyAgreements - agreementsBeforeDial >= 1,
             "the honest dial did agree keys");
 
-        // Sealed traffic flows under the keys the exchange agreed.
         var gotAtListener = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var gotAtDialer = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         atListener.Received += p => gotAtListener.TrySetResult(p.ToArray());
@@ -395,8 +324,6 @@ public sealed class HandshakeCookieTests
         atListener.Send("and back"u8);
         Assert.Equal("and back"u8.ToArray(), await gotAtDialer.Task.WaitAsync(Timeout));
     }
-
-    // ------------------------------------------------------------------ the v3 cost under load
 
     [Fact]
     public async Task V3Dialer_V4ResponderUnderLoad_GetsOnlyCookieReplies_AndCannotComplete()
@@ -409,17 +336,13 @@ public sealed class HandshakeCookieTests
         long demanded = listener.Engine.CookieDemanded;
         int conns = listener.Connections.Count;
 
-        // A v3-only dialer cannot produce mac2, so under load it cannot complete — the
-        // documented cost of the armor until the support window closes. The responder's
-        // heaviest output to it is the 30-byte COOKIE reply: never a key agreement, never
-        // a stranger husk, never a mac1 refusal (v3 passes that gate vacuously).
         await using PinholeNode dialer = await PinholeNode.BindAsync(Opts(connectTimeout: TimeSpan.FromSeconds(3)));
         dialer.Engine.LegacyHandshakeV3Only = true;
         await Assert.ThrowsAsync<TimeoutException>(() => dialer.ConnectAsync(listener.ConnectionString).WaitAsync(Timeout));
 
         Assert.True(listener.Engine.CookieDemanded > demanded, "the v3 PUNCs earned cookie demands");
-        Assert.Equal(agreements, listener.Engine.HandshakeKeyAgreements); // never a key agreement
-        Assert.Equal(conns, listener.Connections.Count);                  // never a stranger husk
+        Assert.Equal(agreements, listener.Engine.HandshakeKeyAgreements);
+        Assert.Equal(conns, listener.Connections.Count);
         Assert.Equal(0, listener.Engine.Mac1Refused);
     }
 }

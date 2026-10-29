@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using Pinhole;
 
-// A small connectivity check, never a throughput test on shared public relays.
 List<Uri> relays = [];
 string? output = null;
 bool tlsOnly = false;

@@ -72,11 +72,11 @@ public sealed class NatHintTests
         await using PinholeNode node = await BindAsync([s1.LocalEndPoint, s2.LocalEndPoint]);
         Assert.Equal(NatHint.Symmetric, node.NatHint);
 
-        node.SetNatHint(NatHint.Cone); // the app knows better than the observations
+        node.SetNatHint(NatHint.Cone);
         Assert.Equal(NatHint.Cone, node.NatHint);
         Assert.Equal(NatHint.Cone, ConnectionString.Parse(node.ConnectionString).NatHint);
 
-        node.SetNatHint(NatHint.Unknown); // back to automatic
+        node.SetNatHint(NatHint.Unknown);
         Assert.Equal(NatHint.Symmetric, node.NatHint);
     }
 
@@ -86,7 +86,7 @@ public sealed class NatHintTests
         using FakeStunServer s1 = new();
         await using PinholeNode node = await BindAsync([s1.LocalEndPoint]);
 
-        Assert.Equal(NatHint.Unknown, node.NatHint); // one observation can never distinguish
+        Assert.Equal(NatHint.Unknown, node.NatHint);
     }
 
     [Fact]
@@ -98,7 +98,6 @@ public sealed class NatHintTests
             refresh: TimeSpan.FromMilliseconds(250));
         Assert.Equal(NatHint.Cone, node.NatHint);
 
-        // The NAT is replaced by a symmetric one mid-session (mapping now per-destination).
         s2.ReportMappedOverride = Mapping(42000);
         await TestPoll.UntilAsync(Timeout, () => node.NatHint == NatHint.Symmetric);
     }

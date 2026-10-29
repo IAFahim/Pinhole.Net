@@ -19,8 +19,8 @@ internal sealed class LanDiscovery : IDisposable
 {
     public const string Service = "_pinhole._udp.local";
     private const string HostSuffix = ".pinhole.local";
-    private const uint RecordTtl = 120;              // seconds; a gone announcer ages out fast
-    private const int MaxAddresses = 4;              // announcements must stay under one datagram
+    private const uint RecordTtl = 120;
+    private const int MaxAddresses = 4;
     private const long HeartbeatMs = 120_000;
 
     private readonly ILanChannel _channel;
@@ -46,8 +46,7 @@ internal sealed class LanDiscovery : IDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
-        // The RFC's three startup announcements, then a slow heartbeat keeping neighbors'
-        // caches warm, answering queries in between.
+
         for (int i = 0; i < 3 && !ct.IsCancellationRequested; i++)
         {
             try { SendAnnouncement(RecordTtl); }
@@ -90,7 +89,7 @@ internal sealed class LanDiscovery : IDisposable
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
             {
-                break; // the channel died; nothing left to announce on
+                break;
             }
         }
     }
@@ -134,7 +133,7 @@ internal sealed class LanDiscovery : IDisposable
         _shutdown.Cancel();
         try
         {
-            SendAnnouncement(ttl: 0); // goodbye: cache-flush the records out of neighbors
+            SendAnnouncement(ttl: 0);
         }
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
         {
@@ -161,8 +160,6 @@ internal sealed class LanDiscovery : IDisposable
             if (selected.Count < MaxAddresses && !selected.Contains(ip)) selected.Add(ip);
         return selected;
     }
-
-    // ------------------------------------------------------------------ browsing
 
     public static async Task<IReadOnlyList<LanPeer>> BrowseAsync(ILanChannel channel, TimeSpan window, CancellationToken ct)
     {
@@ -270,8 +267,6 @@ internal sealed class MulticastLanChannel : ILanChannel
 
     public MulticastLanChannel() : this(ReadInterfaces, GroupV4, GroupV6) { }
 
-    // Alternate endpoints/port let tests exercise the production dual-socket receive
-    // path using actual loopback UDP, without multicast availability in hosted runners.
     internal MulticastLanChannel(Func<IReadOnlyList<Interface>> interfaces, IPEndPoint groupV4, IPEndPoint groupV6, int? bindPort = null)
     {
         _interfaces = interfaces;
@@ -368,7 +363,7 @@ internal sealed class MulticastLanChannel : ILanChannel
                     _v4!.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, ip.GetAddressBytes());
                     _v4.SendTo(packet, SocketFlags.None, _groupV4);
                 }
-                catch (SocketException) { } // one failed route cannot suppress other links
+                catch (SocketException) { }
             }
             foreach (int index in _joinedV6)
             {
@@ -462,7 +457,7 @@ internal static class DnsCodec
 
         public void Header(ushort flags, int questions, int answers, int authority, int additional)
         {
-            AppendU16(0); // mDNS: transaction id zero
+            AppendU16(0);
             AppendU16(flags);
             AppendU16((ushort)questions);
             AppendU16((ushort)answers);
@@ -495,8 +490,8 @@ internal static class DnsCodec
             AppendU16((ushort)(ClassIn | CacheFlushBit));
             AppendU32(ttl);
             int lengthAt = StartRdata();
-            AppendU16(0); // priority
-            AppendU16(0); // weight
+            AppendU16(0);
+            AppendU16(0);
             AppendU16(port);
             WriteName(target);
             FinishRdata(lengthAt);
@@ -539,7 +534,7 @@ internal static class DnsCodec
 
         private int StartRdata()
         {
-            AppendU16(0); // length placeholder
+            AppendU16(0);
             return _buf.Count - 2;
         }
 
@@ -698,7 +693,6 @@ internal static class DnsCodec
             return null;
         }
 
-        // The address records live under the SRV target host name, not the service instance.
         var hostAddresses = new List<byte[]>();
         for (int i = 0; i < records.Count; i++)
         {
@@ -755,7 +749,7 @@ internal static class DnsCodec
             int len = rdata[pos++];
             if (pos + len > rdata.Length)
             {
-                yield break; // malformed TXT tail: keep what parsed, drop the rest
+                yield break;
             }
 
             string entry = Encoding.ASCII.GetString(rdata, pos, len);
@@ -802,7 +796,7 @@ internal static class DnsCodec
             questions = answers = authority = additional = 0;
             if (_packet.Length < 12 || _packet[0] != 0 || _packet[1] != 0 || !TrySkip(4))
             {
-                return false; // mDNS: transaction id zero
+                return false;
             }
 
             if (!TryU16(out ushort q) || !TryU16(out ushort a) || !TryU16(out ushort n) || !TryU16(out ushort d))

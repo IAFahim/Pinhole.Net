@@ -205,15 +205,13 @@ public sealed class PinholeIrohDiscoveryTests
     [Fact]
     public void ParsePayload_InvalidUtf8InTxt_IsRejectedAsInvalidData()
     {
-        // A hostile-but-properly-signed record whose DNS TXT bytes are not UTF-8 must
-        // surface as InvalidDataException (the parser's failure contract), not as a raw
-        // DecoderFallbackException/ArgumentException from the strict decoder.
+
         var identity = new RelayIdentity();
         var address = new IrohAddress(Convert.ToHexString(identity.PublicKey)) { UserData = new string('x', 40) };
         byte[] payload = IrohDiscovery.CreatePayload(address, identity, 1);
         ulong timestamp = BinaryPrimitives.ReadUInt64BigEndian(payload.AsSpan(64, 8));
         byte[] dns = payload[72..];
-        dns[^1] = 0xFF; // last TXT content byte; lengths and offsets stay intact
+        dns[^1] = 0xFF;
 
         byte[] signable = Encoding.ASCII.GetBytes(
             "3:seqi" + timestamp.ToString(CultureInfo.InvariantCulture)

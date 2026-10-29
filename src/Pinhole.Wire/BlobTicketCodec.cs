@@ -10,9 +10,6 @@ public enum WireBlobKind : byte
     Directory = 2,
 }
 
-// The pinholeblob1 ticket as a value: exactly what the binary payload carries.
-// ConnectionString travels as opaque ASCII text here; whether it is a *valid*
-// connection string is a layer above this codec.
 public readonly record struct BlobTicketValue(
     WireBlobKind Kind,
     byte[] Root,
@@ -20,18 +17,6 @@ public readonly record struct BlobTicketValue(
     string Name,
     byte[]? PreSharedKey);
 
-// Canonical binary + text codec for the pinholeblob1 ticket (audit C-15: one
-// ticket has exactly one valid encoding). Layout, mirrored from BlobTicket:
-//   u8  version (1)
-//   u8  flags   (bit0 directory, bit1 pre-shared key present; other bits reject)
-//   u8  nameLen, nameLen bytes of UTF-8 (must decode cleanly)
-//   32  root
-//   32  pre-shared key, only when the flag is set
-//   u16 LE connection-string length, then that many ASCII bytes, ending the payload
-// The text form is "pinholeblob1:" + unpadded base64url of the binary payload.
-// Divergences from the legacy BlobTicket parse are deliberate tightenings: this
-// codec rejects unknown flag bits, non-UTF-8 names, and non-ASCII connection
-// strings, which the legacy parser tolerates (lossily).
 public static class BlobTicketCodec
 {
     public const string Scheme = "pinholeblob1";
@@ -67,7 +52,7 @@ public static class BlobTicketCodec
         byte flags = payload[1];
         if ((flags & ~KnownFlags) != 0)
         {
-            return false; // unknown flag bits: this format has no reserved bits
+            return false;
         }
 
         int nameLen = payload[2];
@@ -75,13 +60,13 @@ public static class BlobTicketCodec
         int pos = 3 + nameLen;
         if (pos + RootLength + 2 + (encrypted ? PskLength : 0) > payload.Length)
         {
-            return false; // header + name + root (+ psk) + length field must be present
+            return false;
         }
 
         ReadOnlySpan<byte> nameBytes = payload.Slice(3, nameLen);
         if (!IsValidUtf8(nameBytes))
         {
-            return false; // rejects names truncated mid-code-point, not valid UTF-8
+            return false;
         }
 
         ReadOnlySpan<byte> root = payload.Slice(pos, RootLength);
@@ -101,13 +86,13 @@ public static class BlobTicketCodec
         pos += 2;
         if (csLen == 0 || pos + csLen != payload.Length)
         {
-            return false; // the connection string is non-empty and consumes the payload exactly
+            return false;
         }
 
         ReadOnlySpan<byte> csBytes = payload.Slice(pos);
         if (csBytes.IndexOfAnyExceptInRange((byte)0, (byte)0x7F) >= 0)
         {
-            return false; // the text layer is ASCII; the legacy decoder would mangle these bytes
+            return false;
         }
 
         value = new BlobTicketValue(
@@ -185,7 +170,7 @@ public static class BlobTicketCodec
             return false;
         }
 
-        string body = text[(colon + 1)..].Trim(); // mirrors BlobTicket.Parse: whitespace around the payload is tolerated
+        string body = text[(colon + 1)..].Trim();
         if (!TryDecodeBase64Url(body, out byte[] payload))
         {
             return false;
@@ -258,7 +243,7 @@ public static class BlobTicketCodec
                     throw new ArgumentException("text contains an unpaired surrogate and has no UTF-8 encoding", nameof(text));
                 }
 
-                i++; // the low half is consumed with its lead
+                i++;
             }
             else if (char.IsLowSurrogate(text[i]))
             {
@@ -267,10 +252,6 @@ public static class BlobTicketCodec
         }
     }
 
-    // Strict UTF-8 well-formedness: rejects bare continuations, overlong forms
-    // (C0/C1 leads, E0 <A0, F0 <90), surrogate halves (ED >=A0), and anything
-    // above U+10FFFF (F4 >8F) — everything the lossy Encoding.UTF8 decode would
-    // quietly turn into U+FFFD.
     private static bool IsValidUtf8(ReadOnlySpan<byte> span)
     {
         int i = 0;
@@ -317,8 +298,6 @@ public static class BlobTicketCodec
         return true;
     }
 
-    // Strict base64url: same charset and padding rules as Pinhole.Base64Url, but
-    // total (false, not throw) because wire text is untrusted.
     private static bool TryDecodeBase64Url(string text, out byte[] payload)
     {
         payload = [];

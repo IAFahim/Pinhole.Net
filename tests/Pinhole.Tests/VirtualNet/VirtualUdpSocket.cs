@@ -25,8 +25,6 @@ internal sealed class VirtualUdpSocket : IUdpSocket
 
     internal VirtualNat? Nat { get; }
 
-    // BSD can return native IPv4 sockaddrs from dual-mode sockets. Opt in to that
-    // representation so the receive-loop regression is reproducible on every OS.
     internal bool NativeIPv4Addresses { get; init; }
 
     public IPEndPoint LocalEndPoint => Address;
@@ -56,7 +54,7 @@ internal sealed class VirtualUdpSocket : IUdpSocket
 
             if (!_signal.WaitOne(200))
             {
-                throw new SocketException((int)SocketError.TimedOut); // the engine's periodic wake
+                throw new SocketException((int)SocketError.TimedOut);
             }
         }
     }

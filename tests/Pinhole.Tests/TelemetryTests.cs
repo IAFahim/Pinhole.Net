@@ -75,8 +75,6 @@ public sealed class TelemetryTests
         await using PinholeConnection conn = await b.ConnectAsync(a.ConnectionString).WaitAsync(Timeout);
         await using PinholeConnection accepted = await accept.WaitAsync(Timeout);
 
-        // MeterListener may hand early callbacks to its queue rather than inline, so the
-        // recordings are given a brief settle window instead of an instant snapshot.
         await TestPoll.UntilAsync(Timeout,
             () => meter.Count("pinhole.connection.attempts", Telemetry.OutcomeDialEstablished) > dialBefore
                 && meter.Count("pinhole.connection.attempts", Telemetry.OutcomeAcceptEstablished) > acceptBefore
@@ -95,7 +93,6 @@ public sealed class TelemetryTests
         using var meter = new MeterSnapshot();
         await using PinholeNode b = await PinholeNode.BindAsync(Opts(connectTimeout: TimeSpan.FromMilliseconds(700)));
 
-        // A string pointing at a socket that never answers: the attempt lands as a timeout.
         using var silent = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         silent.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         var cs = new ConnectionString(0xfeedfacefeedface,
@@ -115,9 +112,6 @@ public sealed class TelemetryTests
         using var meter = new MeterSnapshot();
         await using PinholeNode a = await PinholeNode.BindAsync(Opts());
 
-        // The pinning mismatch from CryptoTests.Mitm_StaticKeySubstitution_KillsTheDial:
-        // the honest peer's PACK fails the substituted static key, and the refusal must
-        // land on pinhole.connection.failures dimensioned by its fixed sentence.
         await using PinholeNode honest = await PinholeNode.BindAsync(Opts());
         ConnectionString honestString = Pinhole.ConnectionString.Parse(honest.ConnectionString);
         var tampered = new ConnectionString(
@@ -142,9 +136,6 @@ public sealed class TelemetryTests
     {
         using var meter = new MeterSnapshot();
 
-        // The connection-level counter is what #25 measures: ConnectionCrypto.CountRejected
-        // mirrors every engine-side rejection into the meter. Parallel tests may reject
-        // frames of their own — ours must be additive on top.
         int rejectedBefore = meter.Count("pinhole.frames.rejected");
         var crypto = ConnectionCrypto.New(new NodeIdentity(), 1, 2);
         crypto.CountRejected();

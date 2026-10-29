@@ -3,8 +3,6 @@ using Xunit;
 
 namespace Pinhole.Tests.Crypto;
 
-// R1 gates for the bookkeeping primitives: the replay window against a set model,
-// ledger conservation under random operation sequences, and Tick ordering.
 public sealed class PrimitivesTests
 {
     [Fact]
@@ -14,7 +12,7 @@ public sealed class PrimitivesTests
         for (int trial = 0; trial < 200; trial++)
         {
             ReplayWindow window = default;
-            ulong highest = 0; // Highest is a watermark; the default value has marked nothing
+            ulong highest = 0;
             var seen = new HashSet<ulong>();
             for (int step = 0; step < 400; step++)
             {
@@ -40,20 +38,18 @@ public sealed class PrimitivesTests
     {
         ReplayWindow w = default;
         Assert.True(w.Admits(1));
-        Assert.True(w.Admits(0)); // the watermark with an empty bitmap has marked nothing
+        Assert.True(w.Admits(0));
 
         w = w.Mark(1);
         Assert.False(w.Admits(1));
-        Assert.True(w.Admits(0)); // never marked; still inside the window
+        Assert.True(w.Admits(0));
 
-        // jump far: the old window clears; only the new Highest is marked
         w = w.Mark(200);
         Assert.False(w.Admits(200));
-        Assert.True(w.Admits(137)); // top of the window (200-63), bit clear
-        Assert.False(w.Admits(136)); // below the window: rejected as too old, seen or not
+        Assert.True(w.Admits(137));
+        Assert.False(w.Admits(136));
         Assert.True(w.Admits(201));
 
-        // gap fill inside the window
         w = w.Mark(195);
         Assert.False(w.Admits(195));
         Assert.True(w.Admits(196));
@@ -61,7 +57,6 @@ public sealed class PrimitivesTests
         w = w.Mark(196);
         Assert.False(w.Admits(196));
 
-        // marking below the window is a no-op, not corruption
         ReplayWindow before = w;
         w = w.Mark(3);
         Assert.Equal(before, w);
@@ -70,8 +65,7 @@ public sealed class PrimitivesTests
     [Fact]
     public void ReplayWindow_DuplicateSuppression_CoversAMigrationBurst()
     {
-        // The R6 multipath trick: the same sealed frame arrives on two paths; the
-        // second copy is a replay by definition.
+
         ReplayWindow w = default;
         for (ulong counter = 1; counter <= 40; counter++)
         {
@@ -131,7 +125,7 @@ public sealed class PrimitivesTests
                 ledger.Release(amount);
             }
 
-            Assert.Equal(0, ledger.Outstanding); // quiescence: everything borrowed came back
+            Assert.Equal(0, ledger.Outstanding);
         }
     }
 

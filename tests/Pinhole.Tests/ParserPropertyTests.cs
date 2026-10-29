@@ -9,7 +9,6 @@ namespace Pinhole.Tests;
 
 public sealed class ParserPropertyTests
 {
-    // ---------- BlobWire.Frame: provider-sent bytes, all hostile ----------
 
     [Property(MaxTest = 500)]
     public void FrameTryParse_OnArbitraryBytes_NeverThrows(byte[]? data)
@@ -74,8 +73,6 @@ public sealed class ParserPropertyTests
         Assert.Equal(BlobWire.ProtocolVersion, f.Version);
     }
 
-    // ---------- Manifest: the directory manifest is provider-sent bytes ----------
-
     [Property(MaxTest = 500)]
     public void ManifestDecode_OnArbitraryBytes_OnlyFormatException(byte[]? data)
     {
@@ -93,8 +90,8 @@ public sealed class ParserPropertyTests
     {
         var entries = new List<Manifest.Entry> { new("a.bin", 5, new byte[32]) };
         byte[] good = Manifest.Encode("d", entries);
-        // Layout: u16 name-len, name, u32 count, then per entry: u16 path-len, path, i64 size.
-        int sizeOffset = 2 + 1 + 4 + 2 + 5; // name="d"(1B), path="a.bin"(5B)
+
+        int sizeOffset = 2 + 1 + 4 + 2 + 5;
         BitConverter.TryWriteBytes(good.AsSpan(sizeOffset), -1L);
         Assert.Throws<FormatException>(() => Manifest.Decode(good));
     }
@@ -123,8 +120,6 @@ public sealed class ParserPropertyTests
             Assert.True(decoded[i].Size >= 0);
         }
     }
-
-    // ---------- Tickets and connection strings: user-supplied text ----------
 
     [Property(MaxTest = 500)]
     public void BlobTicketTryParse_OnArbitraryStrings_NeverThrows(string? text)

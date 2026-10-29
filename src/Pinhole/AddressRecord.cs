@@ -95,7 +95,6 @@ public sealed class AddressRecord
         ReadOnlySpan<byte> body = wire[..^SignatureLength];
         ReadOnlySpan<byte> signature = wire[^SignatureLength..];
 
-        // Field reads are bounds-checked against the body; a truncated record fails here.
         if (body[0] is not (WireVersion1 or WireVersion2) || body.Length < MinimumLength)
         {
             return false;
@@ -110,17 +109,11 @@ public sealed class AddressRecord
             return false;
         }
 
-        // Expiry is hostile input and is compared as raw Unix seconds — a forged value
-        // beyond DateTimeOffset's range must fail the parse, not throw before the
-        // signature is even checked.
         if (expires <= now.ToUnixTimeSeconds())
         {
             return false;
         }
 
-        // The signature covers the whole body, so parsing may run after verification or
-        // before — here it runs after the structural checks and before the final
-        // length reconciliation, all under the same bytes the signature covered.
         var verifier = new Ed25519Signer();
         verifier.Init(false, new Ed25519PublicKeyParameters(key.ToArray(), 0));
         verifier.BlockUpdate(body.ToArray(), 0, body.Length);
@@ -153,12 +146,9 @@ public sealed class AddressRecord
 
         if (pos != body.Length)
         {
-            return false; // trailing bytes mean the signature covered something we didn't parse
+            return false;
         }
 
-        // Unix-second bounds of DateTimeOffset: a hostile expiry inside the "not expired"
-        // half of the range but past the representable maximum still cannot become a
-        // record — total parse, typed false.
         if (expires is < -62135596800 || expires > 253402300799)
         {
             return false;
@@ -176,7 +166,7 @@ public sealed class AddressRecord
         return true;
     }
 
-    private const int MinimumLength = 58; // version + id + key + sequence + expiry + direct count
+    private const int MinimumLength = 58;
 
     private static void WriteU64(MemoryStream payload, ulong value)
     {

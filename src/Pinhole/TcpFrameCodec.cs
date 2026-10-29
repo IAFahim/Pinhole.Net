@@ -25,8 +25,7 @@ internal static class TcpFrameCodec
     internal static async ValueTask<int> ReadAsync(Stream stream, byte[] header, Memory<byte> buffer, TimeSpan bodyTimeout, CancellationToken ct)
     {
         if (header.Length < 2) throw new ArgumentException("TCP header scratch needs two bytes", nameof(header));
-        // An idle authenticated session can wait indefinitely for its next frame. Once
-        // even one header byte arrives, the rest must arrive within a bounded window.
+
         await stream.ReadExactlyAsync(header.AsMemory(0, 1), ct).ConfigureAwait(false);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(bodyTimeout);

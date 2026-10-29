@@ -97,7 +97,7 @@ internal static partial class Probe
         }
         finally
         {
-            // Only this owned child is retired; no process-name matching or stale tickets.
+
             try
             {
                 if (server.Id != 0 && !server.HasExited) server.Kill(entireProcessTree: true);
@@ -105,7 +105,7 @@ internal static partial class Probe
                 if (stderr is not null) await stderr.WaitAsync(TimeSpan.FromSeconds(5));
                 if (stdout is not null) await stdout.WaitAsync(TimeSpan.FromSeconds(5));
             }
-            catch (InvalidOperationException) { /* Process.Start may have failed. */ }
+            catch (InvalidOperationException) {  }
             Directory.Delete(directory, recursive: true);
         }
     }

@@ -1,9 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 
-// Keep live test invitations out of Git history. The per-run key is distributed
-// through an Actions artifact and deleted after the independent runners finish.
-// The signal path binds a record to its run, case and participant.
 if (args is not [var mode, var path] || mode is not ("seal" or "open")) return 2;
 byte[] key = File.ReadAllBytes(Environment.GetEnvironmentVariable("SAMPLE_KEY_FILE")!);
 using var cipher = new AesGcm(key, 16);

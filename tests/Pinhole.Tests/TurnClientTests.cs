@@ -48,7 +48,7 @@ public sealed class FakeTurnServer : IDisposable
         _relayedAddresses = relayedAddresses;
         _key = MD5.HashData(Encoding.UTF8.GetBytes($"{user}:{realm}:{password}"));
         _main = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        _main.ReceiveTimeout = 200; // bounded wakeups keep dispose from wedging on macOS
+        _main.ReceiveTimeout = 200;
         _main.Bind(new IPEndPoint(bindAddress ?? IPAddress.Loopback, port));
         Control = (IPEndPoint)_main.LocalEndPoint!;
         new Thread(Run) { IsBackground = true, Name = "fake-turn" }.Start();
@@ -140,8 +140,7 @@ public sealed class FakeTurnServer : IDisposable
             }
             catch (SocketException)
             {
-                // A reply to a client that disposed mid-flight (ICMP unreachable) must cost
-                // one datagram — an unhandled throw on this thread kills the test host.
+
             }
             catch (ObjectDisposedException)
             {
@@ -181,8 +180,7 @@ public sealed class FakeTurnServer : IDisposable
 
         var portHolder = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         portHolder.Bind(new IPEndPoint(((IPEndPoint)_main.LocalEndPoint!).Address, 0));
-        // Indications are forwarded through the control socket in this fixture. The
-        // advertised data address can differ, as on providers with an anycast control IP.
+
         var allocated = (IPEndPoint)portHolder.LocalEndPoint!;
         var address = _relayedAddresses is { Count: > 0 } addresses
             ? addresses[Allocations % addresses.Count] : allocated.Address;
@@ -248,7 +246,7 @@ public sealed class FakeTurnServer : IDisposable
         if (DropNextPermissions > 0)
         {
             DropNextPermissions--;
-            return; // the request vanishes: no reply, no state change — pure loss
+            return;
         }
 
         if (!ValidateAuth(msg, attrs, out string presentedNonce))
@@ -322,9 +320,6 @@ public sealed class FakeTurnServer : IDisposable
             return;
         }
 
-        // The receive-side half of RFC 5762/5766 permissions: delivery requires the
-        // RECEIVER's allocation to permit the sender's relayed address too. Without this
-        // gate the lab cannot see permission-bootstrap bugs — everything would just flow.
         if (StrictInbound && !target.Permitted.Contains(alloc.Relayed.Address))
         {
             InboundDropped++;
@@ -613,24 +608,19 @@ public sealed class TurnClientTests
         int seen = 0;
         b.Received += (_, _) => { if (Interlocked.Increment(ref seen) == 2) bGot.TrySetResult(seen); };
 
-        // Receive-side permission, as RFC 5766 requires before the server delivers anything
-        // to b's allocation (the fake enforces it by default now).
         await b.CreatePermissionAsync(a.RelayedAddress!.Address);
 
         await a.SendAsync("one"u8.ToArray(), b.RelayedAddress!);
         await a.SendAsync("two"u8.ToArray(), b.RelayedAddress!);
         await bGot.Task.WaitAsync(DefaultTimeout);
 
-        // Two permissions total: b's explicit one, and exactly one lazy sender-side permit
-        // for the peer despite two sends — the cache is the subject.
         Assert.Equal(2, server.PermissionsGranted);
     }
 
     [Fact]
     public async Task StaleNonce_And_AllocationRefresh_KeepRelayAlive()
     {
-        // 9 s allocation: the client refreshes every 5 s tick, so without working refresh the
-        // allocation expires and later sends/rejects are observable server-side.
+
         using FakeTurnServer server = new(lifetimeSeconds: 9);
         await using TurnClient a = await TurnClient.AllocateAsync(server.Control, "user", "pass");
         await using TurnClient b = await TurnClient.AllocateAsync(server.Control, "user", "pass");
@@ -644,7 +634,7 @@ public sealed class TurnClientTests
         Assert.Equal("before"u8.ToArray(), before);
 
         server.RotateNonce();
-        await Task.Delay(TimeSpan.FromSeconds(13)); // original expiry was 9 s
+        await Task.Delay(TimeSpan.FromSeconds(13));
 
         Assert.True(server.StaleNonceReplies >= 1, $"expected 438s after rotation, got {server.StaleNonceReplies}");
         Assert.True(server.RefreshSuccesses >= 1, "allocation was never refreshed");
@@ -666,7 +656,6 @@ public sealed class TurnClientTests
         using FakeTurnServer server = new();
         await using TurnClient a = await TurnClient.AllocateAsync(server.Control, "user", "pass");
 
-        // Blast non-STUN garbage at the client's socket; a strict receive loop would exit.
         using Socket junk = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         byte[] noise = new byte[64];
         Random.Shared.NextBytes(noise);
@@ -699,21 +688,18 @@ public sealed class TurnClientTests
     [Fact]
     public async Task ThreeFailedRefreshes_CloseTheSocketAndStopTheRefreshLoop()
     {
-        // A-06: the three-failure close disposed the socket but never cancelled the
-        // refresh loop, which kept waking on a dead socket forever — one leaked task,
-        // timer, and Received subscription per lost allocation.
+
         using FakeTurnServer server = new(lifetimeSeconds: 9);
         TurnClient a = await TurnClient.AllocateAsync(server.Control, "user", "pass");
-        server.FailNextRefreshesWithMismatch = 100; // every refresh is a signed 437
+        server.FailNextRefreshesWithMismatch = 100;
 
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var poll = new System.Threading.Timer(
             _ => { if (!a.IsAlive) closed.TrySetResult(); }, null, 0, 200);
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
         Assert.False(a.IsAlive);
-        Assert.Equal(3, server.RefreshFailuresInjected); // closed at exactly three
+        Assert.Equal(3, server.RefreshFailuresInjected);
 
-        // The loop must observe the shutdown, not keep ticking on the disposed socket.
         await a.RefreshLoopCompletion.WaitAsync(TimeSpan.FromSeconds(10));
         await a.DisposeAsync();
     }

@@ -13,7 +13,7 @@ internal static class MoqSessionPump
         using var idle = CancellationTokenSource.CreateLinkedTokenSource(session);
         CancellationToken Arm()
         {
-            idle.CancelAfter(idleTimeout); // re-armed per read: idle, never a total budget
+            idle.CancelAfter(idleTimeout);
             return idle.Token;
         }
 
@@ -64,15 +64,13 @@ internal static class MoqSessionPump
             await stream.ReadExactlyAsync(payload, Arm()).ConfigureAwait(false);
             if (Volatile.Read(ref subscription.Disposed) != 0) continue;
 
-            // C-14b: per-track backpressure. The queue is bounded; a full one waits for
-            // this track's reader instead of throwing and failing every other track.
             try
             {
                 await subscription.EnqueueAsync(new MoqObject(group, objectId, payload), session).ConfigureAwait(false);
             }
             catch (ChannelClosedException)
             {
-                return; // unsubscribed mid-run: this stream has nothing left to deliver
+                return;
             }
         }
     }

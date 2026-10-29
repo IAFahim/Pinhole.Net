@@ -1,7 +1,5 @@
 namespace Pinhole.Crypto;
 
-// Incremental BLAKE3 over the three modes. Construction allocates the fixed working
-// buffers once; Update and Finish are allocation-free. Not thread-safe.
 public sealed class Blake3Hasher
 {
     private readonly uint[] _cvInit = new uint[8];

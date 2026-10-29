@@ -1,8 +1,6 @@
 using System.Net;
 using Pinhole;
 
-// Auto uses the SDK defaults. Other modes prove which transport actually works
-// and let CI run the real samples without contacting public infrastructure.
 internal static class SampleNetwork
 {
     internal static PinholeOptions Options(int receiveBufferCapacity = 64)
@@ -35,8 +33,6 @@ internal static class SampleNetwork
         };
     }
 
-    // Explicit lists also work for coordinator sessions, which normally use the
-    // coordinator's TURN fleet when IrohRelayUrls is null.
     private static readonly Uri[] PublicIrohRelays =
     [
         new("https://aps1-1.relay.n0.iroh.link/"), new("https://euc1-1.relay.n0.iroh.link/"),

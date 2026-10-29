@@ -7,9 +7,6 @@ using Org.BouncyCastle.Crypto.Parameters;
 
 namespace Pinhole;
 
-// DERP's authentication box is NaCl box: X25519 -> HSalsa20 ->
-// XSalsa20/Poly1305. This is only the relay login; Pinhole's authenticated
-// AES-GCM session continues to seal every application datagram.
 internal static class DerpBox
 {
     internal const int NonceSize = 24;
@@ -29,8 +26,7 @@ internal static class DerpBox
                 state[i + 1] = BinaryPrimitives.ReadUInt32LittleEndian(shared.AsSpan(i * 4));
                 state[i + 11] = BinaryPrimitives.ReadUInt32LittleEndian(shared.AsSpan(16 + i * 4));
             }
-            // HSalsa20 with an all-zero 16-byte input: ten column/row double
-            // rounds, without Salsa20's final state addition.
+
             for (int i = 0; i < 10; i++)
             {
                 QuarterRound(state, 0, 4, 8, 12); QuarterRound(state, 5, 9, 13, 1);

@@ -58,11 +58,6 @@ public sealed record PinholeOptions
 
     public byte[]? IdentityKeySeed { get; init; }
 
-    // The optional per-string secret (the knock). When set, the node's connection string
-    // carries it and ONLY string holders may complete a handshake: mac1 becomes keyed
-    // with a derivation of (static public key, knock), unversioned initiations are
-    // ignored, and the session keys mix the knock as a PSK. Raw bytes — a generated
-    // >=16-byte secret; the format bound is 1..64 and options enforce 8..64.
     public byte[]? Knock { get; init; }
 
     public IReadOnlyList<IPEndPoint>? RendezvousEndpoints { get; init; }
@@ -96,14 +91,10 @@ public sealed record PinholeOptions
     internal IReadOnlyList<Uri> ResolvedIrohRelays { get; init; } = Array.Empty<Uri>();
     internal IReadOnlyList<Uri> ResolvedDerpRelays { get; init; } = Array.Empty<Uri>();
 
-    // Test seams so port-mapping tests can aim PCP/PMP at an in-process fake gateway and
-    // SSDP at an in-process fake IGD instead of the real network, plus a fast lease for
-    // renewal observations.
     internal IReadOnlyList<IPEndPoint>? GatewayOverride { get; init; }
     internal IPEndPoint? SsdpUnicastOverride { get; init; }
     internal TimeSpan PortMappingLease { get; init; } = TimeSpan.FromHours(2);
 
-    // Test seams so resolution tests can observe catalog lookups without touching the network.
     internal Func<CancellationToken, Task<IPEndPoint[]>>? StunCatalog { get; init; }
     internal Func<CancellationToken, Task<IPEndPoint[]>>? RelayCatalog { get; init; }
 
@@ -119,14 +110,12 @@ public sealed record PinholeOptions
         new Uri("https://usw1-1.relay.n0.iroh.link/"),
     ];
 
-    // Tailcat's dedicated public fleet, not the Tailscale VPN relay map.
-    // Source: https://tailcat.dev/derpmap.json (verified 2026-10-12).
     internal static readonly Uri[] PublicDerpRelays =
     [
-        new Uri("https://tc304a.ipn.dev/"), // Tokyo
-        new Uri("https://tc303a.ipn.dev/"), // Frankfurt
-        new Uri("https://tc301a.ipn.dev/"), // New York
-        new Uri("https://tc302a.ipn.dev/"), // San Francisco
+        new Uri("https://tc304a.ipn.dev/"),
+        new Uri("https://tc303a.ipn.dev/"),
+        new Uri("https://tc301a.ipn.dev/"),
+        new Uri("https://tc302a.ipn.dev/"),
     ];
 
     public static Task<PinholeOptions> DefaultAsync(CancellationToken ct = default) =>
@@ -137,15 +126,12 @@ public sealed record PinholeOptions
         options ??= new PinholeOptions();
         Validate(options);
 
-        // STUN: null resolves the free catalog; an empty or explicit list is the caller's
-        // final answer. Already-resolved lists (DefaultAsync) are never looked up twice.
         IReadOnlyList<IPEndPoint> resolvedStun = options.ResolvedStun;
         if (options.StunServers is null && resolvedStun.Count == 0)
         {
             resolvedStun = Dedupe((await ResolveStunCatalogAsync(options, ct).ConfigureAwait(false)).Take(8));
         }
 
-        // Iroh relays: null gets the public n0 relays; empty or explicit lists are final.
         IReadOnlyList<Uri> resolvedIroh = options.ResolvedIrohRelays;
         if (options.IrohRelayUrls is null && resolvedIroh.Count == 0)
         {
@@ -214,16 +200,14 @@ public sealed record PinholeOptions
         Task<IPEndPoint[]> lookup = (options.StunCatalog ?? Providers.Resolver.FreeStunAsync)(ct);
         try
         {
-            // Resolution is part of the bind and lives under the same budget (A-08): a
-            // dead or hanging resolver costs the STUN candidates, never the bind itself.
-            // The slack lets the resolver's own budget-return salvage partial results first.
+
             return await lookup.WaitAsync(options.BindProbeBudget + CatalogSlack, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is SocketException or HttpRequestException or TimeoutException)
         {
-            return Array.Empty<IPEndPoint>(); // dead infrastructure costs candidates, never the bind
+            return Array.Empty<IPEndPoint>();
         }
-        // OperationCanceledException propagates: cancellation halts the bind, it is not tolerated.
+
     }
 
     private static readonly TimeSpan CatalogSlack = TimeSpan.FromSeconds(2);

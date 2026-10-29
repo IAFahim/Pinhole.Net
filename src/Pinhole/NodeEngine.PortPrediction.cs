@@ -59,7 +59,7 @@ internal sealed partial class NodeEngine
             if (c.Prediction is not null || !PredictionAllowed(c)) return;
             lock (_predictionGate)
             {
-                if (_predictionRounds >= 4) return; // cumulative per primary source, including failed negotiations
+                if (_predictionRounds >= 4) return;
                 _predictionRounds++;
             }
             c.Prediction = new(_udp);
@@ -74,8 +74,7 @@ internal sealed partial class NodeEngine
         int length = BuildFrame(c, FrameType.Predict, body, frame);
         try
         {
-            // Coordination must not create additional primary-socket destination
-            // mappings after sampling. It stays on an already authenticated relay leg.
+
             if (c.PacketRelay is { IsAlive: true } relay && c.PacketRelayConfirmed && c.PacketRelayPeerKey is { } key)
                 SendOnArrival(new Arrival(relay, key), frame[..length]);
             else if (c.RelayReady && c.RelayRemote is { } remote)
@@ -150,7 +149,7 @@ internal sealed partial class NodeEngine
             {
                 if (ReferenceEquals(_predictionMeasuredSource, source) || fresh.Length != PortPrediction.SampleCount
                     || fresh.Any(s => _predictionContactedServers.Contains(s)) || fresh.Select(s => s.Address).Distinct().Count() < 3) return null;
-                _predictionMeasuredSource = source; // even a failed measurement consumes its fresh destinations
+                _predictionMeasuredSource = source;
             }
             List<IPEndPoint> observations = [];
             foreach (IPEndPoint server in fresh) observations.Add(await ProbeStunFromAsync(source, server, ct).ConfigureAwait(false));

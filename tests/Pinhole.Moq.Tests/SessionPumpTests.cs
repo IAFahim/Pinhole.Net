@@ -9,16 +9,16 @@ public sealed class SessionPumpTests
 
     private static byte[] SubgroupHeader(ulong alias, ulong group) =>
     [
-        0x18,                    // object stream type: no extra integer, priority present
+        0x18,
         (byte)alias,
         (byte)group,
-        0x80,                    // priority
+        0x80,
     ];
 
     private static byte[] Object(ulong delta, byte payload) =>
     [
-        (byte)delta,             // object id delta (first object: absolute id)
-        (byte)1,                 // payload length
+        (byte)delta,
+        (byte)1,
         payload,
     ];
 
@@ -36,7 +36,7 @@ public sealed class SessionPumpTests
         {
             if (_part >= _parts.Count)
             {
-                return 0; // clean FIN
+                return 0;
             }
 
             (int delayMs, byte[] bytes) = _parts[_part];
@@ -72,16 +72,12 @@ public sealed class SessionPumpTests
     [Fact]
     public async Task SubgroupStream_OlderThanAnyIdleBudget_SurvivesWhileDataFlows()
     {
-        // C-14a: the old loop wrapped each stream's whole lifetime in one deadline, so a
-        // subgroup stream open longer than the budget failed the entire session. The
-        // deadline is per read now: a stream whose total lifetime far exceeds the idle
-        // budget survives as long as each gap between bytes stays under it.
+
         var subscription = new MoqSubscription(null!, "ns", "slow-and-steady");
         var parts = new List<(int, byte[])> { (0, SubgroupHeader(alias: 1, group: 7)) };
         for (uint i = 0; i < 8; i++)
         {
-            // 8 × 150 ms of lifetime against a 900 ms budget: the gaps keep a 750 ms
-            // cushion for CI runners whose Task.Delay continuations overshoot.
+
             parts.Add((150, Object(i == 0 ? 0UL : 1UL, (byte)(0xa0 + i))));
         }
 
@@ -98,13 +94,12 @@ public sealed class SessionPumpTests
     [Fact]
     public async Task SubgroupStream_StalledPastTheIdleBudget_RetiresAlone()
     {
-        // The other face of the idle deadline: a stream that stops delivering for good
-        // is abandoned after the budget — a stream-local retirement, not a session error.
+
         var subscription = new MoqSubscription(null!, "ns", "stalled");
         var stream = new DripStream(
             (0, SubgroupHeader(alias: 1, group: 7)),
             (0, Object(0, 0x11)),
-            (600, new byte[] { 0x01 })); // one byte of a torn object, then silence
+            (600, new byte[] { 0x01 }));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             MoqSessionPump.ProcessSubgroupStreamAsync(
@@ -117,9 +112,7 @@ public sealed class SessionPumpTests
     [Fact]
     public async Task FullSubscriberQueue_StallsItsOwnStream_NotTheOthers()
     {
-        // C-14b: a subscriber that stops reading used to throw when its 16-slot queue
-        // filled, failing every track. Backpressure is per track now: the slow stream's
-        // pump waits for its reader, and an unrelated track keeps flowing meanwhile.
+
         var slow = new MoqSubscription(null!, "ns", "slow-reader");
         var fast = new MoqSubscription(null!, "ns", "fast-reader");
 
@@ -137,9 +130,8 @@ public sealed class SessionPumpTests
 
         Task slowPump = MoqSessionPump.ProcessSubgroupStreamAsync(
             slowStream, (_, _) => Task.FromResult(slow), CancellationToken.None, Timeout);
-        await Task.Delay(300); // the slow pump fills its queue and blocks in EnqueueAsync
+        await Task.Delay(300);
 
-        // The fast track is untouched while the slow one is stalled at 16 queued objects.
         await MoqSessionPump.ProcessSubgroupStreamAsync(
             fastStream, (_, _) => Task.FromResult(fast), CancellationToken.None, Timeout).WaitAsync(Timeout);
         for (int i = 0; i < 3; i++)
@@ -147,7 +139,6 @@ public sealed class SessionPumpTests
             await fast.ReadAsync().AsTask().WaitAsync(Timeout);
         }
 
-        // Draining the slow reader unblocks its pump; all 20 objects arrive.
         for (int i = 0; i < 20; i++)
         {
             await slow.ReadAsync().AsTask().WaitAsync(Timeout);
@@ -159,9 +150,7 @@ public sealed class SessionPumpTests
     [Fact]
     public void PeerRequestGate_AdmitsTwoHundredRelayRequests_ByGrowingTheGrant()
     {
-        // C-14c: relay request IDs are odd and dense inside our grant (256 at setup);
-        // the 129th used to fail the session. The gate raises the grant before it thins
-        // out, so a long-lived session keeps admitting relay-originated requests.
+
         var gate = new MoqPeerRequestIds(256);
         int extensions = 0;
         for (int i = 0; i < 200; i++)
@@ -182,10 +171,10 @@ public sealed class SessionPumpTests
     public void PeerRequestGate_RejectsGapsRepeatsAndOvershoots()
     {
         var gate = new MoqPeerRequestIds(256);
-        Assert.Throws<MoqProtocolException>(() => gate.Admit(3)); // dense from 1
+        Assert.Throws<MoqProtocolException>(() => gate.Admit(3));
         gate.Admit(1);
-        Assert.Throws<MoqProtocolException>(() => gate.Admit(1)); // repeat
+        Assert.Throws<MoqProtocolException>(() => gate.Admit(1));
         gate.Admit(3);
-        Assert.Throws<MoqProtocolException>(() => gate.Admit(5 + 2_000)); // sequence, far beyond
+        Assert.Throws<MoqProtocolException>(() => gate.Admit(5 + 2_000));
     }
 }
