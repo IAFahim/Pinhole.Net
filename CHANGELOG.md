@@ -1,6 +1,30 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — fuzz harness over the untrusted-input parsers
+
+`src/Pinhole.Fuzz` is a dependency-free console fuzzer (net8.0;net10.0) whose
+engine is also linked by the test suite, so the same campaigns run as CI smoke
+gates and as long manual runs. A per-target seeded xorshift128+ stream drives
+a mutator (bit flips, interesting-byte spills, corpus splices, slice
+duplicate/delete, boundary-value inserts, truncation) over seed corpora built
+with the library's own writers — every corpus entry is valid by construction —
+and each input runs under a per-input timeout and size clamp. A finding is any
+exception outside the target's documented family (FormatException for the
+string parsers, InvalidDataException/IOException families on the wire
+readers), a timeout, or a successful parse that throws when re-encoded or
+when its accessors are swept; findings print target, seed, iteration, mutation
+lineage and the offending input as hex, and `--hex` replays one exactly.
+Eleven surfaces are covered: the connection string (text and wire), the blob
+ticket (text and wire), the blob manifest, the blob frame with a full
+accessor sweep, the DNS message and PTR/SRV/TXT readers, the STUN binding
+readers, the address record, the Iroh discovery payload, and the TCP frame
+reader — the last two are internal, so the test assembly (the only
+InternalsVisibleTo holder) registers them rather than the console. Gates:
+`FuzzSmokeTests` — every target for 3000 fixed-seed iterations plus a planted
+crash canary proving detection and hex replay (~0.5 s); 60 s per target of
+manual campaigning found nothing. Usage and target registry: `docs/FUZZ.md`.
+
 ## 1.10.0 (unreleased) — replay window rides out bursty seal/send inversion
 
 A sealed frame's counter is assigned in `Seal()` under the crypto lock, but the

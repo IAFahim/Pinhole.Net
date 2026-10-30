@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<Description>Deterministic seeded mutation fuzzer for Pinhole.Net untrusted-input parsers</Description>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Pinhole\Pinhole.csproj" />
+		<ProjectReference Include="..\Pinhole.Wire\Pinhole.Wire.csproj" />
+		<ProjectReference Include="..\Pinhole.Blobs\Pinhole.Blobs.csproj" />
+	</ItemGroup>
+
+</Project>
