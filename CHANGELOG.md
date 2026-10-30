@@ -1,6 +1,34 @@
 # Changelog
 
 
+## 1.10.0 (unreleased) — replay window rides out bursty seal/send inversion
+
+A sealed frame's counter is assigned in `Seal()` under the crypto lock, but the
+sendto happens after the lock is released — and during dial completion the
+engine seals a burst (PMTU probes, keepalive pings, the candidate announce) on
+the same connection, so under thread preemption an honest frame can reach the
+socket well after later counters have already left. The peer unwraps it far
+behind its window head: the 64-entry replay bitmap — sized as an anti-replay
+bound, not for reorder tolerance — refused such arrivals permanently. The
+forensics runs caught inversions up to ~245 counters deep (the engine burns
+~40 counters/second during the probe flood), which made the first
+post-Open payload vanish roughly every third loaded dial — the sibling of the
+`KnockDialerUnderCookieLoad` flake that survived the interface-slot fix.
+`ReplayWindow` is now a 1024-entry sliding ring in the RFC 6479 shape
+(position = counter mod 1024, advancing the head clears everything it passes
+over), still a zero-allocation value type; the anti-replay guarantee is
+unchanged — every sealed counter verifies at most once inside the window and
+anything older is refused by age — the window now simply spans the worst
+inversion the engine can produce instead of a quarter of it. A companion guard
+in `DirectPathConfirmed` stamps `MainDirectRxTicks` whenever sealed evidence
+arrives on the main socket, and a slot-sourced sealed arrival cannot re-adopt
+the direct endpoint while that stamp is under 2 s old, so a late slot copy can
+no longer flip a freshly confirmed main path even momentarily. Gates:
+`PrimitivesTests` (set-model, boundary, duplicate-suppression) against the new
+window; the loaded knock/cookie pair hammered 20x solo and 8 full batches of
+38 under 4-core synthetic load (the batch failed ~1-in-3 before); full suites
+green on net10.0 and net8.0.
+
 ## 1.10.0 (unreleased) — direct-path adoption stops chasing interface-slot endpoints
 
 Multi-homed hosts punch from per-interface UDP sockets alongside the main one;

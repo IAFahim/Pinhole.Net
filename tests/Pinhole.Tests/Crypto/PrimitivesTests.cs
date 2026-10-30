@@ -17,7 +17,8 @@ public sealed class PrimitivesTests
             for (int step = 0; step < 400; step++)
             {
                 ulong counter = (ulong)(rng.NextInt64(0, (long)highest + 80));
-                bool expectedAdmit = counter > highest || (highest - counter < 64 && !seen.Contains(counter));
+                bool expectedAdmit = counter > highest
+                    || (highest - counter < ReplayWindow.CapacityBits && !seen.Contains(counter));
                 Assert.Equal(expectedAdmit, window.Admits(counter));
 
                 if (expectedAdmit)
@@ -47,18 +48,23 @@ public sealed class PrimitivesTests
         w = w.Mark(200);
         Assert.False(w.Admits(200));
         Assert.True(w.Admits(137));
-        Assert.False(w.Admits(136));
+        Assert.True(w.Admits(136));
+        Assert.False(w.Admits(1));
         Assert.True(w.Admits(201));
 
-        w = w.Mark(195);
-        Assert.False(w.Admits(195));
-        Assert.True(w.Admits(196));
-        Assert.True(w.Admits(150));
-        w = w.Mark(196);
-        Assert.False(w.Admits(196));
+        w = w.Mark(1200);
+        Assert.False(w.Admits(1200));
+        Assert.False(w.Admits(176));
+        Assert.True(w.Admits(177));
+        Assert.True(w.Admits(201));
+
+        w = w.Mark(1195);
+        Assert.False(w.Admits(1195));
+        w = w.Mark(1196);
+        Assert.False(w.Admits(1196));
 
         ReplayWindow before = w;
-        w = w.Mark(3);
+        w = w.Mark(100);
         Assert.Equal(before, w);
     }
 

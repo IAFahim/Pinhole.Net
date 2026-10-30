@@ -66,6 +66,7 @@ internal sealed class ConnState
     public byte[]? PinnedKnock;
     public bool Announced;
     public long LastKickTicks = Environment.TickCount64;
+    public long MainDirectRxTicks;
     public volatile bool BlackholeDirect;
     public int PunchGeneration;
     public long DeadSinceTicks;
@@ -236,6 +237,7 @@ internal sealed partial class NodeEngine : IDisposable
     private ReadOnlySpan<byte> OwnMac1Key => _knockMac1Key ?? _identity!.PublicKey;
 
     internal const long HandshakeV4FallbackMs = 3000;
+    internal const long MainPathHoldMs = 2000;
     private long _nextRelayEnsureTicks;
     private int _relayEnsuring;
     private int _stunRefreshing;
@@ -4022,6 +4024,19 @@ internal sealed partial class NodeEngine : IDisposable
 
             if (c.Crypto is not null && (!c.Crypto.PeerConfirmed || arrival.Tcp is null && !sealedEvidence)) return;
             if (c.AwaitInitialCandidateExchange && !Volatile.Read(ref c.PeerCandidatesReceived)) return;
+
+            bool viaMainSocket = arrival.Tcp is null && arrival.UdpSocket is null;
+            if (sealedEvidence && viaMainSocket)
+            {
+                Volatile.Write(ref c.MainDirectRxTicks, Environment.TickCount64);
+            }
+            bool viaInterfaceSlot = arrival.Tcp is null && arrival.UdpSocket is { } candidate
+                && _interfaceUdp?.Contains(candidate) == true;
+            if (viaInterfaceSlot && c.DirectUdpSocket is null && c.DirectRemote is not null
+                && Environment.TickCount64 - Volatile.Read(ref c.MainDirectRxTicks) < MainPathHoldMs)
+            {
+                return;
+            }
 
             if (arrival.Tcp is { } tcp)
             {
