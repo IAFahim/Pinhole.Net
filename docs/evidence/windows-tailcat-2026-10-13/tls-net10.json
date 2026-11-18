@@ -1,0 +1,1410 @@
+{
+  "capturedAtUtc": "2026-10-13T08:24:08.5349329+00:00",
+  "framework": ".NET 10.0.12",
+  "os": "Microsoft Windows 10.0.22631",
+  "scope": "OS TLS only; normal certificate and hostname validation; no WebSocket/DERP authentication or peer connection",
+  "results": [
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "CCA509FF251F07ADACD6D7C72871CD51B1C4B1192C42E367E9BE32A84FC2997A"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "CCA509FF251F07ADACD6D7C72871CD51B1C4B1192C42E367E9BE32A84FC2997A"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "CCA509FF251F07ADACD6D7C72871CD51B1C4B1192C42E367E9BE32A84FC2997A"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "CCA509FF251F07ADACD6D7C72871CD51B1C4B1192C42E367E9BE32A84FC2997A"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "BE1C04C6734D19BDAC33EBE653BFA6A36E172C1A1DE881B82A936BDBAD5491AD"
+        },
+        {
+          "subject": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "238B85A0099C65B970477D5724F1A1D475CE5058CFFE4EFA8733899BDB863C47"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc304a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:172.238.7.124]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc304a.ipn.dev",
+          "issuer": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "BE1C04C6734D19BDAC33EBE653BFA6A36E172C1A1DE881B82A936BDBAD5491AD"
+        },
+        {
+          "subject": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "238B85A0099C65B970477D5724F1A1D475CE5058CFFE4EFA8733899BDB863C47"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "E8907393FF280C56DE294E3A3A132544BFA144D374186DEAF7C041142CC5BE69"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "E8907393FF280C56DE294E3A3A132544BFA144D374186DEAF7C041142CC5BE69"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "E8907393FF280C56DE294E3A3A132544BFA144D374186DEAF7C041142CC5BE69"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "E8907393FF280C56DE294E3A3A132544BFA144D374186DEAF7C041142CC5BE69"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "2EB9C7FAE1FD5093C241E69F894FD1B69C9519E910768981A6B91D03A234F6ED"
+        },
+        {
+          "subject": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "238B85A0099C65B970477D5724F1A1D475CE5058CFFE4EFA8733899BDB863C47"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc303a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:185.178.202.197]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc303a.ipn.dev",
+          "issuer": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "2EB9C7FAE1FD5093C241E69F894FD1B69C9519E910768981A6B91D03A234F6ED"
+        },
+        {
+          "subject": "CN=YR2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "238B85A0099C65B970477D5724F1A1D475CE5058CFFE4EFA8733899BDB863C47"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "72ABF97646A52515C44A2D18B68C8869C7DE30463C26E8683B5EEE56E40B1270"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "72ABF97646A52515C44A2D18B68C8869C7DE30463C26E8683B5EEE56E40B1270"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "72ABF97646A52515C44A2D18B68C8869C7DE30463C26E8683B5EEE56E40B1270"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "72ABF97646A52515C44A2D18B68C8869C7DE30463C26E8683B5EEE56E40B1270"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "F5CEAC3AC8D8006A9512020F2D0337F79C813865DBBF7E98AAD131DFA8B48F2A"
+        },
+        {
+          "subject": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "13949634D99CD6FD6AA80BC034FEFACCEB1969FEEF986586713ECDBB05758D3F"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc301a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:199.38.181.166]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc301a.ipn.dev",
+          "issuer": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "F5CEAC3AC8D8006A9512020F2D0337F79C813865DBBF7E98AAD131DFA8B48F2A"
+        },
+        {
+          "subject": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "13949634D99CD6FD6AA80BC034FEFACCEB1969FEEF986586713ECDBB05758D3F"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "A92EEB76D02AD3734402BE670FEC09C88CE98E3D65DDE38E0D14E57E3863E073"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "A92EEB76D02AD3734402BE670FEC09C88CE98E3D65DDE38E0D14E57E3863E073"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "A92EEB76D02AD3734402BE670FEC09C88CE98E3D65DDE38E0D14E57E3863E073"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "A92EEB76D02AD3734402BE670FEC09C88CE98E3D65DDE38E0D14E57E3863E073"
+        },
+        {
+          "subject": "CN=YE2, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YE, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "97658DE8C68DFA98ACE1E5028A63D54A1AAE911B3E21471076C6850CD08CBAB4"
+        },
+        {
+          "subject": "CN=Root YE, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "0FC0901CCA2BAE9E9FDBB02D50D02F1094F7B36672086991B9E897626DC485F0"
+        },
+        {
+          "subject": "CN=ISRG Root X2, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EE5F7ABD6981BB0255632CD8F49283451B4B18844D12040B44EE00F07B8FE2C6"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "00515B626814BA8DC59ABD16F9F3A10AC8202E2A00DA1B6972C894A42CDC274A"
+        },
+        {
+          "subject": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "13949634D99CD6FD6AA80BC034FEFACCEB1969FEEF986586713ECDBB05758D3F"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "tc302a.ipn.dev",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:208.111.39.38]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=tc302a.ipn.dev",
+          "issuer": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "00515B626814BA8DC59ABD16F9F3A10AC8202E2A00DA1B6972C894A42CDC274A"
+        },
+        {
+          "subject": "CN=YR1, O=Let\u0027s Encrypt, C=US",
+          "issuer": "CN=Root YR, O=ISRG, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "13949634D99CD6FD6AA80BC034FEFACCEB1969FEEF986586713ECDBB05758D3F"
+        },
+        {
+          "subject": "CN=Root YR, O=ISRG, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+        },
+        {
+          "subject": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "issuer": "CN=ISRG Root X1, O=Internet Security Research Group, C=US",
+          "signatureAlgorithm": "1.2.840.113549.1.1.11",
+          "publicKeyAlgorithm": "1.2.840.113549.1.1.1",
+          "sha256": "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "None",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "None",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls12",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls12",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls12",
+      "cipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls13",
+      "alpn": "none",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    },
+    {
+      "host": "github.com",
+      "requestedProtocols": "Tls13",
+      "alpn": "http/1.1",
+      "status": "PASS",
+      "remote": "[::ffff:20.207.73.82]:443",
+      "negotiated": "Tls13",
+      "cipher": "TLS_AES_128_GCM_SHA256",
+      "certificateValidationReached": true,
+      "policyErrors": "None",
+      "certificates": [
+        {
+          "subject": "CN=github.com",
+          "issuer": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.2",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "46B601EE08B418CF8A3A1EBFE670BA5CE43BB05A917FA8B2DD087A30471CFC63"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication CA DV E36, O=Sectigo Limited, C=GB",
+          "issuer": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "873F0BA80E3AC222656DFD04158CC15C2927D42D5D05F01DEE4A47EB43A916DF"
+        },
+        {
+          "subject": "CN=Sectigo Public Server Authentication Root E46, O=Sectigo Limited, C=GB",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "EA6B89ED6907A209FF9188676FB164E7ACED894B8996DFBE5CE5BBCC22DE4DDD"
+        },
+        {
+          "subject": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "issuer": "CN=USERTrust ECC Certification Authority, O=The USERTRUST Network, L=Jersey City, S=New Jersey, C=US",
+          "signatureAlgorithm": "1.2.840.10045.4.3.3",
+          "publicKeyAlgorithm": "1.2.840.10045.2.1",
+          "sha256": "4FF460D54B9C86DABFBCFC5712E0400D2BED3FBC4D4FBDAA86E06ADCD2A9AD7A"
+        }
+      ],
+      "chainStatus": [],
+      "errors": null
+    }
+  ]
+}

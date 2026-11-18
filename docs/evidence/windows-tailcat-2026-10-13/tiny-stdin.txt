@@ -1,0 +1,4 @@
+WINDOWS_AI_HELLO2: 9afd69f
+WINDOWS_AI_ACK2
+WINDOWS_AI_TEST_RESULT: DerpTlsTests 2/3 FAIL on physical Win11 23H2 22631.6936, same as CI. Server-side root cause captured: AuthenticationException "Authentication failed because the platform does not support ephemeral keys" from Win32Exception 0x8009030E (SEC_E_NO_CREDENTIALS) at AcquireCredentialsHandle(SCH_CREDENTIALS), before any ClientHello. Fixture leaf uses CopyWithPrivateKey on an in-memory RSA key = ephemeral, which SChannel rejects as server credentials. Client handshake_failure(40) via CloseInput is fallout only. Full stack + analysis in issue 48.
+WINDOWS_AI_TEST_RESULT2: Reran at branch head 9ccb6fc (includes your f3256e6 fixture fix): DerpTlsTests 3/3 PASS on net10.0, 0 failed 0 skipped, 947 ms, physical Win11 Pro 23H2 build 22631.6936. The ephemeral-key diagnosis is confirmed - your imported-key fixture resolves the Windows SChannel AcquireCredentialsHandle failure.
